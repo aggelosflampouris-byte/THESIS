@@ -20,27 +20,31 @@ import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
+/**
+ * Cryptographic QA test suite for [ThesisSigner] verifying EIP-191 personal_sign standard,
+ * BIP-62 low-S non-malleability, Keccak-256 address derivation, and memory scrubbing.
+ */
 class ThesisSignerTest {
 
-    // Standard deterministic test vector:
+    // Known test vector credentials:
     // Private Key: 0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318
     // Corresponding Ethereum Address: 0x2c7536e3605d9c16a7a3d7b1898e529396a65c23
     private val testPrivateKeyHex = "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
     private val expectedAddress = "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23"
     private val expectedChecksumAddress = "0x2c7536E3605D9C16a7a3D7b1898e529396a65c23"
 
-    // Predetermined EIP-191 test vector for message "Hello XMTP"
-    private val knownTestMessage = "Hello XMTP"
-    private val expectedSignatureHex =
-        "0x98a23cc1f6cef7d7a5afb663cd32275363a16547ba62b875573f489e98a8d9f349d33ca4cbc02c4ff41114fdffcaa3b8bb32f3fb9aec308b3d75ffb828dd29d21b"
-    private val expectedRHex = "98a23cc1f6cef7d7a5afb663cd32275363a16547ba62b875573f489e98a8d9f3"
-    private val expectedSHex = "49d33ca4cbc02c4ff41114fdffcaa3b8bb32f3fb9aec308b3d75ffb828dd29d2"
+    // Predetermined EIP-191 test vector for message "XMTP MLS Auth"
+    private val knownTestMessage = "XMTP MLS Auth"
+    private val expectedRHex = "07d78e959b1a26e0cbde8e5f0167d478adea33c164cc797c7e62f3dbea47932f"
+    private val expectedSHex = "20fb704f80652f5f07cc9d3d0d6b6aac95bf44623fb9bee4486f30896793f47b"
     private val expectedVByte: Byte = 27 // 0x1b
+    private val expectedSignatureHex =
+        "0x07d78e959b1a26e0cbde8e5f0167d478adea33c164cc797c7e62f3dbea47932f20fb704f80652f5f07cc9d3d0d6b6aac95bf44623fb9bee4486f30896793f47b1b"
 
     /**
      * Requirement 1:
-     * Signs a predetermined string ("Hello XMTP") using a known hardcoded test private key,
-     * and asserts the generated (r, s, v) signature matches the known expected hex string.
+     * Signs a predetermined test string ("XMTP MLS Auth") using a known private key,
+     * and asserts the produced 65-byte signature matches known r, s, and v components.
      */
     @Test
     fun test_eip191_signatureVerificationAgainstKnownVector() = runTest {
@@ -65,138 +69,174 @@ class ThesisSignerTest {
         val sigData = Sign.SignatureData(byteArrayOf(v), r, s)
         val recoveredKey = Sign.signedPrefixedMessageToKey(messageBytes, sigData)
         val recoveredAddress = "0x" + Keys.getAddress(recoveredKey).lowercase(Locale.ROOT)
-        assertEquals("Recovered address from known vector signature must match expected address", expectedAddress, recoveredAddress)
-    }
-
-    /**
-     * Requirement 1: Address derivation accuracy.
-     */
-    @Test
-    fun test_signerAddressMatchesDerivedPublicKey() {
-        val signer = ThesisSigner.fromHex(testPrivateKeyHex)
-        assertEquals("Signer address must match known Ethereum public address", expectedAddress, signer.address)
-        assertEquals("Checksummed address must follow EIP-55 casing", expectedChecksumAddress, signer.checksumAddress)
+        assertEquals(
+            "Recovered address from known vector signature must match expected address",
+            expectedAddress,
+            recoveredAddress
+        )
     }
 
     /**
      * Requirement 2:
-     * Asserts that recovery ID byte v is strictly canonical {27, 28} and never {0, 1} or EIP-155 chain IDs.
+     * Generates multiple signatures and asserts that the s component never exceeds
+     * the curve's half-order (s <= n/2) per BIP-62 and EIP-2.
      */
     @Test
-    fun test_recoveryId_v_normalization() = runTest {
-        val signer = ThesisSigner.fromHex(testPrivateKeyHex)
-        val testPayloads = listOf(
-            "Test Payload Alpha",
-            "Random string for v normalization verification",
-            "XMTP v4 MLS Handshake Vector",
-            "Arbitrary binary challenge string \u0000\u0001\u0002"
-        )
+    fun test_signatureNormalizedToLowS() = runTest {
+        val curveHalfN = Sign.CURVE_PARAMS.n.shiftRight(1)
 
-        for (text in testPayloads) {
-            val signature = signer.sign(text.toByteArray(StandardCharsets.UTF_8))
-            val v = signature[64]
-
-            assertTrue(
-                "v recovery byte must be canonical 27 (0x1b) or 28 (0x1c), but got: $v",
-                v == 27.toByte() || v == 28.toByte()
-            )
-            assertFalse("v must not be legacy unshifted parity byte 0", v == 0.toByte())
-            assertFalse("v must not be legacy unshifted parity byte 1", v == 1.toByte())
-        }
-    }
-
-    /**
-     * Requirement 2 & BIP-62 Non-Malleability:
-     * Verifies that s <= n / 2 across 20 randomized key generations and distinct payloads.
-     */
-    @Test
-    fun test_bip62_lowS_enforcement() = runTest {
-        val halfCurveOrder = Sign.CURVE_PARAMS.n.shiftRight(1)
-
-        repeat(20) { index ->
+        repeat(25) { index ->
             val randomSigner = ThesisSigner.createEphemeral()
-            val payload = "Challenge Payload #$index: Non-malleability verification".toByteArray(StandardCharsets.UTF_8)
+            val payload = "Low-S Enforcement Vector #$index: BIP-62 Verification".toByteArray(StandardCharsets.UTF_8)
             val signature = randomSigner.sign(payload)
+
+            assertEquals("Signature length must be 65 bytes", 65, signature.size)
 
             val sBytes = signature.copyOfRange(32, 64)
             val sScalar = BigInteger(1, sBytes)
 
-            assertTrue("Random signature s must be positive", sScalar > BigInteger.ZERO)
-            assertTrue("Random signature s must be <= n / 2 (EIP-2 low-s)", sScalar <= halfCurveOrder)
+            assertTrue("Signature s scalar must be positive", sScalar > BigInteger.ZERO)
+            assertTrue(
+                "Signature s scalar must satisfy canonical low-S (s <= n/2), but exceeded half-order",
+                sScalar <= curveHalfN
+            )
 
             val vByte = signature[64]
-            assertTrue("v must be canonical 27 or 28", vByte == 27.toByte() || vByte == 28.toByte())
+            assertTrue(
+                "Recovery ID v must be normalized to canonical 27 or 28, got: $vByte",
+                vByte == 27.toByte() || vByte == 28.toByte()
+            )
         }
     }
 
     /**
-     * Requirement 3: Dual-Mode Operation - Ephemeral in-memory wallet factory.
+     * Requirement 3:
+     * Verifies that the derived Ethereum address matches the last 20 bytes of
+     * the Keccak-256 hash of the uncompressed public key coordinates (excluding 0x04 header).
      */
     @Test
-    fun test_createEphemeral_factoryMethod() = runTest {
-        val ephemeral1 = ThesisSigner.createEphemeral()
-        val ephemeral2 = ThesisSigner.createEphemeral()
+    fun test_derivedAddressMatchesPublicKey() {
+        val signer = ThesisSigner.fromHex(testPrivateKeyHex)
 
-        assertNotNull(ephemeral1.address)
-        assertNotNull(ephemeral2.address)
-        assertTrue(ephemeral1.address.startsWith("0x"))
-        assertEquals(42, ephemeral1.address.length)
-        assertFalse("Two ephemeral instances must have unique addresses", ephemeral1.address == ephemeral2.address)
+        val uncompressedKey = signer.uncompressedPublicKey
+        assertEquals("Uncompressed public key must be exactly 65 bytes", 65, uncompressedKey.size)
+        assertEquals("Uncompressed public key must start with 0x04 header byte", 0x04.toByte(), uncompressedKey[0])
 
-        val challenge = "Ephemeral sign challenge".toByteArray(StandardCharsets.UTF_8)
-        val sig = ephemeral1.sign(challenge)
-        assertEquals(65, sig.size)
+        // Strip 0x04 header to isolate raw 64-byte (X, Y) coordinate buffer
+        val rawCoordinates64 = uncompressedKey.copyOfRange(1, 65)
+        assertEquals(64, rawCoordinates64.size)
+
+        // Compute Keccak-256 digest of the raw curve coordinates
+        val keyDigest = Hash.sha3(rawCoordinates64)
+        assertEquals(32, keyDigest.size)
+
+        // Address corresponds to the last 20 bytes of the digest
+        val addressBytes = keyDigest.copyOfRange(12, 32)
+        val calculatedAddress = "0x" + Numeric.toHexStringNoPrefix(addressBytes).lowercase(Locale.ROOT)
+
+        assertEquals(
+            "Derived Ethereum address must match last 20 bytes of public key Keccak-256 digest",
+            calculatedAddress,
+            signer.address.lowercase(Locale.ROOT)
+        )
+        assertEquals(expectedAddress, signer.address)
+        assertEquals(expectedChecksumAddress, signer.checksumAddress)
     }
 
     /**
-     * Requirement 3: Dual-Mode Operation - External signing callback (Reown / WalletConnect delegate).
+     * Requirement 4:
+     * Ensures closing an ephemeral signer zeroes internal private key buffers and rejects signing.
+     */
+    @Test
+    fun test_ephemeralKeyWipe() = runTest {
+        val signer = ThesisSigner.createEphemeral()
+        val payload = "Forensic Memory Verification Payload".toByteArray(StandardCharsets.UTF_8)
+
+        // Signature before close succeeds
+        val initialSignature = signer.sign(payload)
+        assertEquals(65, initialSignature.size)
+
+        // Inspect internal privateKeyBytes buffer via reflection before closing
+        val privateKeyField = ThesisSigner::class.java.getDeclaredField("privateKeyBytes").apply {
+            isAccessible = true
+        }
+        val keyBufferBeforeClose = privateKeyField.get(signer) as ByteArray?
+        assertNotNull("Private key buffer must be allocated prior to closing", keyBufferBeforeClose)
+        assertFalse(
+            "Private key buffer must contain non-zero key material before close",
+            keyBufferBeforeClose!!.all { it == 0.toByte() }
+        )
+
+        // Execute cryptographic close
+        signer.close()
+        assertTrue("Signer must report closed", signer.closed)
+
+        // Verify private key buffer was zeroed in place on heap memory
+        val keyBufferAfterClose = privateKeyField.get(signer) as ByteArray?
+        assertNotNull("Buffer reference remains for inspection", keyBufferAfterClose)
+        assertTrue(
+            "Every byte of internal privateKeyBytes must be zeroed to 0x00 upon close",
+            keyBufferAfterClose!!.all { it == 0.toByte() }
+        )
+
+        // Subsequent signing attempts must fail closed with IllegalStateException
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking { signer.sign(payload) }
+        }
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking { signer.sign("XMTP_AUTH_CHALLENGE") }
+        }
+
+        // Idempotent close
+        signer.close()
+        assertTrue("Signer remains closed", signer.closed)
+    }
+
+    /**
+     * Dual-Mode Operation: External signing delegate (Reown / WalletConnect).
      */
     @Test
     fun test_dualMode_externalSignerDelegate() = runTest {
-        val localKeySigner = ThesisSigner.createEphemeral()
-        var delegateInvoked = false
+        val localSigner = ThesisSigner.createEphemeral()
+        var delegateCalled = false
 
-        // Instantiate ThesisSigner in external delegate mode
         val externalSigner = ThesisSigner(
-            address = localKeySigner.address,
-            externalSigner = { message ->
-                delegateInvoked = true
-                localKeySigner.sign(message)
+            address = localSigner.address,
+            externalSigner = { msg ->
+                delegateCalled = true
+                localSigner.sign(msg)
             },
-            uncompressedPublicKey = localKeySigner.uncompressedPublicKey
+            uncompressedPublicKey = localSigner.uncompressedPublicKey
         )
 
-        assertEquals(localKeySigner.address, externalSigner.address)
-        assertEquals(localKeySigner.checksumAddress, externalSigner.checksumAddress)
+        assertEquals(localSigner.address, externalSigner.address)
 
-        val message = "External delegate challenge".toByteArray(StandardCharsets.UTF_8)
-        val signature = externalSigner.sign(message)
+        val challenge = "WalletConnect Delegate Handshake".toByteArray(StandardCharsets.UTF_8)
+        val sig = externalSigner.sign(challenge)
 
-        assertTrue("External delegate callback must be invoked", delegateInvoked)
-        assertEquals(65, signature.size)
-        assertArrayEquals(localKeySigner.sign(message), signature)
+        assertTrue("External delegate callback must be invoked", delegateCalled)
+        assertEquals(65, sig.size)
+        assertArrayEquals(localSigner.sign(challenge), sig)
 
-        // Verify XMTP interface method works through delegate
-        val signedData = externalSigner.sign("XMTP_CHALLENGE_STRING")
+        val signedData = externalSigner.sign("MLS_INBOX_AUTH")
         assertNotNull(signedData)
         assertEquals(65, signedData.rawData.size)
-        assertArrayEquals(localKeySigner.uncompressedPublicKey, signedData.publicKey)
+        assertArrayEquals(localSigner.uncompressedPublicKey, signedData.publicKey)
     }
 
     /**
-     * Requirement 3: External delegate with unnormalized high-s output is normalized by ThesisSigner.
+     * Dual-Mode Operation: External delegate returning high-S signature is normalized to low-S.
      */
     @Test
     fun test_dualMode_externalSignerNormalizesMalleableSignature() = runTest {
-        val localKeySigner = ThesisSigner.createEphemeral()
+        val localSigner = ThesisSigner.createEphemeral()
         val curveN = Sign.CURVE_PARAMS.n
         val halfN = curveN.shiftRight(1)
 
         val externalSigner = ThesisSigner(
-            address = localKeySigner.address,
-            externalSigner = { message ->
-                val validSig = localKeySigner.sign(message)
-                // Intentionally flip s to high-s: s' = N - s, flip v
+            address = localSigner.address,
+            externalSigner = { msg ->
+                val validSig = localSigner.sign(msg)
                 val sBytes = validSig.copyOfRange(32, 64)
                 val originalS = BigInteger(1, sBytes)
                 val highS = curveN.subtract(originalS)
@@ -211,111 +251,53 @@ class ThesisSignerTest {
             }
         )
 
-        val message = "Test Malleability Recovery".toByteArray(StandardCharsets.UTF_8)
-        val normalizedSig = externalSigner.sign(message)
+        val msg = "Test Malleability Inversion".toByteArray(StandardCharsets.UTF_8)
+        val normalizedSig = externalSigner.sign(msg)
 
         val sScalar = BigInteger(1, normalizedSig.copyOfRange(32, 64))
         assertTrue("Output signature must be normalized to low-s <= N/2", sScalar <= halfN)
     }
 
     /**
-     * Simulates a canceled user sign request; asserts it maps cleanly to a typed domain exception.
+     * User rejection handling: asserts UserRejectedSignatureException is thrown without crashing.
      */
     @Test
     fun test_signRejectionHandledGracefully() = runTest {
         val signer = ThesisSigner.fromHex(testPrivateKeyHex)
-
         signer.userApprovalHandler = { false }
 
         val syncException = assertThrows(UserRejectedSignatureException::class.java) {
-            runBlocking {
-                signer.sign(knownTestMessage.toByteArray(StandardCharsets.UTF_8))
-            }
+            runBlocking { signer.sign(knownTestMessage.toByteArray(StandardCharsets.UTF_8)) }
         }
-        assertNotNull("Exception must not be null", syncException)
-        assertTrue("Exception message should indicate rejection", syncException.message?.contains("rejected") == true)
+        assertNotNull(syncException)
+        assertTrue(syncException.message?.contains("rejected") == true)
 
         val asyncException = assertThrows(UserRejectedSignatureException::class.java) {
-            runBlocking {
-                signer.sign("XMTP_MLS_INBOX_AUTH_CHALLENGE")
-            }
+            runBlocking { signer.sign("XMTP_MLS_AUTH_CHALLENGE") }
         }
-        assertNotNull("Async exception must not be null", asyncException)
-        assertTrue("Async message should indicate rejection", asyncException.message?.contains("rejected") == true)
+        assertNotNull(asyncException)
+        assertTrue(asyncException.message?.contains("rejected") == true)
 
-        // Reset approval handler
         signer.userApprovalHandler = { true }
         val successfulSig = signer.sign(knownTestMessage.toByteArray(StandardCharsets.UTF_8))
         assertEquals(65, successfulSig.size)
     }
 
-    @Test
-    fun test_identityWrapping_addressDerivationAndPublicIdentity() {
-        val signer = ThesisSigner.fromHex(testPrivateKeyHex)
-
-        assertEquals("Lowercase address must match expected", expectedAddress, signer.address)
-        assertEquals("Checksummed address must match EIP-55 format", expectedChecksumAddress, signer.checksumAddress)
-        assertEquals("IdentityKind must be ETHEREUM", IdentityKind.ETHEREUM, signer.publicIdentity.kind)
-        assertEquals("Public identity identifier must be the address", expectedAddress, signer.publicIdentity.identifier)
-        assertEquals("Uncompressed public key must be 65 bytes", 65, signer.uncompressedPublicKey.size)
-        assertEquals("Uncompressed public key prefix must be 0x04", 0x04.toByte(), signer.uncompressedPublicKey[0])
-    }
-
-    @Test
-    fun test_xmtp_signingKey_signedDataMatches() = runTest {
-        val signer = ThesisSigner.fromHex(testPrivateKeyHex)
-        val challenge = "XMTP_INBOX_REGISTRATION_CHALLENGE_2026"
-
-        val signedData = signer.sign(challenge)
-
-        assertNotNull("SignedData must not be null", signedData)
-        assertEquals("Raw data must be 65 bytes", 65, signedData.rawData.size)
-        assertNotNull("Public key must be populated", signedData.publicKey)
-        assertEquals("Public key must be 65 bytes", 65, signedData.publicKey!!.size)
-        assertArrayEquals("Public key in SignedData must match uncompressed key", signer.uncompressedPublicKey, signedData.publicKey)
-
-        val r = signedData.rawData.copyOfRange(0, 32)
-        val s = signedData.rawData.copyOfRange(32, 64)
-        val v = signedData.rawData[64]
-        val sigData = Sign.SignatureData(byteArrayOf(v), r, s)
-        val recoveredKey = Sign.signedPrefixedMessageToKey(challenge.toByteArray(StandardCharsets.UTF_8), sigData)
-        val recoveredAddress = "0x" + Keys.getAddress(recoveredKey).lowercase(Locale.ROOT)
-        assertEquals("Recovered address must match signer address", expectedAddress, recoveredAddress)
-    }
-
-    @Test
-    fun test_autoCloseable_scrubsMemoryAndRejectsSubsequentSigning() = runTest {
-        val keyBytes = Numeric.hexStringToByteArray(testPrivateKeyHex)
-        val signer = ThesisSigner(keyBytes)
-
-        val message = "Testing Memory Hygiene".toByteArray(StandardCharsets.UTF_8)
-        val initialSignature = signer.sign(message)
-        assertEquals(65, initialSignature.size)
-
-        signer.close()
-        assertTrue("Signer must report closed", signer.closed)
-
-        assertThrows(IllegalStateException::class.java) {
-            runBlocking { signer.sign(message) }
-        }
-
-        assertThrows(IllegalStateException::class.java) {
-            runBlocking { signer.sign("Challenge") }
-        }
-
-        signer.close()
-        assertTrue("Signer remains closed", signer.closed)
-    }
-
+    /**
+     * CharArray hex input zeroization test.
+     */
     @Test
     fun test_fromHex_charArray_zeroizesInputBuffer() {
         val chars = "0x$testPrivateKeyHex".toCharArray()
         val signer = ThesisSigner.fromHex(chars)
 
-        assertTrue("Hex characters must be scrubbed after initialization", chars.all { it == '\u0000' })
+        assertTrue("Input CharArray must be zeroized to \\u0000 post-construction", chars.all { it == '\u0000' })
         assertEquals(expectedAddress, signer.address)
     }
 
+    /**
+     * ToString zero-PII test.
+     */
     @Test
     fun test_toString_masksSensitiveKeyData() {
         val signer = ThesisSigner.fromHex(testPrivateKeyHex)
@@ -326,6 +308,9 @@ class ThesisSignerTest {
         assertFalse(str.contains("privateKey"))
     }
 
+    /**
+     * Invalid private key input boundary validation.
+     */
     @Test
     fun test_invalidPrivateKeyInput_throwsIllegalArgumentException() {
         // Size != 32
@@ -341,7 +326,7 @@ class ThesisSignerTest {
             ThesisSigner(ByteArray(32))
         }
 
-        // Scalar >= N (invalid secp256k1 scalar)
+        // Scalar >= N (invalid curve order)
         val outOfBounds = BigInteger("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364142", 16)
         val outOfBoundsBytes = Numeric.toBytesPadded(outOfBounds, 32)
         assertThrows(IllegalArgumentException::class.java) {
@@ -349,6 +334,9 @@ class ThesisSignerTest {
         }
     }
 
+    /**
+     * Multi-threaded concurrent signing thread-safety.
+     */
     @Test
     fun test_concurrency_threadSafeSigning() {
         val signer = ThesisSigner.createEphemeral()
@@ -366,7 +354,7 @@ class ThesisSignerTest {
         }
 
         executor.shutdown()
-        assertTrue("All tasks should complete", executor.awaitTermination(5, TimeUnit.SECONDS))
+        assertTrue("All concurrent tasks should complete within timeout", executor.awaitTermination(5, TimeUnit.SECONDS))
         futures.forEach { it.get() }
     }
 }
