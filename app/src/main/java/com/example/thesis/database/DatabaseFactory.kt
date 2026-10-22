@@ -48,17 +48,12 @@ class DatabaseFactory(context: Context) {
 
         val ETHEREUM_ADDRESS_REGEX: Regex = Regex("^0[xX][0-9a-fA-F]{40}$")
 
-        fun sanitiseEthereumAddress(address: String): String? {
-            val trimmed = address.trim()
-            return if (ETHEREUM_ADDRESS_REGEX.matches(trimmed)) {
-                trimmed.lowercase()
-            } else {
-                null
-            }
-        }
+        /**
+         * Validates and normalizes Ethereum address. Delegated to [CryptoUtils.sanitiseEthereumAddress].
+         */
+        fun sanitiseEthereumAddress(address: String): String? = CryptoUtils.sanitiseEthereumAddress(address)
 
-        fun sanitizeEthereumAddress(address: String): String? =
-            sanitiseEthereumAddress(address)
+        fun sanitizeEthereumAddress(address: String): String? = CryptoUtils.sanitiseEthereumAddress(address)
     }
 
     private val defaultErrorHandler: DatabaseErrorHandler = DefaultDatabaseErrorHandler()

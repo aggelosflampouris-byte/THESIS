@@ -3,6 +3,7 @@ package com.example.thesis.security
 import android.content.Context
 import android.util.Log
 import com.example.thesis.database.DatabaseFactory
+import com.example.thesis.util.CryptoUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
@@ -31,8 +32,8 @@ import java.io.RandomAccessFile
  */
 class CryptoShredder(
     context: Context,
-    private val keystoreManager: KeystoreManager = KeystoreManager(context),
-    private val databaseFactory: DatabaseFactory = DatabaseFactory(context)
+    private val keystoreManager: KeystoreManager = KeystoreManager(context.applicationContext),
+    private val databaseFactory: DatabaseFactory = DatabaseFactory(context.applicationContext)
 ) {
     companion object {
         private const val TAG: String = "CryptoShredder"
@@ -47,7 +48,7 @@ class CryptoShredder(
      *         was purged but some files failed physical removal, or a typed [ShredResult.Failure].
      */
     suspend fun shredAccountData(ethAddress: String): ShredResult = withContext(Dispatchers.IO) {
-        val sanitisedAddress = DatabaseFactory.sanitiseEthereumAddress(ethAddress)
+        val sanitisedAddress = CryptoUtils.sanitiseEthereumAddress(ethAddress)
             ?: return@withContext ShredResult.Failure.InvalidAddress(
                 message = "Address format validation failed. No erasure sequence initiated."
             )

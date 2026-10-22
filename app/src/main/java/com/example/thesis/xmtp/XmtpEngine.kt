@@ -57,12 +57,14 @@ import java.util.Locale
  * @param environment     Target XMTP network environment (e.g. [XMTPEnvironment.PRODUCTION]).
  */
 class XmtpEngine(
-    private val context: Context,
-    private val keystoreManager: KeystoreManager = KeystoreManager(context),
-    private val databaseFactory: DatabaseFactory = DatabaseFactory(context),
+    context: Context,
+    private val keystoreManager: KeystoreManager = KeystoreManager(context.applicationContext),
+    private val databaseFactory: DatabaseFactory = DatabaseFactory(context.applicationContext),
     private val environment: XMTPEnvironment = XMTPEnvironment.PRODUCTION,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) {
+
+    private val appContext: Context = context.applicationContext
 
     // ────────────────────────────────────────────────────────────────────────
     //  State Flow (Unidirectional Data Flow)
@@ -207,7 +209,7 @@ class XmtpEngine(
         var dekToZero: ByteArray? = null
         try {
             val address = signer.publicIdentity.identifier
-            val sanitisedAddress = DatabaseFactory.sanitiseEthereumAddress(address)
+            val sanitisedAddress = CryptoUtils.sanitiseEthereumAddress(address)
                 ?: return@withContext XmtpEngineState.Error(
                     XmtpInitError.IdentityError(
                         message = "Invalid Ethereum address format for identity: $address",
@@ -246,7 +248,7 @@ class XmtpEngine(
                     env = environment,
                     isSecure = true
                 ),
-                appContext = context.applicationContext,
+                appContext = this@XmtpEngine.appContext,
                 dbDirectory = dbDirectory.absolutePath,
                 dbEncryptionKey = dekBytes
             )

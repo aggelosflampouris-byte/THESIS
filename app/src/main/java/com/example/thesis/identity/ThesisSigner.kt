@@ -1,6 +1,5 @@
 package com.example.thesis.identity
 
-import com.example.thesis.database.DatabaseFactory
 import com.example.thesis.util.CryptoUtils
 import kotlinx.coroutines.runBlocking
 import org.web3j.crypto.ECKeyPair
@@ -129,7 +128,7 @@ class ThesisSigner : SigningKey, AutoCloseable {
         externalSigner: ExternalSignerCallback,
         uncompressedPublicKey: ByteArray? = null
     ) {
-        val sanitized = checkNotNull(DatabaseFactory.sanitiseEthereumAddress(address)) {
+        val sanitized = checkNotNull(CryptoUtils.sanitiseEthereumAddress(address)) {
             "Invalid Ethereum address format for external signer: $address"
         }
         this.address = sanitized

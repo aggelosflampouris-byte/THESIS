@@ -1,7 +1,6 @@
 package com.example.thesis.repository
 
 import android.util.Log
-import com.example.thesis.database.DatabaseFactory
 import com.example.thesis.util.CryptoUtils
 import com.example.thesis.xmtp.XmtpEngine
 import com.example.thesis.xmtp.XmtpEngineState
@@ -277,7 +276,7 @@ class ConversationRepository(
      * @return [Result.success] containing the resolved [Conversation], or [Result.failure].
      */
     suspend fun createConversation(peerAddress: String): Result<Conversation> = withContext(ioDispatcher) {
-        val sanitisedAddress = DatabaseFactory.sanitiseEthereumAddress(peerAddress)
+        val sanitisedAddress = CryptoUtils.sanitiseEthereumAddress(peerAddress)
             ?: return@withContext Result.failure(
                 IllegalArgumentException("Invalid Ethereum address format: $peerAddress")
             )

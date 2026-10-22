@@ -53,7 +53,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.thesis.database.DatabaseFactory
+import com.example.thesis.util.CryptoUtils
 import com.example.thesis.repository.ConversationRepository
 import kotlinx.coroutines.launch
 import org.xmtp.android.library.Conversation
@@ -372,7 +372,7 @@ private fun NewConversationDialog(
             Button(
                 enabled = !isCreating && peerAddressInput.isNotBlank(),
                 onClick = {
-                    val sanitised = DatabaseFactory.sanitiseEthereumAddress(peerAddressInput)
+                    val sanitised = CryptoUtils.sanitiseEthereumAddress(peerAddressInput)
                     if (sanitised == null) {
                         errorMessage = "Invalid Ethereum address format (must be 0x followed by 40 hex digits)"
                         return@Button

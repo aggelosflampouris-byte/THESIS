@@ -3,6 +3,8 @@ package com.example.thesis.util
 import java.io.IOException
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.util.Locale
+import java.util.regex.Pattern
 
 /**
  * Internal cryptographic utility object.
@@ -15,8 +17,37 @@ import java.security.SecureRandom
  * - [secureRandom]: `SecureRandom` is thread-safe per the JDK specification.
  * - [sha256Hex]: Allocates a new [MessageDigest] per call (stateless, no shared mutable state).
  * - [hexCharArrayToBytes]: Operates exclusively on caller-supplied buffers.
+ * - [sanitiseEthereumAddress]: Pure, stateless string sanitization and regex validation.
  */
 object CryptoUtils {
+
+    private val ETH_ADDRESS_REGEX: Regex = Pattern.compile("^0[xX][0-9a-fA-F]{40}$").toRegex()
+
+    // ────────────────────────────────────────────────────────────────────────
+    //  Address Format Validation & Normalization
+    // ────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Validates and normalizes an Ethereum address string conforming to standard EIP-55 hex representation.
+     *
+     * Validates strictly:
+     * - Must start with '0x' or '0X' prefix.
+     * - Must be followed by exactly 40 hexadecimal characters (`[0-9a-fA-F]{40}`).
+     * - Trailing or leading whitespace is trimmed prior to validation.
+     *
+     * @param address Raw candidate Ethereum address string.
+     * @return Canonical lowercase address (42 characters: `0x...`) if valid, or `null` if invalid.
+     */
+    fun sanitiseEthereumAddress(address: String): String? {
+        val trimmed = address.trim()
+        if (!ETH_ADDRESS_REGEX.matches(trimmed)) return null
+        return trimmed.lowercase(Locale.ROOT)
+    }
+
+    /**
+     * Convenience check returning true if [address] matches standard Ethereum hex address format.
+     */
+    fun isValidEthereumAddress(address: String): Boolean = sanitiseEthereumAddress(address) != null
 
     // ────────────────────────────────────────────────────────────────────────
     //  Entropy Source
@@ -37,9 +68,6 @@ object CryptoUtils {
 
     /**
      * Computes the lowercase hex-encoded SHA-256 digest of [input].
-     *
-     * Previously declared as a `private fun sha256Hex()` inside [com.example.thesis.database.DatabaseFactory].
-     * Extracted here to enable reuse without exposing `DatabaseFactory` internals.
      *
      * A fresh [MessageDigest] instance is created on every call — `MessageDigest` is not thread-safe
      * and must not be shared across coroutines without synchronization.
@@ -65,8 +93,6 @@ object CryptoUtils {
      * - The returned [ByteArray] must be zeroized by the caller after use.
      * - This function does NOT allocate any [String] from [hexChars]; it reads characters
      *   directly via index access to prevent JVM string-pool retention of key material.
-     *
-     * Previously inlined in [com.example.thesis.identity.ThesisSigner.fromHex].
      *
      * @param hexChars Hex characters, optionally prefixed with `0x` or `0X`.
      * @param expectedByteLength Expected number of decoded bytes; used for validation.
@@ -109,12 +135,7 @@ object CryptoUtils {
     /**
      * Returns `true` if [throwable] is a transient network/gRPC failure that warrants retry.
      *
-     * Previously duplicated as `private fun isNetworkError()` in [com.example.thesis.xmtp.XmtpEngine]
-     * and `private fun isRecoverableNetworkError()` in [com.example.thesis.repository.ConversationRepository],
-     * with divergent keyword sets. This consolidated implementation is the union of both sets,
-     * closing the classification gap.
-     *
-     * Matching is performed on the lowercased message string to avoid locale-dependent comparisons.
+     * Consolidated error classifier covering transport resets, timeouts, DNS failures, and gRPC status codes.
      *
      * @param throwable The exception to classify.
      */
