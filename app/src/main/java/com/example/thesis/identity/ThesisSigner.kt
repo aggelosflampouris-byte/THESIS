@@ -16,6 +16,7 @@ import org.xmtp.android.library.libxmtp.PublicIdentity
 import java.math.BigInteger
 import java.nio.charset.StandardCharsets
 import java.security.SecureRandom
+import java.security.SignatureException
 import java.util.Arrays
 import java.util.Locale
 
@@ -41,7 +42,7 @@ typealias ExternalSignerCallback = suspend (message: ByteArray) -> ByteArray
  * 1. **EIP-191 Personal Sign Standard**: Prepends `"\x19Ethereum Signed Message:\n" + message.length + message`
  *    before Keccak-256 hashing to eliminate cross-protocol collision and transaction replay vulnerabilities.
  * 2. **BIP-62 / EIP-2 Low-S Non-Malleability**: Guarantees canonical curve scalar output (`s <= n / 2`).
- *    Automatically inverts malleable high-s components (`s' = n - s`) and adjusts recovery ID parity (`v`).
+ *    Automatically inverts malleable high-s components (`s' = n - s`) and flips recovery ID parity (`v`).
  * 3. **Dual-Mode Operation**:
  *    - **Local In-Memory Mode**: Retains private key bytes securely in memory with zeroization upon [close].
  *    - **External Delegate Mode**: Delegates `personal_sign` challenges to remote wallets (Reown / WalletConnect)
@@ -247,29 +248,39 @@ class ThesisSigner : SigningKey, AutoCloseable {
 
     /**
      * Enforces BIP-62 / EIP-2 low-S normalization and canonical recovery byte {27, 28}.
+     *
+     * Mathematically handles legacy {0, 1}, canonical {27, 28}, and EIP-155 chain-specific v values.
+     * Inverts s to n - s when s > n / 2 and flips recovery parity accordingly.
      */
     private fun normalizeSignature(rawSignature: ByteArray): ByteArray {
         val r = rawSignature.copyOfRange(SIGNATURE_R_OFFSET, SIGNATURE_S_OFFSET)
         val s = rawSignature.copyOfRange(SIGNATURE_S_OFFSET, SIGNATURE_V_OFFSET)
         var sScalar = BigInteger(1, s)
-        var rawV = rawSignature[SIGNATURE_V_OFFSET].toInt() and 0xFF
+        val rawV = rawSignature[SIGNATURE_V_OFFSET].toInt() and 0xFF
 
-        if (sScalar > SECP256K1_HALF_N) {
-            sScalar = SECP256K1_N.subtract(sScalar)
-            rawV = if (rawV == 27 || rawV == 0) 28 else 27
+        require(sScalar > BigInteger.ZERO && sScalar < SECP256K1_N) {
+            "Signature s-scalar is outside valid secp256k1 range [1, N-1]"
         }
 
-        check(sScalar <= SECP256K1_HALF_N) {
-            "Signature s-value exceeds N/2: EIP-2 signature malleability violation"
-        }
-
-        val canonicalV: Byte = when {
-            rawV == 0 || rawV == 1 -> (rawV + RECOVERY_ID_OFFSET).toByte()
-            rawV == 27 || rawV == 28 -> rawV.toByte()
-            rawV >= EIP155_V_THRESHOLD -> (((rawV - EIP155_V_THRESHOLD) % 2) + RECOVERY_ID_OFFSET).toByte()
+        val initialParity = when {
+            rawV == 0 || rawV == 1 -> rawV
+            rawV == 27 || rawV == 28 -> rawV - RECOVERY_ID_OFFSET
+            rawV >= EIP155_V_THRESHOLD -> (rawV - EIP155_V_THRESHOLD) % 2
             else -> throw IllegalStateException("Non-canonical recovery ID v produced: $rawV")
         }
 
+        val isHighS = sScalar > SECP256K1_HALF_N
+        val finalParity = if (isHighS) 1 - initialParity else initialParity
+
+        if (isHighS) {
+            sScalar = SECP256K1_N.subtract(sScalar)
+        }
+
+        check(sScalar > BigInteger.ZERO && sScalar <= SECP256K1_HALF_N) {
+            "Signature s-value exceeds N/2: EIP-2 signature malleability violation"
+        }
+
+        val canonicalV = (RECOVERY_ID_OFFSET + finalParity).toByte()
         val normalizedS = Numeric.toBytesPadded(sScalar, COMPONENT_LENGTH)
         val normalizedRsv = ByteArray(SIGNATURE_RSV_LENGTH)
         System.arraycopy(r, 0, normalizedRsv, SIGNATURE_R_OFFSET, COMPONENT_LENGTH)
@@ -285,7 +296,17 @@ class ThesisSigner : SigningKey, AutoCloseable {
         val v = rsvSignature[SIGNATURE_V_OFFSET]
         val sigData = Sign.SignatureData(byteArrayOf(v), r, s)
 
-        val recoveredPublicKeyBigInt = Sign.signedPrefixedMessageToKey(message, sigData)
+        val recoveredPublicKeyBigInt: BigInteger = try {
+            Sign.signedPrefixedMessageToKey(message, sigData)
+        } catch (e: SignatureException) {
+            throw IllegalArgumentException("Cryptographic public key recovery failed for signature", e)
+        }
+
+        val recoveredAddress = "0x" + Keys.getAddress(recoveredPublicKeyBigInt).lowercase(Locale.ROOT)
+        check(recoveredAddress == this.address.lowercase(Locale.ROOT)) {
+            "Recovered address ($recoveredAddress) does not match expected signer identity (${this.address})"
+        }
+
         val rawPublicKey64 = Numeric.toBytesPadded(recoveredPublicKeyBigInt, COMPONENT_LENGTH * 2)
 
         return ByteArray(UNCOMPRESSED_KEY_LENGTH).apply {
