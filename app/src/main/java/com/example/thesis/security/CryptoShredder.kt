@@ -70,34 +70,7 @@ class CryptoShredder(
 
         // ── Step 2 & 3: Resolve and physically delete files (NonCancellable) ──
         withContext(NonCancellable) {
-            val nonFatalErrors = mutableListOf<String>()
-
-            try {
-                val dbFile = databaseFactory.resolveDatabaseFile(sanitisedAddress)
-                val filesToDelete = collectAllDatabaseArtifacts(dbFile)
-
-                filesToDelete.forEach { file ->
-                    val outcome = deleteFileSafely(file = file)
-                    if (outcome is FileDeleteOutcome.Failed) {
-                        nonFatalErrors.add("File[${outcome.suffix}]: ${outcome.exceptionClass}")
-                    }
-                }
-
-                // Clean up isolated account database directory if present
-                val accountDir = databaseFactory.resolveAccountDatabaseDirectory(sanitisedAddress)
-                if (accountDir.exists()) {
-                    val dirDeleted = accountDir.deleteRecursively()
-                    if (!dirDeleted) {
-                        Log.w(TAG, "shredAccountData: account directory deleteRecursively returned false")
-                        nonFatalErrors.add("DirectoryCleanup: deleteRecursivelyFailed")
-                    }
-                }
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                // Redact exception details to avoid leaking canonical file paths with address hashes
-                Log.w(TAG, "shredAccountData: Exception during storage unlinking: ${e::class.java.simpleName}")
-                nonFatalErrors.add("StorageResolution: ${e::class.java.simpleName}")
-            }
+            val nonFatalErrors = purgeDatabaseStorage(sanitisedAddress)
 
             if (nonFatalErrors.isEmpty()) {
                 Log.i(TAG, "shredAccountData: All storage artifacts expunged successfully.")
@@ -113,6 +86,35 @@ class CryptoShredder(
                 )
             }
         }
+    }
+
+    private fun purgeDatabaseStorage(sanitisedAddress: String): List<String> {
+        val nonFatalErrors = mutableListOf<String>()
+        try {
+            val dbFile = databaseFactory.resolveDatabaseFile(sanitisedAddress)
+            val filesToDelete = collectAllDatabaseArtifacts(dbFile)
+
+            filesToDelete.forEach { file ->
+                val outcome = deleteFileSafely(file = file)
+                if (outcome is FileDeleteOutcome.Failed) {
+                    nonFatalErrors.add("File[${outcome.suffix}]: ${outcome.exceptionClass}")
+                }
+            }
+
+            val accountDir = databaseFactory.resolveAccountDatabaseDirectory(sanitisedAddress)
+            if (accountDir.exists()) {
+                val dirDeleted = accountDir.deleteRecursively()
+                if (!dirDeleted) {
+                    Log.w(TAG, "shredAccountData: account directory deleteRecursively returned false")
+                    nonFatalErrors.add("DirectoryCleanup: deleteRecursivelyFailed")
+                }
+            }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            Log.w(TAG, "shredAccountData: Exception during storage unlinking: ${e::class.java.simpleName}")
+            nonFatalErrors.add("StorageResolution: ${e::class.java.simpleName}")
+        }
+        return nonFatalErrors
     }
 
     /**
@@ -167,7 +169,7 @@ class CryptoShredder(
 
             val deleted = file.delete()
             if (deleted) {
-                Log.d(TAG, "deleteFileSafely: unlinked artifact [suffix=$suffix]")
+                Log.i(TAG, "deleteFileSafely: unlinked artifact [suffix=$suffix]")
                 FileDeleteOutcome.Deleted(suffix)
             } else {
                 Log.w(TAG, "deleteFileSafely: file.delete() returned false [suffix=$suffix]")

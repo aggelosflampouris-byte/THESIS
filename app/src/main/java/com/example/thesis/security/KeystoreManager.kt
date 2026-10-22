@@ -66,6 +66,17 @@ class KeystoreManager(context: Context) {
         private const val GCM_IV_LENGTH_BYTES: Int = 12 // 96-bit IV per NIST SP 800-38D recommendation
         const val DEK_SIZE_BYTES: Int = 32      // 256-bit symmetric DEK
 
+        private val STRONGBOX_FALLBACK_CLASSES: Set<Class<out Throwable>> = setOf(
+            ProviderException::class.java,
+            KeyStoreException::class.java,
+            InvalidAlgorithmParameterException::class.java,
+            NoSuchAlgorithmException::class.java,
+            SecurityException::class.java,
+            IllegalArgumentException::class.java,
+            IllegalStateException::class.java,
+            UnsupportedOperationException::class.java
+        )
+
         /**
          * Global synchronization monitor. Prevents cross-instance concurrent calls from racing
          * to provision dual DEKs when multiple KeystoreManager instances are instantiated.
@@ -235,30 +246,14 @@ class KeystoreManager(context: Context) {
      * StrongBox to standard TEE. Inspects the entire cause chain to catch nested OEM errors
      * (e.g., Samsung Knox KM_ERROR_UNIMPLEMENTED, Xiaomi/MediaTek unsupported HAL params).
      */
-    private fun isStrongBoxFallbackEligible(throwable: Throwable): Boolean {
-        var current: Throwable? = throwable
-        while (current != null) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && current is StrongBoxUnavailableException) {
-                return true
-            }
-            // Covers ProviderException, KeyStoreException, and OEM-specific HAL exceptions:
-            // - Samsung Knox: TIMA / Keymaster KM_ERROR_UNIMPLEMENTED (-10003, -67)
-            // - Xiaomi / MediaTek: IllegalArgumentException / IllegalStateException when StrongBox HAL is absent
-            // - Generic Keymaster / Keymint unsupported parameter / operation failures
-            if (current is ProviderException ||
-                current is KeyStoreException ||
-                current is InvalidAlgorithmParameterException ||
-                current is NoSuchAlgorithmException ||
-                current is SecurityException ||
-                current is IllegalArgumentException ||
-                current is IllegalStateException ||
-                current is UnsupportedOperationException
-            ) {
-                return true
-            }
-            current = current.cause
+    private fun isStrongBoxFallbackEligible(throwable: Throwable): Boolean =
+        generateSequence(throwable) { it.cause }.any { isStrongBoxFallbackException(it) }
+
+    private fun isStrongBoxFallbackException(t: Throwable): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && t is StrongBoxUnavailableException) {
+            return true
         }
-        return false
+        return STRONGBOX_FALLBACK_CLASSES.any { it.isInstance(t) }
     }
 
     /**
@@ -340,21 +335,17 @@ class KeystoreManager(context: Context) {
         ivBase64: String,
         ctBase64: String
     ): KeystoreResult<ByteArray> {
-        val iv = try {
-            Base64.decode(ivBase64, Base64.NO_WRAP)
-        } catch (e: IllegalArgumentException) {
+        val iv = decodeBase64Safe(ivBase64).getOrElse {
             return KeystoreResult.Failure.IntegrityViolation(
                 message = "Base64 decoding failed for DEK envelope IV.",
-                cause = e
+                cause = it
             )
         }
 
-        val ciphertext = try {
-            Base64.decode(ctBase64, Base64.NO_WRAP)
-        } catch (e: IllegalArgumentException) {
+        val ciphertext = decodeBase64Safe(ctBase64).getOrElse {
             return KeystoreResult.Failure.IntegrityViolation(
                 message = "Base64 decoding failed for DEK envelope ciphertext.",
-                cause = e
+                cause = it
             )
         }
 
@@ -412,6 +403,12 @@ class KeystoreManager(context: Context) {
             iv.fill(0)
             ciphertext.fill(0)
         }
+    }
+
+    private fun decodeBase64Safe(base64: String): Result<ByteArray> = try {
+        Result.success(Base64.decode(base64, Base64.NO_WRAP))
+    } catch (e: IllegalArgumentException) {
+        Result.failure(e)
     }
 
     // ────────────────────────────────────────────────────────────────────────

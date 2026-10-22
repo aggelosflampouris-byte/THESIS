@@ -189,26 +189,7 @@ class ThesisSigner : SigningKey, AutoCloseable {
             val keyPair = synchronized(lock) {
                 checkNotNull(activeKeyPair) { "Signer active key pair is uninitialized or destroyed" }
             }
-
-            val lengthAscii = message.size.toString().toByteArray(StandardCharsets.US_ASCII)
-            val prefixedPayload = ByteArray(EIP191_HEADER_BYTES.size + lengthAscii.size + message.size)
-
-            try {
-                System.arraycopy(EIP191_HEADER_BYTES, 0, prefixedPayload, 0, EIP191_HEADER_BYTES.size)
-                System.arraycopy(lengthAscii, 0, prefixedPayload, EIP191_HEADER_BYTES.size, lengthAscii.size)
-                System.arraycopy(message, 0, prefixedPayload, EIP191_HEADER_BYTES.size + lengthAscii.size, message.size)
-
-                val messageDigest = Hash.sha3(prefixedPayload)
-                val signatureData = Sign.signMessage(messageDigest, keyPair, false)
-
-                val rsv = ByteArray(SIGNATURE_RSV_LENGTH)
-                System.arraycopy(signatureData.r, 0, rsv, SIGNATURE_R_OFFSET, COMPONENT_LENGTH)
-                System.arraycopy(signatureData.s, 0, rsv, SIGNATURE_S_OFFSET, COMPONENT_LENGTH)
-                rsv[SIGNATURE_V_OFFSET] = signatureData.v[0]
-                rsv
-            } finally {
-                Arrays.fill(prefixedPayload, 0x00.toByte())
-            }
+            signLocalPayload(message, keyPair)
         }
 
         val normalizedRsv = normalizeSignature(rawSigBytes)
@@ -222,6 +203,28 @@ class ThesisSigner : SigningKey, AutoCloseable {
         }
 
         normalizedRsv
+    }
+
+    private fun signLocalPayload(message: ByteArray, keyPair: ECKeyPair): ByteArray {
+        val lengthAscii = message.size.toString().toByteArray(StandardCharsets.US_ASCII)
+        val prefixedPayload = ByteArray(EIP191_HEADER_BYTES.size + lengthAscii.size + message.size)
+
+        return try {
+            System.arraycopy(EIP191_HEADER_BYTES, 0, prefixedPayload, 0, EIP191_HEADER_BYTES.size)
+            System.arraycopy(lengthAscii, 0, prefixedPayload, EIP191_HEADER_BYTES.size, lengthAscii.size)
+            System.arraycopy(message, 0, prefixedPayload, EIP191_HEADER_BYTES.size + lengthAscii.size, message.size)
+
+            val messageDigest = Hash.sha3(prefixedPayload)
+            val signatureData = Sign.signMessage(messageDigest, keyPair, false)
+
+            val rsv = ByteArray(SIGNATURE_RSV_LENGTH)
+            System.arraycopy(signatureData.r, 0, rsv, SIGNATURE_R_OFFSET, COMPONENT_LENGTH)
+            System.arraycopy(signatureData.s, 0, rsv, SIGNATURE_S_OFFSET, COMPONENT_LENGTH)
+            rsv[SIGNATURE_V_OFFSET] = signatureData.v[0]
+            rsv
+        } finally {
+            Arrays.fill(prefixedPayload, 0x00.toByte())
+        }
     }
 
     /**
@@ -273,7 +276,7 @@ class ThesisSigner : SigningKey, AutoCloseable {
 
         val initialParity = when {
             rawV == 0 || rawV == 1 -> rawV
-            rawV == 27 || rawV == 28 -> rawV - RECOVERY_ID_OFFSET
+            rawV in RECOVERY_V_UNCOMPRESSED_MIN..RECOVERY_V_UNCOMPRESSED_MAX -> rawV - RECOVERY_ID_OFFSET
             rawV >= EIP155_V_THRESHOLD -> (rawV - EIP155_V_THRESHOLD) % 2
             else -> throw IllegalStateException("Non-canonical recovery ID v produced: $rawV")
         }
@@ -355,6 +358,8 @@ class ThesisSigner : SigningKey, AutoCloseable {
         private const val UNCOMPRESSED_KEY_LENGTH = 65
         private const val UNCOMPRESSED_HEADER_BYTE: Byte = 0x04
         private const val RECOVERY_ID_OFFSET = 27
+        private const val RECOVERY_V_UNCOMPRESSED_MIN = 27
+        private const val RECOVERY_V_UNCOMPRESSED_MAX = 28
         private const val EIP155_V_THRESHOLD = 35
         private const val HEX_PREFIX = "0x"
 

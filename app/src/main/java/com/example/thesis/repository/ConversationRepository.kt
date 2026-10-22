@@ -207,28 +207,8 @@ class ConversationRepository(
     }
 
     private fun createMessagesPipeline(client: Client, conversationId: String): Flow<Message> = channelFlow {
-        var conversation = client.conversations.findConversation(conversationId)
-        if (conversation == null) {
-            try {
-                client.conversations.sync()
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-            }
-            conversation = client.conversations.findConversation(conversationId)
-        }
-
-        if (conversation == null) {
-            throw NoSuchElementException("Conversation not found for ID: $conversationId")
-        }
-
-        // 1. Emit historical cached messages from local storage without loss
-        val historicalMessages = try {
-            conversation.messages().map { it.toDomainMessage() }
-        } catch (e: Exception) {
-            if (e is CancellationException) throw e
-            Log.w(TAG, "Failed to load message history for $conversationId: ${e.message}")
-            emptyList()
-        }
+        val conversation = resolveConversation(client, conversationId)
+        val historicalMessages = loadHistoricalMessagesSafe(conversation, conversationId)
 
         // Bounded LRU cache to prevent heap memory exhaustion on long-running streams
         val deduplicator = BoundedIdDeduplicator(maxSize = MAX_DEDUPLICATOR_CAPACITY)
@@ -346,8 +326,59 @@ class ConversationRepository(
         val fallbackId = "opt_" + UUID.randomUUID().toString()
         val senderAddress = client.publicIdentity.identifier
 
-        // Phase 1: Local SQLCipher Persistence (Before Network ACK)
-        // Uses prepareMessage() to write to local encrypted storage with UNPUBLISHED status immediately.
+        val (preparedMessageId, pendingMessage) = preparePendingMessage(
+            conversation = conversation,
+            conversationId = conversationId,
+            senderAddress = senderAddress,
+            content = content,
+            fallbackId = fallbackId
+        )
+
+        outgoingMessageEvents.emit(pendingMessage)
+
+        publishAndCommitMessage(
+            conversation = conversation,
+            pendingMessage = pendingMessage,
+            preparedMessageId = preparedMessageId,
+            fallbackId = fallbackId,
+            content = content
+        )
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    //  Internal Utilities & Error Classification
+    // ────────────────────────────────────────────────────────────────────────
+
+    private suspend fun resolveConversation(client: Client, conversationId: String): Conversation {
+        var conversation = client.conversations.findConversation(conversationId)
+        if (conversation == null) {
+            try {
+                client.conversations.sync()
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+            }
+            conversation = client.conversations.findConversation(conversationId)
+        }
+        return conversation ?: throw NoSuchElementException("Conversation not found for ID: $conversationId")
+    }
+
+    private suspend fun loadHistoricalMessagesSafe(conversation: Conversation, conversationId: String): List<Message> {
+        return try {
+            conversation.messages().map { it.toDomainMessage() }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            Log.w(TAG, "Failed to load message history for $conversationId: ${e.message}")
+            emptyList()
+        }
+    }
+
+    private fun preparePendingMessage(
+        conversation: Conversation,
+        conversationId: String,
+        senderAddress: String,
+        content: String,
+        fallbackId: String
+    ): Pair<String, Message> {
         val preparedMessageId: String = try {
             val prepId = conversation.prepareMessage(content)
             if (prepId.isNotBlank()) prepId else fallbackId
@@ -364,12 +395,17 @@ class ConversationRepository(
             sentAt = System.currentTimeMillis(),
             deliveryStatus = MessageDeliveryStatus.LOCAL_PENDING
         )
+        return Pair(preparedMessageId, pendingMessage)
+    }
 
-        // 1. Optimistic dispatch to active UI observers
-        outgoingMessageEvents.emit(pendingMessage)
-
-        // Phase 2: Transmit to XMTP network node and update on ACK
-        try {
+    private suspend fun publishAndCommitMessage(
+        conversation: Conversation,
+        pendingMessage: Message,
+        preparedMessageId: String,
+        fallbackId: String,
+        content: String
+    ): Result<Unit> {
+        return try {
             val publishedId = if (preparedMessageId != fallbackId) {
                 conversation.publishMessages()
                 preparedMessageId
@@ -386,7 +422,7 @@ class ConversationRepository(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to dispatch message to conversation $conversationId: ${e.message}", e)
+            Log.e(TAG, "Failed to dispatch message to conversation ${pendingMessage.conversationId}: ${e.message}", e)
             val failedMessage = pendingMessage.copy(
                 deliveryStatus = MessageDeliveryStatus.FAILED
             )
@@ -394,10 +430,6 @@ class ConversationRepository(
             Result.failure(e)
         }
     }
-
-    // ────────────────────────────────────────────────────────────────────────
-    //  Internal Utilities & Error Classification
-    // ────────────────────────────────────────────────────────────────────────
 
     private fun calculateExponentialBackoff(attempt: Long): Long {
         val exponent = attempt.coerceAtMost(MAX_BACKOFF_EXPONENT.toLong()).toInt()

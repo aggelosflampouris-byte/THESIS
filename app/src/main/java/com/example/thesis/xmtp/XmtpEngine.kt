@@ -124,7 +124,7 @@ class XmtpEngine(
         synchronized(lock) {
             val current = _state.value
             if (current is XmtpEngineState.Loading || current is XmtpEngineState.Ready) {
-                Log.d(TAG, "initialise() ignored: engine already in state ${current::class.simpleName}")
+                Log.i(TAG, "initialise() ignored: engine already in state ${current::class.simpleName}")
                 return
             }
 
@@ -228,26 +228,14 @@ class XmtpEngine(
             val dbDirectory = customDbDirectory ?: databaseFactory.resolveAccountDatabaseDirectory(sanitisedAddress)
             ensureDirectoryAccessible(dbDirectory)
 
-            val dekBytes: ByteArray
-            if (customDbEncryptionKey != null) {
-                dekBytes = customDbEncryptionKey
-            } else {
-                when (val keyResult = keystoreManager.getOrCreateDatabaseKey()) {
-                    is KeystoreResult.Success -> {
-                        val rawDek = keyResult.value
-                        dekBytes = rawDek.clone()
-                        rawDek.fill(0x00) // Wipe raw array immediately
-                        dekToZero = dekBytes // Queue for zeroization after native handoff
-                    }
-
-                    is KeystoreResult.Failure -> {
-                        return@withContext XmtpEngineState.Error(
-                            XmtpInitError.DatabaseError(
-                                message = "Keystore failed to provision or unwrap DEK: ${keyResult.message}",
-                                cause = keyResult.cause
-                            )
-                        )
-                    }
+            val keyResolution = resolveDatabaseEncryptionKey(customDbEncryptionKey)
+            val dekBytes = when (keyResolution) {
+                is KeyResolutionResult.Success -> {
+                    if (keyResolution.shouldZeroize) dekToZero = keyResolution.key
+                    keyResolution.key
+                }
+                is KeyResolutionResult.Failure -> {
+                    return@withContext XmtpEngineState.Error(keyResolution.error)
                 }
             }
 
@@ -330,33 +318,35 @@ class XmtpEngine(
         return XmtpEngineState.Error(error)
     }
 
-    private fun isSignatureError(msg: String): Boolean =
-        msg.contains("signature") ||
-                msg.contains("sign") ||
-                msg.contains("rejected") ||
-                msg.contains("user denied") ||
-                msg.contains("user canceled") ||
-                msg.contains("user cancelled")
+    private fun isSignatureError(msg: String): Boolean = msg.containsAny(SIGNATURE_KEYWORDS)
 
-    private fun isDatabaseError(msg: String): Boolean =
-        msg.contains("database") ||
-                msg.contains("sqlcipher") ||
-                msg.contains("sqlite") ||
-                msg.contains("db ") ||
-                msg.contains("storage") ||
-                msg.contains("keystore") ||
-                msg.contains("schema") ||
-                msg.contains("migration") ||
-                msg.contains("corrupt") ||
-                msg.contains("locked") ||
-                msg.contains("busy")
+    private fun isDatabaseError(msg: String): Boolean = msg.containsAny(DATABASE_KEYWORDS)
 
-    private fun isIdentityError(msg: String): Boolean =
-        msg.contains("identity") ||
-                msg.contains("inbox") ||
-                msg.contains("association") ||
-                msg.contains("installation") ||
-                msg.contains("member")
+    private fun isIdentityError(msg: String): Boolean = msg.containsAny(IDENTITY_KEYWORDS)
+
+    private fun String.containsAny(keywords: Set<String>): Boolean = keywords.any { this.contains(it) }
+
+    private fun resolveDatabaseEncryptionKey(customKey: ByteArray?): KeyResolutionResult {
+        if (customKey != null) {
+            return KeyResolutionResult.Success(customKey, shouldZeroize = false)
+        }
+        return when (val keyResult = keystoreManager.getOrCreateDatabaseKey()) {
+            is KeystoreResult.Success -> {
+                val rawDek = keyResult.value
+                val cloned = rawDek.clone()
+                rawDek.fill(0x00)
+                KeyResolutionResult.Success(cloned, shouldZeroize = true)
+            }
+            is KeystoreResult.Failure -> {
+                KeyResolutionResult.Failure(
+                    XmtpInitError.DatabaseError(
+                        message = "Keystore failed to provision or unwrap DEK: ${keyResult.message}",
+                        cause = keyResult.cause
+                    )
+                )
+            }
+        }
+    }
 
     private fun ensureDirectoryAccessible(directory: File) {
         if (!directory.exists()) {
@@ -371,6 +361,22 @@ class XmtpEngine(
 
     companion object {
         private const val TAG = "XmtpEngine"
+
+        private val SIGNATURE_KEYWORDS = setOf(
+            "signature", "sign", "rejected", "user denied", "user canceled", "user cancelled"
+        )
+        private val DATABASE_KEYWORDS = setOf(
+            "database", "sqlcipher", "sqlite", "db ", "storage", "keystore",
+            "schema", "migration", "corrupt", "locked", "busy"
+        )
+        private val IDENTITY_KEYWORDS = setOf(
+            "identity", "inbox", "association", "installation", "member"
+        )
+    }
+
+    private sealed interface KeyResolutionResult {
+        data class Success(val key: ByteArray, val shouldZeroize: Boolean) : KeyResolutionResult
+        data class Failure(val error: XmtpInitError.DatabaseError) : KeyResolutionResult
     }
 }
 
