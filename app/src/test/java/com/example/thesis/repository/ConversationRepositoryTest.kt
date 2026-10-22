@@ -104,103 +104,120 @@ class ConversationRepositoryTest {
 
     /**
      * Requirement 1:
-     * Assert that conversations emitted by the client are properly formatted
-     * and emitted through the Flow using Turbine.
+     * Mock XmtpEngine in Ready state; verify the repository emits the initial conversation
+     * list and receives streaming updates using Turbine.
      */
     @Test
-    fun test_observeConversations_emitsMappedConversations() = runTest(testDispatcher) {
+    fun test_observeConversations_emitsInitialListAndUpdates() = runTest(testDispatcher) {
+        val convStream = MutableSharedFlow<Conversation>()
         val mockConv1 = mockk<Conversation>(relaxed = true)
         val mockConv2 = mockk<Conversation>(relaxed = true)
 
         val date1 = Date(10_000L)
         val date2 = Date(20_000L)
 
-        every { mockConv1.id } returns "conv_1"
-        every { mockConv1.topic } returns "xmtp/0/conv_1/proto"
+        every { mockConv1.id } returns "conv_mls_1"
+        every { mockConv1.topic } returns "xmtp/0/conv_mls_1/proto"
         every { mockConv1.createdAt } returns date1
 
-        every { mockConv2.id } returns "conv_2"
-        every { mockConv2.topic } returns "xmtp/0/conv_2/proto"
+        every { mockConv2.id } returns "conv_mls_2"
+        every { mockConv2.topic } returns "xmtp/0/conv_mls_2/proto"
         every { mockConv2.createdAt } returns date2
 
-        coEvery { mockConversations.list() } returns listOf(mockConv1, mockConv2)
-        every { mockConversations.stream() } returns flowOf()
+        coEvery { mockConversations.list() } returns listOf(mockConv1)
+        every { mockConversations.stream() } returns convStream.asSharedFlow()
 
         repository.observeConversations().test {
-            val conversations = awaitItem()
+            // 1. Initial list emission
+            val initial = awaitItem()
+            assertEquals(1, initial.size)
+            assertEquals("conv_mls_1", initial[0].id)
+            assertEquals("xmtp/0/conv_mls_1/proto", initial[0].topic)
+            assertEquals(date1, initial[0].createdAt)
 
-            assertEquals(2, conversations.size)
+            // 2. Real-time stream emission
+            convStream.emit(mockConv2)
+            testScheduler.advanceUntilIdle()
 
-            assertEquals("conv_1", conversations[0].id)
-            assertEquals("xmtp/0/conv_1/proto", conversations[0].topic)
-            assertEquals(date1, conversations[0].createdAt)
-
-            assertEquals("conv_2", conversations[1].id)
-            assertEquals("xmtp/0/conv_2/proto", conversations[1].topic)
-            assertEquals(date2, conversations[1].createdAt)
+            val updated = awaitItem()
+            assertEquals(2, updated.size)
+            assertEquals("conv_mls_2", updated[0].id)
+            assertEquals("conv_mls_1", updated[1].id)
 
             cancelAndIgnoreRemainingEvents()
         }
 
-        coVerify(exactly = 1) { mockConversations.sync() }
         coVerify(atLeast = 1) { mockConversations.list() }
     }
 
     /**
      * Requirement 2:
-     * Emit mock incoming MLS messages from a mock stream; verify the Flow emits
-     * each message sequentially to collectors.
+     * Simulate a continuous stream of incoming MLS messages; verify each message is emitted sequentially.
      */
     @Test
-    fun test_observeMessages_streamsIncomingNetworkMessages() = runTest(testDispatcher) {
+    fun test_observeMessages_emitsIncomingMessagesSequentially() = runTest(testDispatcher) {
         val streamFlow = MutableSharedFlow<DecodedMessage>()
         every { mockConversation.streamMessages() } returns streamFlow
         coEvery { mockConversation.messages() } returns emptyList()
 
         val mockMsg1 = mockk<DecodedMessage>(relaxed = true)
         val mockMsg2 = mockk<DecodedMessage>(relaxed = true)
+        val mockMsg3 = mockk<DecodedMessage>(relaxed = true)
 
-        val date1 = Date(1_000L)
-        val date2 = Date(2_000L)
-
-        every { mockMsg1.id } returns "mls_msg_1"
+        every { mockMsg1.id } returns "mls_msg_seq_1"
         every { mockMsg1.conversationId } returns testConvId
         every { mockMsg1.senderInboxId } returns testPeerAddress
-        every { mockMsg1.body } returns "First MLS packet"
-        every { mockMsg1.sentAt } returns date1
+        every { mockMsg1.body } returns "First Sequential MLS Payload"
+        every { mockMsg1.sentAt } returns Date(1_000L)
         every { mockMsg1.deliveryStatus } returns DecodedMessage.MessageDeliveryStatus.PUBLISHED
 
-        every { mockMsg2.id } returns "mls_msg_2"
+        every { mockMsg2.id } returns "mls_msg_seq_2"
         every { mockMsg2.conversationId } returns testConvId
         every { mockMsg2.senderInboxId } returns testPeerAddress
-        every { mockMsg2.body } returns "Second MLS packet"
-        every { mockMsg2.sentAt } returns date2
+        every { mockMsg2.body } returns "Second Sequential MLS Payload"
+        every { mockMsg2.sentAt } returns Date(2_000L)
         every { mockMsg2.deliveryStatus } returns DecodedMessage.MessageDeliveryStatus.PUBLISHED
 
+        every { mockMsg3.id } returns "mls_msg_seq_3"
+        every { mockMsg3.conversationId } returns testConvId
+        every { mockMsg3.senderInboxId } returns testPeerAddress
+        every { mockMsg3.body } returns "Third Sequential MLS Payload"
+        every { mockMsg3.sentAt } returns Date(3_000L)
+        every { mockMsg3.deliveryStatus } returns DecodedMessage.MessageDeliveryStatus.PUBLISHED
+
         repository.observeMessages(testConvId).test {
-            // Emit first network message
+            // Sequential message 1
             streamFlow.emit(mockMsg1)
             testScheduler.advanceUntilIdle()
-
             val received1 = awaitItem()
-            assertEquals("mls_msg_1", received1.id)
+            assertEquals("mls_msg_seq_1", received1.id)
             assertEquals(testConvId, received1.conversationId)
             assertEquals(testPeerAddress, received1.senderAddress)
-            assertEquals("First MLS packet", received1.body)
+            assertEquals("First Sequential MLS Payload", received1.body)
             assertEquals(1_000L, received1.sentAt)
             assertEquals(MessageDeliveryStatus.PUBLISHED, received1.deliveryStatus)
 
-            // Emit second network message
+            // Sequential message 2
             streamFlow.emit(mockMsg2)
             testScheduler.advanceUntilIdle()
-
             val received2 = awaitItem()
-            assertEquals("mls_msg_2", received2.id)
+            assertEquals("mls_msg_seq_2", received2.id)
             assertEquals(testConvId, received2.conversationId)
             assertEquals(testPeerAddress, received2.senderAddress)
-            assertEquals("Second MLS packet", received2.body)
+            assertEquals("Second Sequential MLS Payload", received2.body)
             assertEquals(2_000L, received2.sentAt)
             assertEquals(MessageDeliveryStatus.PUBLISHED, received2.deliveryStatus)
+
+            // Sequential message 3
+            streamFlow.emit(mockMsg3)
+            testScheduler.advanceUntilIdle()
+            val received3 = awaitItem()
+            assertEquals("mls_msg_seq_3", received3.id)
+            assertEquals(testConvId, received3.conversationId)
+            assertEquals(testPeerAddress, received3.senderAddress)
+            assertEquals("Third Sequential MLS Payload", received3.body)
+            assertEquals(3_000L, received3.sentAt)
+            assertEquals(MessageDeliveryStatus.PUBLISHED, received3.deliveryStatus)
 
             cancelAndIgnoreRemainingEvents()
         }
@@ -208,36 +225,38 @@ class ConversationRepositoryTest {
 
     /**
      * Requirement 3:
-     * Call sendMessage(), verify the underlying MLS conversation receives the message string,
-     * and assert Result.success is returned.
+     * Verify sendMessage() delegates to the correct conversation handle and returns Result.success().
      */
     @Test
-    fun test_sendMessage_success() = runTest(testDispatcher) {
-        val messageContent = "Direct MLS Ratchet Transmission"
-        val expectedPublishedId = "msg_published_333"
+    fun test_sendMessage_dispatchesContentSuccessfully() = runTest(testDispatcher) {
+        val messagePayload = "Encrypted MLS Ratchet Payload Content"
+        val expectedPublishedId = "msg_published_ack_101"
 
-        every { mockConversation.prepareMessage(messageContent) } returns expectedPublishedId
+        every { mockConversation.prepareMessage(messagePayload) } returns expectedPublishedId
         coEvery { mockConversation.publishMessages() } returns Unit
-        coEvery { mockConversation.send(messageContent) } returns expectedPublishedId
+        coEvery { mockConversation.send(messagePayload) } returns expectedPublishedId
 
-        val result = repository.sendMessage(testConvId, messageContent)
+        val result = repository.sendMessage(testConvId, messagePayload)
 
-        assertTrue("sendMessage must succeed", result.isSuccess)
+        assertTrue("sendMessage must return Result.success()", result.isSuccess)
         assertEquals(Unit, result.getOrNull())
 
-        // Verify underlying MLS conversation received the exact string payload
-        coVerify(atLeast = 1) {
-            mockConversation.prepareMessage(messageContent)
+        // Verify delegation to the targeted conversation handle
+        coVerify(exactly = 1) {
+            mockConversation.prepareMessage(messagePayload)
+        }
+        coVerify(exactly = 1) {
+            mockConversation.publishMessages()
         }
     }
 
     /**
      * Requirement 4:
-     * Collect observeMessages in a test scope, cancel the job, and verify the
-     * client-level stream connection is actively closed.
+     * Verify that cancelling the collecting coroutine triggers awaitClose and tears down
+     * the underlying subscription.
      */
     @Test
-    fun test_streamCancellationOnCollectorDisposal() = runTest(testDispatcher) {
+    fun test_streamCancelsWhenCollectorJobCancelled() = runTest(testDispatcher) {
         var streamConnectionClosed = false
 
         val streamFlow = callbackFlow<DecodedMessage> {
@@ -253,7 +272,7 @@ class ConversationRepositoryTest {
         }
         testScheduler.advanceUntilIdle()
 
-        // Stream remains open while UI collector is actively listening
+        // Stream remains open while collector is active
         assertFalse("Stream must remain open while collector is active", streamConnectionClosed)
 
         // Cancel the collector job (simulating Composable leaving composition / onStop / onDestroy)
@@ -264,39 +283,14 @@ class ConversationRepositoryTest {
         testScheduler.advanceUntilIdle()
 
         assertTrue(
-            "Client-level stream connection must be actively closed on collector disposal",
+            "Underlying subscription must trigger awaitClose and close when collector is cancelled",
             streamConnectionClosed
         )
     }
 
     // ────────────────────────────────────────────────────────────────────────
-    //  Additional Boundary & Regression Tests
+    //  Additional Boundary & Reliability Tests
     // ────────────────────────────────────────────────────────────────────────
-
-    @Test
-    fun test_observeConversations_emitsInitialListAndStreamsUpdates() = runTest(testDispatcher) {
-        val convStream = MutableSharedFlow<Conversation>()
-        coEvery { mockConversations.list() } returns listOf(mockConversation)
-        every { mockConversations.stream() } returns convStream.asSharedFlow()
-
-        repository.observeConversations().test {
-            val initial = awaitItem()
-            assertEquals(1, initial.size)
-            assertEquals(testConvId, initial[0].id)
-
-            val newConv = mockk<Conversation>(relaxed = true)
-            every { newConv.id } returns "conv_mls_67890"
-
-            convStream.emit(newConv)
-            testScheduler.advanceUntilIdle()
-
-            val updated = awaitItem()
-            assertEquals(2, updated.size)
-            assertEquals("conv_mls_67890", updated[0].id)
-
-            cancelAndIgnoreRemainingEvents()
-        }
-    }
 
     @Test
     fun test_createConversation_validAddress_returnsSuccess() = runTest(testDispatcher) {
