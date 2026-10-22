@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.example.thesis.database.DatabaseFactory
 import com.example.thesis.util.CryptoUtils
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
@@ -92,6 +93,7 @@ class CryptoShredder(
                     }
                 }
             } catch (e: Exception) {
+                if (e is CancellationException) throw e
                 // Redact exception details to avoid leaking canonical file paths with address hashes
                 Log.w(TAG, "shredAccountData: Exception during storage unlinking: ${e::class.java.simpleName}")
                 nonFatalErrors.add("StorageResolution: ${e::class.java.simpleName}")

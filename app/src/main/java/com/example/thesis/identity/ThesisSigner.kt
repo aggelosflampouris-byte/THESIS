@@ -1,7 +1,10 @@
 package com.example.thesis.identity
 
 import com.example.thesis.util.CryptoUtils
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.web3j.crypto.ECKeyPair
 import org.web3j.crypto.Hash
 import org.web3j.crypto.Keys
@@ -60,6 +63,7 @@ class ThesisSigner : SigningKey, AutoCloseable {
     private var activeKeyPair: ECKeyPair?
 
     private val externalSigner: ExternalSignerCallback?
+    private val cpuDispatcher: CoroutineDispatcher
 
     /**
      * Optional authorization hook to simulate or intercept interactive user consent.
@@ -89,7 +93,10 @@ class ThesisSigner : SigningKey, AutoCloseable {
      *
      * @param privateKey Exactly 32-byte secp256k1 scalar in [1, N-1].
      */
-    constructor(privateKey: ByteArray) {
+    constructor(
+        privateKey: ByteArray,
+        cpuDispatcher: CoroutineDispatcher = Dispatchers.Default
+    ) {
         require(privateKey.size == PRIVATE_KEY_BYTE_LENGTH) {
             "Private key must be exactly $PRIVATE_KEY_BYTE_LENGTH bytes, got ${privateKey.size}"
         }
@@ -99,6 +106,7 @@ class ThesisSigner : SigningKey, AutoCloseable {
             "Private key scalar is outside valid secp256k1 range [1, N - 1]"
         }
 
+        this.cpuDispatcher = cpuDispatcher
         this.privateKeyBytes = privateKey.clone()
         val keyPair = ECKeyPair.create(this.privateKeyBytes)
         this.activeKeyPair = keyPair
@@ -126,8 +134,10 @@ class ThesisSigner : SigningKey, AutoCloseable {
     constructor(
         address: String,
         externalSigner: ExternalSignerCallback,
-        uncompressedPublicKey: ByteArray? = null
+        uncompressedPublicKey: ByteArray? = null,
+        cpuDispatcher: CoroutineDispatcher = Dispatchers.Default
     ) {
+        this.cpuDispatcher = cpuDispatcher
         val sanitized = checkNotNull(CryptoUtils.sanitiseEthereumAddress(address)) {
             "Invalid Ethereum address format for external signer: $address"
         }
@@ -158,7 +168,7 @@ class ThesisSigner : SigningKey, AutoCloseable {
      * @param message Arbitrary byte array payload to be signed.
      * @return 65-byte canonical RSV signature.
      */
-    suspend fun sign(message: ByteArray): ByteArray {
+    suspend fun sign(message: ByteArray): ByteArray = withContext(cpuDispatcher) {
         synchronized(lock) {
             check(!isClosed) { "ThesisSigner has been closed and memory material scrubbed" }
         }
@@ -211,7 +221,7 @@ class ThesisSigner : SigningKey, AutoCloseable {
             }
         }
 
-        return normalizedRsv
+        normalizedRsv
     }
 
     /**
@@ -358,14 +368,17 @@ class ThesisSigner : SigningKey, AutoCloseable {
          * Factory method generating an ephemeral in-memory signer with a cryptographically
          * secure random 32-byte private key for automated testing and CI handshakes.
          */
-        fun createEphemeral(secureRandom: SecureRandom = CryptoUtils.secureRandom): ThesisSigner {
+        fun createEphemeral(
+            secureRandom: SecureRandom = CryptoUtils.secureRandom,
+            cpuDispatcher: CoroutineDispatcher = Dispatchers.Default
+        ): ThesisSigner {
             val keyBytes = ByteArray(PRIVATE_KEY_BYTE_LENGTH)
             while (true) {
                 secureRandom.nextBytes(keyBytes)
                 val scalar = BigInteger(1, keyBytes)
                 if (scalar > BigInteger.ZERO && scalar < SECP256K1_N) {
                     try {
-                        return ThesisSigner(keyBytes)
+                        return ThesisSigner(keyBytes, cpuDispatcher)
                     } finally {
                         Arrays.fill(keyBytes, 0x00.toByte())
                     }
@@ -376,21 +389,32 @@ class ThesisSigner : SigningKey, AutoCloseable {
         /**
          * Alias for [createEphemeral] to preserve backwards compatibility across existing call sites.
          */
-        fun generateRandom(secureRandom: SecureRandom = CryptoUtils.secureRandom): ThesisSigner =
-            createEphemeral(secureRandom)
+        fun generateRandom(
+            secureRandom: SecureRandom = CryptoUtils.secureRandom,
+            cpuDispatcher: CoroutineDispatcher = Dispatchers.Default
+        ): ThesisSigner = createEphemeral(secureRandom, cpuDispatcher)
 
-        fun create(privateKey: ByteArray): ThesisSigner = ThesisSigner(privateKey)
+        fun create(
+            privateKey: ByteArray,
+            cpuDispatcher: CoroutineDispatcher = Dispatchers.Default
+        ): ThesisSigner = ThesisSigner(privateKey, cpuDispatcher)
 
-        fun fromHex(hexChars: CharArray): ThesisSigner {
+        fun fromHex(
+            hexChars: CharArray,
+            cpuDispatcher: CoroutineDispatcher = Dispatchers.Default
+        ): ThesisSigner {
             val rawBytes = CryptoUtils.hexCharArrayToBytes(hexChars, PRIVATE_KEY_BYTE_LENGTH)
             try {
-                return ThesisSigner(rawBytes)
+                return ThesisSigner(rawBytes, cpuDispatcher)
             } finally {
                 Arrays.fill(rawBytes, 0x00.toByte())
                 Arrays.fill(hexChars, '\u0000')
             }
         }
 
-        fun fromHex(hexPrivateKey: String): ThesisSigner = fromHex(hexPrivateKey.trim().toCharArray())
+        fun fromHex(
+            hexPrivateKey: String,
+            cpuDispatcher: CoroutineDispatcher = Dispatchers.Default
+        ): ThesisSigner = fromHex(hexPrivateKey.trim().toCharArray(), cpuDispatcher)
     }
 }

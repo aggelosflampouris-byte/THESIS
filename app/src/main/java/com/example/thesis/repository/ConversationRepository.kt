@@ -11,6 +11,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -60,7 +62,7 @@ import java.util.concurrent.ConcurrentHashMap
 class ConversationRepository(
     private val xmtpEngine: XmtpEngine,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
-) {
+) : AutoCloseable {
 
     private val repositoryJob = SupervisorJob()
     private val repositoryScope = CoroutineScope(repositoryJob + ioDispatcher)
@@ -149,21 +151,27 @@ class ConversationRepository(
         // Merge network notifications with local creation triggers
         val refreshStream: Flow<Conversation?> = conversationRefreshTrigger.map { null }
 
-        merge(networkStream, refreshStream).collect { newConv ->
-            if (newConv != null) {
-                val existingIndex = currentList.indexOfFirst { it.id == newConv.id }
-                if (existingIndex >= 0) {
-                    currentList[existingIndex] = newConv
+        val collectorJob = launch {
+            merge(networkStream, refreshStream).collect { newConv ->
+                if (newConv != null) {
+                    val existingIndex = currentList.indexOfFirst { it.id == newConv.id }
+                    if (existingIndex >= 0) {
+                        currentList[existingIndex] = newConv
+                    } else {
+                        currentList.add(0, newConv)
+                    }
                 } else {
-                    currentList.add(0, newConv)
+                    // Refresh trigger: re-query full list
+                    val refreshed = client.conversations.list()
+                    currentList.clear()
+                    currentList.addAll(refreshed)
                 }
-            } else {
-                // Refresh trigger: re-query full list
-                val refreshed = client.conversations.list()
-                currentList.clear()
-                currentList.addAll(refreshed)
+                send(currentList.toList())
             }
-            send(currentList.toList())
+        }
+
+        awaitClose {
+            collectorJob.cancel()
         }
     }.buffer(
         capacity = Channel.BUFFERED,
@@ -249,13 +257,19 @@ class ConversationRepository(
             .filter { it.conversationId == conversationId }
 
         // 4. Merge network and local streams with backpressure safety
-        merge(networkStream, localStream).collect { msg ->
-            if (msg.deliveryStatus == MessageDeliveryStatus.LOCAL_PENDING ||
-                msg.deliveryStatus == MessageDeliveryStatus.FAILED ||
-                deduplicator.add(msg.id)
-            ) {
-                send(msg)
+        val collectorJob = launch {
+            merge(networkStream, localStream).collect { msg ->
+                if (msg.deliveryStatus == MessageDeliveryStatus.LOCAL_PENDING ||
+                    msg.deliveryStatus == MessageDeliveryStatus.FAILED ||
+                    deduplicator.add(msg.id)
+                ) {
+                    send(msg)
+                }
             }
+        }
+
+        awaitClose {
+            collectorJob.cancel()
         }
     }.buffer(
         capacity = Channel.BUFFERED,
@@ -389,6 +403,14 @@ class ConversationRepository(
         val exponent = attempt.coerceAtMost(MAX_BACKOFF_EXPONENT.toLong()).toInt()
         val backoff = INITIAL_BACKOFF_MS * (1L shl exponent)
         return backoff.coerceAtMost(MAX_BACKOFF_MS)
+    }
+
+    /**
+     * Cancels underlying repository coroutine scope and clears cached reactive flows.
+     */
+    override fun close() {
+        repositoryJob.cancel()
+        messageFlows.clear()
     }
 
     companion object {

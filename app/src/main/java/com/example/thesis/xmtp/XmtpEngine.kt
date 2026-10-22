@@ -62,7 +62,7 @@ class XmtpEngine(
     private val databaseFactory: DatabaseFactory = DatabaseFactory(context.applicationContext),
     private val environment: XMTPEnvironment = XMTPEnvironment.PRODUCTION,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
-) {
+) : AutoCloseable {
 
     private val appContext: Context = context.applicationContext
 
@@ -184,6 +184,14 @@ class XmtpEngine(
                 }
             }
         }
+    }
+
+    /**
+     * Closes the engine and tears down native client connections and background coroutines.
+     * Conforms to [AutoCloseable] lifecycle interface.
+     */
+    override fun close() {
+        shutdown()
     }
 
     @OptIn(DelicateApi::class)
