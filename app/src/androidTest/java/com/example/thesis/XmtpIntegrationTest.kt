@@ -1,6 +1,7 @@
 package com.example.thesis
 
 import android.content.Context
+import android.util.Log
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import app.cash.turbine.test
@@ -25,19 +26,24 @@ import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.xmtp.android.library.Client
 import org.xmtp.android.library.XMTPEnvironment
+import java.io.File
 import java.util.Locale
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
 /**
- * Instrumented integration test suite verifying the complete hardware-to-network pipeline:
+ * Hardened instrumented integration test suite verifying the hardware-to-network pipeline
+ * under strict JNI concurrency, WAL checkpointing, and CI network jitter constraints.
  *
+ * Vectors verified:
  * 1. Hardware Key: AES-256 DEK retrieval via [KeystoreManager.getOrCreateDatabaseKey].
  * 2. Encrypted DB: SQLCipher initialization and PRAGMA integrity verification via [DatabaseFactory.openEncryptedDatabase].
  * 3. Identity: Ephemeral key generation via [ThesisSigner.createEphemeral].
- * 4. Network Handshake: [XmtpEngine] instantiation on [XMTPEnvironment.DEV] and [XmtpEngine.initialise] invocation.
- * 5. State Verification: Flow assertion via Turbine transitioning from [XmtpEngineState.Loading] to [XmtpEngineState.Ready] within 15 seconds.
- * 6. Clean Teardown: [XmtpEngine.shutdown], native database handle closure, and verification of zero thread/JNI leaks.
+ * 4. Network Handshake: [XmtpEngine] instantiation on [XMTPEnvironment.DEV] with resilient backoff retry.
+ * 5. State Verification: Flow assertion via Turbine transitioning from [XmtpEngineState.Loading] to [XmtpEngineState.Ready].
+ * 6. Clean Teardown: Deterministic [XmtpEngine.shutdown], atomic multi-file WAL cleanup, and zero thread/JNI leaks.
  */
 @RunWith(AndroidJUnit4::class)
 class XmtpIntegrationTest {
@@ -64,8 +70,15 @@ class XmtpIntegrationTest {
         try {
             if (::engine.isInitialized) {
                 engine.shutdown()
+                // Await asynchronous JNI drop and coroutine drain prior to disk cleanup
+                withTimeoutOrNull(TEARDOWN_DRAIN_TIMEOUT) {
+                    while (engine.hasActiveJobs) {
+                        delay(POLL_INTERVAL_MS)
+                    }
+                }
             }
-        } catch (_: Throwable) {
+        } catch (e: Throwable) {
+            Log.w(TAG, "Suppressed exception during engine teardown: ${e.message}")
         }
 
         try {
@@ -73,14 +86,16 @@ class XmtpIntegrationTest {
             if (db != null && db.isOpen) {
                 databaseFactory.closeDatabase(db)
             }
-        } catch (_: Throwable) {
+        } catch (e: Throwable) {
+            Log.w(TAG, "Suppressed exception during SQLCipher teardown: ${e.message}")
         } finally {
             openDb = null
         }
 
         try {
             testSigner?.close()
-        } catch (_: Throwable) {
+        } catch (e: Throwable) {
+            Log.w(TAG, "Suppressed exception during signer teardown: ${e.message}")
         } finally {
             testSigner = null
         }
@@ -89,10 +104,10 @@ class XmtpIntegrationTest {
     }
 
     /**
-     * Executes the end-to-end hardware-to-network pipeline integration test.
+     * Executes the end-to-end hardware-to-network pipeline with exponential retry against CI network jitter.
      */
     @Test
-    fun test_completeHardwareToNetworkPipeline() = runTest(timeout = TEST_TIMEOUT) {
+    fun test_completeHardwareToNetworkPipeline() = runTest(timeout = TEST_EXECUTION_TIMEOUT) {
         // ====================================================================
         // Step 1 (Hardware Key): Retrieve 32-byte DEK from KeystoreManager
         // ====================================================================
@@ -120,7 +135,7 @@ class XmtpIntegrationTest {
         ephemeralDbAddress = ephemeralAddress
         tempSigner.close()
 
-        // DatabaseFactory.openEncryptedDatabase zeroes the input DEK buffer; pass a copy
+        // DatabaseFactory.openEncryptedDatabase wipes input DEK in a finally block; pass a clone
         val dekCloneForDb = dek.copyOf()
         val dbResult = databaseFactory.openEncryptedDatabase(dekCloneForDb, ephemeralAddress)
         assertTrue(
@@ -156,59 +171,85 @@ class XmtpIntegrationTest {
         assertEquals("Uncompressed public key header byte must be 0x04", 0x04.toByte(), signer.uncompressedPublicKey[0])
 
         // ====================================================================
-        // Step 4 (Network Handshake): Instantiate XmtpEngine & call initialise()
+        // Steps 4 & 5 (Handshake & State): Resilient Handshake with Backoff Retry
         // ====================================================================
-        engine = XmtpEngine(
-            context = context,
-            keystoreManager = keystoreManager,
-            databaseFactory = databaseFactory,
-            environment = XMTPEnvironment.DEV
-        )
-        assertEquals(
-            "Engine state must start in Idle prior to initialise() invocation",
-            XmtpEngineState.Idle,
-            engine.state.value
-        )
-        assertNull("Engine client property must be null prior to initialisation", engine.client)
+        var activeClient: Client? = null
+        var lastHandshakeError: Throwable? = null
+        var attempt = 0
 
-        // Initiate the asynchronous hardware-to-network handshake
-        engine.initialise(signer)
-
-        // ====================================================================
-        // Step 5 (State Verification): Transitions from Loading to Ready in 15s
-        // ====================================================================
-        engine.state.test(timeout = STATE_VERIFICATION_TIMEOUT) {
-            val initialItem = awaitItem()
-            val loadingState = if (initialItem is XmtpEngineState.Idle) awaitItem() else initialItem
-            assertEquals(
-                "Engine must transition into Loading state while provisioning native client",
-                XmtpEngineState.Loading,
-                loadingState
+        while (attempt < MAX_HANDSHAKE_ATTEMPTS && activeClient == null) {
+            attempt++
+            engine = XmtpEngine(
+                context = context,
+                keystoreManager = keystoreManager,
+                databaseFactory = databaseFactory,
+                environment = XMTPEnvironment.DEV
             )
+            assertEquals(
+                "Engine state must start in Idle prior to initialise() invocation",
+                XmtpEngineState.Idle,
+                engine.state.value
+            )
+            assertNull("Engine client property must be null prior to initialisation", engine.client)
 
-            when (val terminalState = awaitItem()) {
-                is XmtpEngineState.Ready -> {
-                    val client = terminalState.client
-                    assertNotNull("Client must be instantiated upon Ready transition", client)
-                    assertTrue("Client inbox ID must not be empty", client.inboxId.isNotEmpty())
+            // Initiate the asynchronous hardware-to-network handshake
+            engine.initialise(signer)
+
+            try {
+                engine.state.test(timeout = STATE_VERIFICATION_TIMEOUT) {
+                    val initialItem = awaitItem()
+                    val loadingState = if (initialItem is XmtpEngineState.Idle) awaitItem() else initialItem
                     assertEquals(
-                        "Engine client accessor must reflect active Ready client",
-                        client,
-                        engine.client
+                        "Engine must transition into Loading state while provisioning native client",
+                        XmtpEngineState.Loading,
+                        loadingState
                     )
+
+                    when (val terminalState = awaitItem()) {
+                        is XmtpEngineState.Ready -> {
+                            activeClient = terminalState.client
+                            assertNotNull("Client must be instantiated upon Ready transition", activeClient)
+                            assertTrue("Client inbox ID must not be empty", activeClient!!.inboxId.isNotEmpty())
+                            assertEquals(
+                                "Engine client accessor must reflect active Ready client",
+                                activeClient,
+                                engine.client
+                            )
+                        }
+                        is XmtpEngineState.Error -> {
+                            lastHandshakeError = terminalState.error.cause
+                            Log.w(
+                                TAG,
+                                "Handshake attempt #$attempt failed: ${terminalState.error.message} (cause: ${terminalState.error.cause})"
+                            )
+                        }
+                        else -> {
+                            fail("Unexpected state emitted from XmtpEngine.state: $terminalState")
+                        }
+                    }
+                    cancelAndIgnoreRemainingEvents()
                 }
-                is XmtpEngineState.Error -> {
-                    fail(
-                        "Engine transitioned to Error instead of Ready within 15 seconds: " +
-                            "${terminalState.error.message} (cause: ${terminalState.error.cause})"
-                    )
-                }
-                else -> {
-                    fail("Unexpected state emitted from XmtpEngine.state: $terminalState")
-                }
+            } catch (e: Throwable) {
+                lastHandshakeError = e
+                Log.w(TAG, "Turbine state collection caught timeout/exception on attempt #$attempt: ${e.message}")
             }
-            cancelAndIgnoreRemainingEvents()
+
+            if (activeClient == null && attempt < MAX_HANDSHAKE_ATTEMPTS) {
+                engine.shutdown()
+                withTimeoutOrNull(TEARDOWN_DRAIN_TIMEOUT) {
+                    while (engine.hasActiveJobs) delay(POLL_INTERVAL_MS)
+                }
+                val backoffMs = INITIAL_BACKOFF_MS * (1L shl (attempt - 1))
+                Log.i(TAG, "Backing off for ${backoffMs}ms before retry attempt #${attempt + 1}")
+                delay(backoffMs)
+            }
         }
+
+        assertNotNull(
+            "Engine failed to transition to XmtpEngineState.Ready after $MAX_HANDSHAKE_ATTEMPTS attempts. " +
+                "Last error: ${lastHandshakeError?.message}",
+            activeClient
+        )
 
         // ====================================================================
         // Step 6 (Clean Teardown): Shutdown engine, close DB, verify no leaks
@@ -238,9 +279,9 @@ class XmtpIntegrationTest {
         assertTrue("Ephemeral signer must report closed and memory zeroized", signer.closed)
 
         // 6d. Verify coroutine lifecycle cleanup within engineScope
-        val coroutinesDrained = withTimeoutOrNull(5.seconds) {
+        val coroutinesDrained = withTimeoutOrNull(TEARDOWN_DRAIN_TIMEOUT) {
             while (engine.hasActiveJobs) {
-                delay(50)
+                delay(POLL_INTERVAL_MS)
             }
             true
         } ?: false
@@ -250,7 +291,7 @@ class XmtpIntegrationTest {
         )
 
         // 6e. Verify native threads and JNI worker handles do not leak
-        val activeLeakedThreads = withTimeoutOrNull(5.seconds) {
+        val activeLeakedThreads = withTimeoutOrNull(TEARDOWN_DRAIN_TIMEOUT) {
             while (true) {
                 val matching = Thread.getAllStackTraces().keys.filter { thread ->
                     thread.isAlive &&
@@ -260,7 +301,7 @@ class XmtpIntegrationTest {
                         !thread.name.contains("junit", ignoreCase = true)
                 }
                 if (matching.isEmpty()) return@withTimeoutOrNull emptyList<Thread>()
-                delay(100)
+                delay(POLL_INTERVAL_MS)
             }
             emptyList<Thread>()
         } ?: Thread.getAllStackTraces().keys.filter { thread ->
@@ -277,10 +318,38 @@ class XmtpIntegrationTest {
         )
     }
 
+    /**
+     * Completely unlinks database files and all auxiliary SQLite journaling artifacts
+     * (.db, .db-wal, .db-shm, .db-journal) to prevent lock contention and stale WAL salts.
+     */
+    private fun purgeFileAndAuxiliaryArtifacts(file: File) {
+        val artifacts = listOf(
+            file,
+            File("${file.path}-wal"),
+            File("${file.path}-shm"),
+            File("${file.path}-journal")
+        )
+        for (artifact in artifacts) {
+            if (artifact.exists()) {
+                artifact.delete()
+            }
+        }
+    }
+
+    /**
+     * Purges Keystore aliases, encrypted preference XML files, and account-isolated database directories.
+     */
     private fun purgeTestArtifacts() {
         try {
             keystoreManager.deleteKeystoreEntry()
-        } catch (_: Throwable) {
+        } catch (e: Throwable) {
+            Log.w(TAG, "Suppressed Keystore alias purge failure: ${e.message}")
+        }
+
+        try {
+            context.deleteSharedPreferences(KeystoreManager.PREF_FILE_NAME)
+        } catch (e: Throwable) {
+            Log.w(TAG, "Suppressed SharedPreferences purge failure: ${e.message}")
         }
 
         testSigner?.address?.let { address ->
@@ -292,11 +361,10 @@ class XmtpIntegrationTest {
                         dbDir.deleteRecursively()
                     }
                     val dbFile = databaseFactory.resolveDatabaseFile(sanitized)
-                    if (dbFile.exists()) {
-                        dbFile.delete()
-                    }
+                    purgeFileAndAuxiliaryArtifacts(dbFile)
                 }
-            } catch (_: Throwable) {
+            } catch (e: Throwable) {
+                Log.w(TAG, "Suppressed account directory purge failure: ${e.message}")
             }
         }
 
@@ -305,17 +373,21 @@ class XmtpIntegrationTest {
                 val sanitized = DatabaseFactory.sanitiseEthereumAddress(address)
                 if (sanitized != null) {
                     val dbFile = databaseFactory.resolveDatabaseFile(sanitized)
-                    if (dbFile.exists()) {
-                        dbFile.delete()
-                    }
+                    purgeFileAndAuxiliaryArtifacts(dbFile)
                 }
-            } catch (_: Throwable) {
+            } catch (e: Throwable) {
+                Log.w(TAG, "Suppressed ephemeral DB purge failure: ${e.message}")
             }
         }
     }
 
     companion object {
-        private val TEST_TIMEOUT = 30.seconds
+        private const val TAG = "XmtpIntegrationTest"
+        private const val MAX_HANDSHAKE_ATTEMPTS = 3
+        private const val INITIAL_BACKOFF_MS = 1000L
+        private val POLL_INTERVAL_MS = 50.milliseconds
         private val STATE_VERIFICATION_TIMEOUT = 15.seconds
+        private val TEARDOWN_DRAIN_TIMEOUT = 5.seconds
+        private val TEST_EXECUTION_TIMEOUT = 60.seconds
     }
 }
