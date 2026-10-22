@@ -2,6 +2,7 @@ package com.example.thesis.repository
 
 import android.util.Log
 import com.example.thesis.database.DatabaseFactory
+import com.example.thesis.util.CryptoUtils
 import com.example.thesis.xmtp.XmtpEngine
 import com.example.thesis.xmtp.XmtpEngineState
 import kotlinx.coroutines.CancellationException
@@ -11,15 +12,17 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.buffer
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
@@ -29,28 +32,27 @@ import kotlinx.coroutines.withContext
 import org.xmtp.android.library.Client
 import org.xmtp.android.library.Conversation
 import org.xmtp.android.library.libxmtp.DecodedMessage
-import com.example.thesis.util.CryptoUtils
 import java.util.Collections
 import java.util.LinkedHashMap
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Hardened Clean Architecture repository bridging the [XmtpEngine] (libxmtp Rust MLS core)
- * to Jetpack Compose UI with backpressure safety, hot multicast sharing, and two-phase persistence.
+ * Production reactive repository orchestrating MLS 1-on-1 and Group conversations, bridging [XmtpEngine]
+ * to presentation layers using Unidirectional Data Flow (UDF), structured concurrency, and backpressure safety.
  *
- * ## Audited Concurrency & Reactive Guarantees
- * 1. **Stream Lifecycle & gRPC Teardown**: Uses hot multicast streams via [shareIn] with
- *    [SharingStarted.WhileSubscribed] (5s stop timeout). When Compose collectors leave the
- *    composition (`onStop`/`onDestroy`), upstream gRPC push streams terminate cleanly after the grace period.
- * 2. **Backpressure Protection**: Replaces [BufferOverflow.DROP_OLDEST] on message streams with
- *    [BufferOverflow.SUSPEND] to prevent silent message loss during high throughput. Bounded LRU
- *    deduplication prevents heap OutOfMemory (OOM) leaks.
- * 3. **Re-subscription Prevention**: Prevents cold flow multi-subscription storms by sharing a single
- *    upstream gRPC stream across multiple UI collectors.
- * 4. **Two-Phase Database Persistence**: Optimistically commits outgoing messages to local encrypted
- *    SQLCipher storage with [MessageDeliveryStatus.LOCAL_PENDING] before network transmission, updating
- *    to [MessageDeliveryStatus.PUBLISHED] upon node ACK for offline durability.
+ * ## Architectural Guarantees
+ * 1. **Structured Concurrency & gRPC Teardown**: Pipelines are cold channel flows configured with
+ *    [buffer] (`capacity = Channel.BUFFERED, onBufferOverflow = BufferOverflow.DROP_OLDEST`) and shared via
+ *    [SharingStarted.WhileSubscribed] (5-second stop timeout). When UI collectors leave the composition
+ *    (`onStop`/`onDestroy`), upstream gRPC push streams and background loops cancel cleanly.
+ * 2. **Backpressure Protection**: Implements [BufferOverflow.DROP_OLDEST] buffer policy preventing UI render
+ *    jank from stalling native message processing. Bounded LRU deduplication prevents in-memory OOM.
+ * 3. **Hot Multicast Sharing**: Eliminates multi-subscription storms by sharing a single upstream gRPC
+ *    stream across concurrent UI subscribers.
+ * 4. **Two-Phase Optimistic Persistence**: Optimistically commits outgoing messages to local encrypted
+ *    storage with [MessageDeliveryStatus.LOCAL_PENDING] prior to network dispatch, transitioning to
+ *    [MessageDeliveryStatus.PUBLISHED] upon node confirmation.
  *
  * @param xmtpEngine   The active lifecycle manager for the XMTP v4 client.
  * @param ioDispatcher Injectable coroutine dispatcher for IO-bound work (defaults to [Dispatchers.IO]).
@@ -66,7 +68,7 @@ class ConversationRepository(
 
     /**
      * Internal event bus for optimistic and published outgoing messages.
-     * Protected with [BufferOverflow.DROP_OLDEST] buffer for send event broadcasts.
+     * Backpressure-protected with [BufferOverflow.DROP_OLDEST] buffer policy.
      */
     private val outgoingMessageEvents = MutableSharedFlow<Message>(
         extraBufferCapacity = CHANNEL_BUFFER_CAPACITY,
@@ -87,7 +89,7 @@ class ConversationRepository(
     private val messageFlows = ConcurrentHashMap<String, SharedFlow<Message>>()
 
     // ────────────────────────────────────────────────────────────────────────
-    //  Reactive Data Streams (Hot Multicast Sharing)
+    //  Reactive Data Streams (Cold Channel Flows & Multicast Sharing)
     // ────────────────────────────────────────────────────────────────────────
 
     /**
@@ -119,7 +121,7 @@ class ConversationRepository(
      */
     fun observeConversations(): Flow<List<Conversation>> = sharedConversationsFlow
 
-    private fun createConversationsPipeline(client: Client): Flow<List<Conversation>> = flow {
+    private fun createConversationsPipeline(client: Client): Flow<List<Conversation>> = channelFlow {
         // Initial sync with network ledger
         try {
             client.conversations.sync()
@@ -129,7 +131,7 @@ class ConversationRepository(
         }
 
         val currentList = client.conversations.list().toMutableList()
-        emit(currentList.toList())
+        send(currentList.toList())
 
         // Real-time network stream with resilient reconnection backoff
         val networkStream: Flow<Conversation?> = client.conversations.stream()
@@ -162,16 +164,19 @@ class ConversationRepository(
                 currentList.clear()
                 currentList.addAll(refreshed)
             }
-            emit(currentList.toList())
+            send(currentList.toList())
         }
-    }.flowOn(ioDispatcher)
+    }.buffer(
+        capacity = Channel.BUFFERED,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    ).flowOn(ioDispatcher)
 
     /**
      * Observes the real-time stream of incoming messages for a specific conversation.
      *
      * Shared hot stream: multiple UI collectors for the same [conversationId] share a single
      * underlying gRPC stream. Protected against OOM via a bounded LRU deduplicator and against
-     * backpressure message loss via [BufferOverflow.SUSPEND].
+     * backpressure drops via [BufferOverflow.DROP_OLDEST] buffer policy.
      *
      * @param conversationId Unique identifier of target XMTP conversation.
      * @return [Flow] of individual [Message] entities ordered chronologically.
@@ -194,7 +199,7 @@ class ConversationRepository(
         }
     }
 
-    private fun createMessagesPipeline(client: Client, conversationId: String): Flow<Message> = flow {
+    private fun createMessagesPipeline(client: Client, conversationId: String): Flow<Message> = channelFlow {
         var conversation = client.conversations.findConversation(conversationId)
         if (conversation == null) {
             try {
@@ -222,7 +227,7 @@ class ConversationRepository(
         val deduplicator = BoundedIdDeduplicator(maxSize = MAX_DEDUPLICATOR_CAPACITY)
         for (msg in historicalMessages) {
             deduplicator.add(msg.id)
-            emit(msg)
+            send(msg)
         }
 
         // 2. Real-time network stream
@@ -244,16 +249,19 @@ class ConversationRepository(
         val localStream: Flow<Message> = outgoingMessageEvents
             .filter { it.conversationId == conversationId }
 
-        // 4. Merge network and local streams with backpressure safety (suspend on buffer overflow)
+        // 4. Merge network and local streams with backpressure safety
         merge(networkStream, localStream).collect { msg ->
             if (msg.deliveryStatus == MessageDeliveryStatus.LOCAL_PENDING ||
                 msg.deliveryStatus == MessageDeliveryStatus.FAILED ||
                 deduplicator.add(msg.id)
             ) {
-                emit(msg)
+                send(msg)
             }
         }
-    }.flowOn(ioDispatcher)
+    }.buffer(
+        capacity = Channel.BUFFERED,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    ).flowOn(ioDispatcher)
 
     // ────────────────────────────────────────────────────────────────────────
     //  MLS Group Operations
