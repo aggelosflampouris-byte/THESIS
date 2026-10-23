@@ -228,12 +228,12 @@ class XmtpEngine(
             val dbDirectory = customDbDirectory ?: databaseFactory.resolveAccountDatabaseDirectory(sanitisedAddress)
             ensureDirectoryAccessible(dbDirectory)
 
-            val keyResolution = resolveDatabaseEncryptionKey(customDbEncryptionKey)
-            val dekBytes = when (keyResolution) {
+            val dekBytes = when (val keyResolution = resolveDatabaseEncryptionKey(customDbEncryptionKey)) {
                 is KeyResolutionResult.Success -> {
                     if (keyResolution.shouldZeroize) dekToZero = keyResolution.key
                     keyResolution.key
                 }
+
                 is KeyResolutionResult.Failure -> {
                     return@withContext XmtpEngineState.Error(keyResolution.error)
                 }
@@ -337,6 +337,7 @@ class XmtpEngine(
                 rawDek.fill(0x00)
                 KeyResolutionResult.Success(cloned, shouldZeroize = true)
             }
+
             is KeystoreResult.Failure -> {
                 KeyResolutionResult.Failure(
                     XmtpInitError.DatabaseError(
@@ -375,7 +376,20 @@ class XmtpEngine(
     }
 
     private sealed interface KeyResolutionResult {
-        data class Success(val key: ByteArray, val shouldZeroize: Boolean) : KeyResolutionResult
+        data class Success(val key: ByteArray, val shouldZeroize: Boolean) : KeyResolutionResult {
+            override fun equals(other: Any?): Boolean {
+                if (this === other) return true
+                if (other !is Success) return false
+                return key.contentEquals(other.key) && shouldZeroize == other.shouldZeroize
+            }
+
+            override fun hashCode(): Int {
+                var result = key.contentHashCode()
+                result = 31 * result + shouldZeroize.hashCode()
+                return result
+            }
+        }
+
         data class Failure(val error: XmtpInitError.DatabaseError) : KeyResolutionResult
     }
 }
