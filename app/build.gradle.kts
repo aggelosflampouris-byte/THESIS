@@ -141,9 +141,16 @@ dependencies {
 
     // ------------------------------------------------------------------------
     // Web3j Cryptography: EIP-191 & SECP256K1 Key Derivation
-    // Forces version 4.9.8 across the project, upgrading XMTP transitives.
+    // Exclude legacy bcprov-jdk15on to prevent duplicate classes with bcprov-jdk18on
     // ------------------------------------------------------------------------
-    implementation("org.web3j:crypto:4.9.8")
+    implementation("org.web3j:crypto:4.9.8") {
+        exclude(group = "org.bouncycastle", module = "bcprov-jdk15on")
+    }
+
+    // ------------------------------------------------------------------------
+    // Bouncy Castle: SECP256K1, ECDSA, KeccakDigest for ThesisSigner
+    // ------------------------------------------------------------------------
+    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
 
     // ------------------------------------------------------------------------
     // AndroidX Security Crypto: Hardware Keystore Envelope Encryption
@@ -183,4 +190,8 @@ dependencies {
     // ------------------------------------------------------------------------
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
+}
+
+configurations.all {
+    exclude(group = "org.bouncycastle", module = "bcprov-jdk15on")
 }

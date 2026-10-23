@@ -64,6 +64,20 @@ class XmtpEngine(
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : AutoCloseable {
 
+    /**
+     * Convenience constructor for initializing with a target [XMTPEnvironment].
+     */
+    constructor(
+        context: Context,
+        environment: XMTPEnvironment
+    ) : this(
+        context = context,
+        keystoreManager = KeystoreManager(context.applicationContext),
+        databaseFactory = DatabaseFactory(context.applicationContext),
+        environment = environment,
+        ioDispatcher = Dispatchers.IO
+    )
+
     private val appContext: Context = context.applicationContext
 
     // ────────────────────────────────────────────────────────────────────────
@@ -118,8 +132,8 @@ class XmtpEngine(
      */
     fun initialise(
         signer: SigningKey,
-        customDbDirectory: File? = null,
-        customDbEncryptionKey: ByteArray? = null
+        dbDirectory: File? = null,
+        dbEncryptionKey: ByteArray? = null
     ) {
         synchronized(lock) {
             val current = _state.value
@@ -136,7 +150,7 @@ class XmtpEngine(
                         // Double check after acquiring mutex
                         if (_state.value is XmtpEngineState.Ready) return@withLock
 
-                        val resultState = executeInitialization(signer, customDbDirectory, customDbEncryptionKey)
+                        val resultState = executeInitialization(signer, dbDirectory, dbEncryptionKey)
 
                         if (coroutineContext.isActive && _state.value is XmtpEngineState.Loading) {
                             if (resultState is XmtpEngineState.Ready) {
