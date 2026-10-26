@@ -73,9 +73,18 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         try {
-            engine.shutdown()
+            if (::engine.isInitialized) {
+                engine.shutdown()
+            }
         } finally {
-            signer?.close()
+            try {
+                if (::repository.isInitialized) {
+                    repository.close()
+                }
+            } finally {
+                signer?.close()
+                signer = null
+            }
         }
     }
 }

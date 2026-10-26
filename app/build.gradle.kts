@@ -143,9 +143,7 @@ dependencies {
     // Web3j Cryptography: EIP-191 & SECP256K1 Key Derivation
     // Exclude legacy bcprov-jdk15on to prevent duplicate classes with bcprov-jdk18on
     // ------------------------------------------------------------------------
-    implementation("org.web3j:crypto:4.9.8") {
-        exclude(group = "org.bouncycastle", module = "bcprov-jdk15on")
-    }
+    implementation("org.web3j:crypto:4.9.8")
 
     // ------------------------------------------------------------------------
     // Bouncy Castle: SECP256K1, ECDSA, KeccakDigest for ThesisSigner
