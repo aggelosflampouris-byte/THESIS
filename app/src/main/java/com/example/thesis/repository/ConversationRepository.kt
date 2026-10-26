@@ -322,6 +322,7 @@ class ConversationRepository(
      * Live message stream for a direct [Conversation] reference.
      */
     fun observeMessages(conversation: Conversation): Flow<DecodedMessage> = channelFlow {
+        val deduplicator = BoundedIdDeduplicator(maxSize = MAX_DEDUPLICATOR_CAPACITY)
         val history = withContext(ioDispatcher) {
             try {
                 conversation.messages()
@@ -330,12 +331,17 @@ class ConversationRepository(
                 emptyList()
             }
         }
-        history.forEach { send(it) }
+        history.forEach { msg ->
+            deduplicator.add(msg.id)
+            send(msg)
+        }
 
         val streamJob = launch {
             try {
                 conversation.streamMessages().collect { message ->
-                    send(message)
+                    if (deduplicator.add(message.id)) {
+                        send(message)
+                    }
                 }
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
