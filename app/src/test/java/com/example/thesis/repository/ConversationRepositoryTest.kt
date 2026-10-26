@@ -464,4 +464,34 @@ class ConversationRepositoryTest {
         // streamMessages must be called strictly once upstream despite two active collectors
         coVerify(exactly = 1) { mockConversation.streamMessages() }
     }
+    @Test
+    fun test_observeMessages_directConversation_deduplicatesHistoryAndStream() = runTest(testDispatcher) {
+        val mockMsg = mockk<DecodedMessage>(relaxed = true)
+        every { mockMsg.id } returns "msg_shared_id"
+        every { mockMsg.conversationId } returns testConvId
+        every { mockMsg.senderInboxId } returns testPeerAddress
+        every { mockMsg.body } returns "Duplicate Message Test"
+
+        val streamFlow = MutableSharedFlow<DecodedMessage>()
+        coEvery { mockConversation.messages() } returns listOf(mockMsg)
+        every { mockConversation.streamMessages() } returns streamFlow
+
+        repository.observeMessages(mockConversation).test {
+            // First emission from historical fetch
+            val initialList = awaitItem()
+            assertEquals(1, initialList.size)
+            assertEquals("msg_shared_id", initialList[0].id)
+
+            // Emit duplicate incoming message
+            streamFlow.emit(mockMsg)
+            testScheduler.advanceUntilIdle()
+
+            // Map dedupes by key and emits updated list containing exactly 1 element
+            val secondEmission = awaitItem()
+            assertEquals(1, secondEmission.size)
+            assertEquals("msg_shared_id", secondEmission[0].id)
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
 }

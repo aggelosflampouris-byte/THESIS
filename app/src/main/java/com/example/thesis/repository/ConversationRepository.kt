@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.buffer
+import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterIsInstance
@@ -61,14 +62,23 @@ import java.util.concurrent.ConcurrentHashMap
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class ConversationRepository(
-    val xmtpEngine: XmtpEngine,
+    val engine: XmtpEngine,
+    private val repositoryScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : AutoCloseable {
 
-    val engine: XmtpEngine get() = xmtpEngine
+    val xmtpEngine: XmtpEngine get() = engine
+
+    constructor(
+        xmtpEngine: XmtpEngine,
+        ioDispatcher: CoroutineDispatcher
+    ) : this(
+        engine = xmtpEngine,
+        repositoryScope = CoroutineScope(SupervisorJob() + ioDispatcher),
+        ioDispatcher = ioDispatcher
+    )
 
     private val repositoryJob = SupervisorJob()
-    private val repositoryScope = CoroutineScope(repositoryJob + ioDispatcher)
 
     /**
      * Internal event bus for optimistic and published outgoing messages.
@@ -321,35 +331,40 @@ class ConversationRepository(
     /**
      * Live message stream for a direct [Conversation] reference.
      */
-    fun observeMessages(conversation: Conversation): Flow<DecodedMessage> = channelFlow {
-        val deduplicator = BoundedIdDeduplicator(maxSize = MAX_DEDUPLICATOR_CAPACITY)
-        val history = withContext(ioDispatcher) {
+    /**
+     * Επιστρέφει ενημερωμένη και deduplicated λίστα μηνυμάτων για τη συνομιλία.
+     */
+    fun observeMessages(conversation: Conversation): Flow<List<DecryptedMessage>> = callbackFlow {
+        val messageMap = LinkedHashMap<String, DecryptedMessage>()
+
+        val initialHistory = withContext(ioDispatcher) {
             try {
                 conversation.messages()
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
                 emptyList()
             }
         }
-        history.forEach { msg ->
-            deduplicator.add(msg.id)
-            send(msg)
-        }
+        initialHistory.forEach { messageMap[it.id] = it }
+        trySend(messageMap.values.toList())
 
-        val streamJob = launch {
+        val streamJob = launch(ioDispatcher) {
             try {
-                conversation.streamMessages().collect { message ->
-                    if (deduplicator.add(message.id)) {
-                        send(message)
-                    }
+                conversation.streamMessages().collect { incoming ->
+                    messageMap[incoming.id] = incoming
+                    trySend(messageMap.values.toList())
                 }
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // Διακοπή σύνδεσης gRPC
             }
         }
 
         awaitClose { streamJob.cancel() }
-    }.buffer(capacity = 128, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    }
+    .buffer(capacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     .flowOn(ioDispatcher)
 
     /**
@@ -584,3 +599,6 @@ fun DecodedMessage.toDomainMessage(): Message = Message(
  * Typealias providing backwards-compatibility for callers referring to [DecodedMessage].
  */
 typealias DecryptedMessage = DecodedMessage
+
+val DecodedMessage.senderAddress: String
+    get() = senderInboxId

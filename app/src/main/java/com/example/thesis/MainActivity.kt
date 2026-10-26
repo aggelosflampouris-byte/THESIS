@@ -3,22 +3,35 @@ package com.example.thesis
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -26,185 +39,246 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.example.thesis.identity.ThesisSigner
-import com.example.thesis.repository.ConversationRepository
-import com.example.thesis.ui.screens.ChatScreen
-import com.example.thesis.ui.screens.InboxScreen
-import com.example.thesis.ui.theme.THESISTheme
-import com.example.thesis.xmtp.XmtpEngine
+import com.example.thesis.repository.senderAddress
+import com.example.thesis.ui.ChatViewModel
 import com.example.thesis.xmtp.XmtpEngineState
-import org.xmtp.android.library.XMTPEnvironment
 
 class MainActivity : ComponentActivity() {
 
-    private lateinit var engine: XmtpEngine
-    private lateinit var repository: ConversationRepository
-    private var signer: ThesisSigner? = null
+    private val viewModel: ChatViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
-
-        // Provision ephemeral dev signer for dev environment handshakes
-        val activeSigner = ThesisSigner.generateRandom()
-        this.signer = activeSigner
-
-        // Instantiate core engine and repository singletons
-        this.engine = XmtpEngine(
-            context = applicationContext,
-            environment = XMTPEnvironment.DEV
-        )
-        this.repository = ConversationRepository(xmtpEngine = engine)
-
         setContent {
-            THESISTheme {
-                ThesisApp(
-                    engine = engine,
-                    repository = repository,
-                    signer = activeSigner
-                )
-            }
-        }
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        try {
-            if (::engine.isInitialized) {
-                engine.shutdown()
-            }
-        } finally {
-            try {
-                if (::repository.isInitialized) {
-                    repository.close()
-                }
-            } finally {
-                signer?.close()
-                signer = null
-            }
-        }
-    }
-}
-
-@Composable
-fun ThesisApp(
-    engine: XmtpEngine,
-    repository: ConversationRepository,
-    signer: ThesisSigner,
-    modifier: Modifier = Modifier
-) {
-    val engineState by engine.state.collectAsState()
-    var selectedConversationId by remember { mutableStateOf<String?>(null) }
-
-    LaunchedEffect(Unit) {
-        if (engine.state.value is XmtpEngineState.Idle) {
-            engine.initialise(signer)
-        }
-    }
-
-    Surface(
-        modifier = modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.background
-    ) {
-        when (val state = engineState) {
-            is XmtpEngineState.Idle, is XmtpEngineState.Loading -> {
-                InitializationLoadingView()
-            }
-
-            is XmtpEngineState.Error -> {
-                InitializationErrorView(
-                    error = state.error.message,
-                    onRetry = { engine.initialise(signer) }
-                )
-            }
-
-            is XmtpEngineState.Ready -> {
-                val currentConvId = selectedConversationId
-                if (currentConvId == null) {
-                    InboxScreen(
-                        repository = repository,
-                        currentAddress = signer.address,
-                        onConversationClick = { selectedConversationId = it }
-                    )
-                } else {
-                    ChatScreen(
-                        repository = repository,
-                        conversationId = currentConvId,
-                        currentAddress = signer.address,
-                        onBackClick = { selectedConversationId = null }
-                    )
+            MaterialTheme {
+                Surface(modifier = Modifier.fillMaxSize()) {
+                    ThesisMessagingApp(viewModel = viewModel)
                 }
             }
         }
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun InitializationLoadingView() {
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-            modifier = Modifier.padding(32.dp)
-        ) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(48.dp),
-                color = MaterialTheme.colorScheme.primary,
-                strokeWidth = 4.dp
-            )
-            Spacer(modifier = Modifier.height(24.dp))
-            Text(
-                text = "Connecting to XMTP Network",
-                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = "Authenticating EIP-191 identity and unlocking SQLCipher local store...",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center
+fun ThesisMessagingApp(viewModel: ChatViewModel) {
+    val engineState by viewModel.engineState.collectAsState()
+    val walletAddress by viewModel.walletAddress.collectAsState()
+    val conversations by viewModel.conversations.collectAsState()
+    val selectedConversation by viewModel.selectedConversation.collectAsState()
+    val messages by viewModel.messages.collectAsState()
+    val statusBanner by viewModel.statusBanner.collectAsState()
+
+    var peerAddressInput by remember { mutableStateOf("") }
+    var messageInput by remember { mutableStateOf("") }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text("XMTP v4 (MLS) + SQLCipher")
+                        walletAddress?.let {
+                            Text(
+                                text = "ID: ${it.take(8)}...${it.takeLast(6)}",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                    }
+                },
+                actions = {
+                    if (walletAddress != null) {
+                        Button(
+                            onClick = { viewModel.performCryptoShredding() },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.error
+                            )
+                        ) {
+                            Text("GDPR Shred")
+                        }
+                    }
+                }
             )
         }
-    }
-}
-
-@Composable
-private fun InitializationErrorView(
-    error: String,
-    onRetry: () -> Unit
-) {
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center
-    ) {
+    ) { padding ->
         Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-            modifier = Modifier.padding(32.dp)
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(16.dp)
         ) {
-            Text(
-                text = "Connection Failed",
-                style = MaterialTheme.typography.titleMedium.copy(
-                    fontWeight = FontWeight.Bold,
-                    color = MaterialTheme.colorScheme.error
-                )
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            Text(
-                text = error,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center
-            )
-            Spacer(modifier = Modifier.height(24.dp))
-            Button(onClick = onRetry) {
-                Text("Retry Handshake")
+            statusBanner?.let { banner ->
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer
+                    )
+                ) {
+                    Text(
+                        text = banner,
+                        modifier = Modifier.padding(12.dp),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
+
+            when (engineState) {
+                is XmtpEngineState.Idle -> {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Button(onClick = { viewModel.initializeSession() }) {
+                            Text("Εκκίνηση Hardware Keystore & XMTP MLS")
+                        }
+                    }
+                }
+
+                is XmtpEngineState.Loading -> {
+                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            CircularProgressIndicator()
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text("Αποκρυπτογράφηση SQLCipher & Σύνδεση MLS...")
+                        }
+                    }
+                }
+
+                is XmtpEngineState.Error -> {
+                    Column(
+                        modifier = Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.Center,
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "Σφάλμα: ${(engineState as XmtpEngineState.Error).error}",
+                            color = MaterialTheme.colorScheme.error
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Button(onClick = { viewModel.initializeSession() }) {
+                            Text("Επανάληψη Σύνδεσης")
+                        }
+                    }
+                }
+
+                is XmtpEngineState.Ready -> {
+                    if (selectedConversation == null) {
+                        // Οθόνη Λίστας Συνομιλιών (Inbox)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = peerAddressInput,
+                                onValueChange = { peerAddressInput = it },
+                                label = { Text("Διεύθυνση Παραλήπτη (0x...)") },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Button(
+                                onClick = {
+                                    if (peerAddressInput.isNotBlank()) {
+                                        viewModel.startNewConversation(peerAddressInput)
+                                        peerAddressInput = ""
+                                    }
+                                }
+                            ) {
+                                Text("Νέα")
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text("Ενεργές Συνομιλίες MLS (${conversations.size})", style = MaterialTheme.typography.titleMedium)
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        LazyColumn(modifier = Modifier.fillMaxSize()) {
+                            items(conversations) { conv ->
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 4.dp)
+                                        .clickable { viewModel.selectConversation(conv) }
+                                ) {
+                                    Column(modifier = Modifier.padding(12.dp)) {
+                                        Text(
+                                            text = "Topic: ${conv.topic.take(24)}...",
+                                            style = MaterialTheme.typography.bodyLarge
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Οθόνη Ενεργής Συνομιλίας (Chat)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            TextButton(onClick = { viewModel.selectConversation(null) }) {
+                                Text("← Πίσω")
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "MLS Chat",
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                        }
+
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+                        LazyColumn(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth()
+                        ) {
+                            items(messages) { msg ->
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 4.dp)
+                                ) {
+                                    Column(modifier = Modifier.padding(10.dp)) {
+                                        Text(
+                                            text = "Από: ${msg.senderAddress.take(10)}...",
+                                            style = MaterialTheme.typography.labelSmall
+                                        )
+                                        Spacer(modifier = Modifier.height(2.dp))
+                                        Text(
+                                            text = msg.body,
+                                            style = MaterialTheme.typography.bodyMedium
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = messageInput,
+                                onValueChange = { messageInput = it },
+                                label = { Text("Μήνυμα E2EE...") },
+                                modifier = Modifier.weight(1f)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Button(
+                                onClick = {
+                                    if (messageInput.isNotBlank()) {
+                                        viewModel.sendMessage(messageInput)
+                                        messageInput = ""
+                                    }
+                                }
+                            ) {
+                                Text("Αποστολή")
+                            }
+                        }
+                    }
+                }
             }
         }
     }

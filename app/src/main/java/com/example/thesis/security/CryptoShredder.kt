@@ -70,11 +70,11 @@ class CryptoShredder(
 
         // ── Step 2 & 3: Resolve and physically delete files (NonCancellable) ──
         withContext(NonCancellable) {
-            val nonFatalErrors = purgeDatabaseStorage(sanitisedAddress)
+            val (nonFatalErrors, deletedCount) = purgeDatabaseStorage(sanitisedAddress)
 
             if (nonFatalErrors.isEmpty()) {
-                Log.i(TAG, "shredAccountData: All storage artifacts expunged successfully.")
-                ShredResult.Success
+                Log.i(TAG, "shredAccountData: All storage artifacts expunged successfully ($deletedCount files deleted).")
+                ShredResult.Success(deletedFilesCount = deletedCount)
             } else {
                 Log.w(
                     TAG,
@@ -88,16 +88,21 @@ class CryptoShredder(
         }
     }
 
-    private fun purgeDatabaseStorage(sanitisedAddress: String): List<String> {
+    private fun purgeDatabaseStorage(sanitisedAddress: String): Pair<List<String>, Int> {
         val nonFatalErrors = mutableListOf<String>()
+        var deletedCount = 0
         try {
             val dbFile = databaseFactory.resolveDatabaseFile(sanitisedAddress)
             val filesToDelete = collectAllDatabaseArtifacts(dbFile)
 
             filesToDelete.forEach { file ->
                 val outcome = deleteFileSafely(file = file)
-                if (outcome is FileDeleteOutcome.Failed) {
-                    nonFatalErrors.add("File[${outcome.suffix}]: ${outcome.exceptionClass}")
+                when (outcome) {
+                    is FileDeleteOutcome.Deleted -> deletedCount++
+                    is FileDeleteOutcome.Failed -> {
+                        nonFatalErrors.add("File[${outcome.suffix}]: ${outcome.exceptionClass}")
+                    }
+                    is FileDeleteOutcome.Skipped -> {}
                 }
             }
 
@@ -107,6 +112,8 @@ class CryptoShredder(
                 if (!dirDeleted) {
                     Log.w(TAG, "shredAccountData: account directory deleteRecursively returned false")
                     nonFatalErrors.add("DirectoryCleanup: deleteRecursivelyFailed")
+                } else {
+                    deletedCount++
                 }
             }
         } catch (e: Exception) {
@@ -114,7 +121,7 @@ class CryptoShredder(
             Log.w(TAG, "shredAccountData: Exception during storage unlinking: ${e::class.java.simpleName}")
             nonFatalErrors.add("StorageResolution: ${e::class.java.simpleName}")
         }
-        return nonFatalErrors
+        return Pair(nonFatalErrors, deletedCount)
     }
 
     /**
@@ -202,11 +209,15 @@ private sealed interface FileDeleteOutcome {
 }
 
 sealed interface ShredResult {
-    data object Success : ShredResult
+    data class Success(val deletedFilesCount: Int = 0) : ShredResult
 
     data class PartialSuccess(
         val message: String,
-        val nonFatalErrors: List<String>
+        val nonFatalErrors: List<String> = emptyList()
+    ) : ShredResult
+
+    data class PartialSuccessCryptoShreddedOnly(
+        val message: String
     ) : ShredResult
 
     sealed interface Failure : ShredResult {
