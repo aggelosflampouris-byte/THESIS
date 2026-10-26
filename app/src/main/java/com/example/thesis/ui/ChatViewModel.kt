@@ -10,6 +10,7 @@ import com.example.thesis.repository.DecryptedMessage
 import com.example.thesis.security.CryptoShredder
 import com.example.thesis.security.KeystoreManager
 import com.example.thesis.security.ShredResult
+import com.example.thesis.security.ThesisTelemetry
 import com.example.thesis.xmtp.XmtpEngine
 import com.example.thesis.xmtp.XmtpEngineState
 import kotlinx.coroutines.Job
@@ -63,7 +64,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun initializeSession() {
         viewModelScope.launch {
-            val dekResult = keystoreManager.getOrCreateDatabaseKey()
+            val dekResult = ThesisTelemetry.measureOperation("1. Keystore AES-256-GCM DEK Unwrap") {
+                keystoreManager.getOrCreateDatabaseKey()
+            }
             val dekBytes = try {
                 dekResult.getOrThrow()
             } catch (e: Throwable) {
@@ -72,17 +75,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             try {
-                val signer = activeSigner ?: ThesisSigner.createEphemeral().also { activeSigner = it }
+                val signer = ThesisTelemetry.measureOperation("2. Secp256k1 Ephemeral KeyGen") {
+                    activeSigner ?: ThesisSigner.createEphemeral().also { activeSigner = it }
+                }
                 _walletAddress.value = signer.address
 
                 val dbFile = databaseFactory.resolveDatabaseFile(signer.address)
                 val dbDirectory = dbFile.parentFile ?: appContext.filesDir
 
-                engine.initialise(
-                    signer = signer,
-                    dbDirectory = dbDirectory,
-                    dbEncryptionKey = dekBytes.copyOf()
-                )
+                ThesisTelemetry.measureSuspendOperation("3. SQLCipher Sandbox & MLS Init") {
+                    engine.initialise(
+                        signer = signer,
+                        dbDirectory = dbDirectory,
+                        dbEncryptionKey = dekBytes.copyOf()
+                    )
+                }
                 _statusBanner.value = "Σύνδεση με Hardware-Backed SQLCipher & MLS..."
             } finally {
                 // Άμεσος μηδενισμός του DEK στη μνήμη RAM
@@ -107,24 +114,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun startNewConversation(peerAddress: String) {
         viewModelScope.launch {
-            repository.createConversation(peerAddress)
-                .onSuccess { conv ->
-                    _statusBanner.value = "Η συνομιλία MLS δημιουργήθηκε."
-                    selectConversation(conv)
-                }
-                .onFailure { err ->
-                    _statusBanner.value = "Αποτυχία δημιουργίας συνομιλίας: ${err.message}"
-                }
+            ThesisTelemetry.measureSuspendOperation("4. MLS Conversation Handshake") {
+                repository.createConversation(peerAddress)
+            }
+            .onSuccess { conv ->
+                _statusBanner.value = "Η συνομιλία MLS δημιουργήθηκε."
+                selectConversation(conv)
+            }
+            .onFailure { err ->
+                _statusBanner.value = "Αποτυχία δημιουργίας συνομιλίας: ${err.message}"
+            }
         }
     }
 
     fun sendMessage(text: String) {
         val conv = _selectedConversation.value ?: return
         viewModelScope.launch {
-            repository.sendMessage(conv, text)
-                .onFailure { err ->
-                    _statusBanner.value = "Αποτυχία αποστολής: ${err.message}"
-                }
+            ThesisTelemetry.measureSuspendOperation("5. MLS E2EE Message Dispatch") {
+                repository.sendMessage(conv, text)
+            }
+            .onFailure { err ->
+                _statusBanner.value = "Αποτυχία αποστολής: ${err.message}"
+            }
         }
     }
 
@@ -146,7 +157,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             activeSigner?.close()
             activeSigner = null
 
-            when (val res = cryptoShredder.shredAccountData(address)) {
+            val res = ThesisTelemetry.measureSuspendOperation("6. GDPR Art.17 Crypto-Shredding") {
+                cryptoShredder.shredAccountData(address)
+            }
+            when (res) {
                 is ShredResult.Success -> {
                     _walletAddress.value = null
                     _statusBanner.value = "GDPR Wipe: Κλειδί Keystore & ${res.deletedFilesCount} αρχεία βάσης καταστράφηκαν οριστικά."
