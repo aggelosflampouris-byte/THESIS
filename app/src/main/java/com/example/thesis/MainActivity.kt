@@ -40,7 +40,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.example.thesis.repository.senderAddress
 import com.example.thesis.ui.ChatViewModel
 import com.example.thesis.xmtp.XmtpEngineState
 
@@ -240,7 +239,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                                 ) {
                                     Column(modifier = Modifier.padding(10.dp)) {
                                         Text(
-                                            text = "Από: ${msg.senderAddress.take(10)}...",
+                                            text = "Από: ${msg.senderInboxId.take(10)}...",
                                             style = MaterialTheme.typography.labelSmall
                                         )
                                         Spacer(modifier = Modifier.height(2.dp))

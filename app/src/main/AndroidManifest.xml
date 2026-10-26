@@ -2,18 +2,20 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Απαραίτητα δικαιώματα για τους κόμβους gRPC του XMTP v4 -->
+    <!-- Mandatory network permissions for XMTP v4 gRPC mobile streaming -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <!--
-      allowBackup="false" & dataExtractionRules:
-      Αποτρέπει την εξαγωγή της βάσης SQLCipher και των SharedPreferences
-      εκτός συσκευής (ADB backup / Cloud backup), διασφαλίζοντας το GDPR Art. 17.
+      GDPR Art. 17 Compliant Storage Configuration:
+      - allowBackup="false": Disables legacy Android backup manager.
+      - dataExtractionRules: Forbids cloud and device-to-device database extraction (API 31+).
+      - fullBackupContent: Forbids cloud backup on pre-API 31 devices.
     -->
     <application
         android:allowBackup="false"
-        android:fullBackupContent="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"

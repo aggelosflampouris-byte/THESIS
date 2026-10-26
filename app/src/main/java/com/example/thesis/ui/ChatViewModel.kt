@@ -6,7 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.thesis.database.DatabaseFactory
 import com.example.thesis.identity.ThesisSigner
 import com.example.thesis.repository.ConversationRepository
-import com.example.thesis.repository.DecryptedMessage
+import org.xmtp.android.library.libxmtp.DecodedMessage
 import com.example.thesis.security.CryptoShredder
 import com.example.thesis.security.KeystoreManager
 import com.example.thesis.security.ShredResult
@@ -45,8 +45,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _selectedConversation = MutableStateFlow<Conversation?>(null)
     val selectedConversation: StateFlow<Conversation?> = _selectedConversation.asStateFlow()
 
-    private val _messages = MutableStateFlow<List<DecryptedMessage>>(emptyList())
-    val messages: StateFlow<List<DecryptedMessage>> = _messages.asStateFlow()
+    private val _messages = MutableStateFlow<List<DecodedMessage>>(emptyList())
+    val messages: StateFlow<List<DecodedMessage>> = _messages.asStateFlow()
 
     private val _statusBanner = MutableStateFlow<String?>(null)
     val statusBanner: StateFlow<String?> = _statusBanner.asStateFlow()
@@ -181,8 +181,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
-        super.onCleared()
         engine.shutdown()
+        repository.close()
         activeSigner?.close()
     }
 }
