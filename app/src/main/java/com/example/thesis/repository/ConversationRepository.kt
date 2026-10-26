@@ -26,6 +26,7 @@ import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.flow.shareIn
@@ -60,9 +61,11 @@ import java.util.concurrent.ConcurrentHashMap
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class ConversationRepository(
-    private val xmtpEngine: XmtpEngine,
+    val xmtpEngine: XmtpEngine,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : AutoCloseable {
+
+    val engine: XmtpEngine get() = xmtpEngine
 
     private val repositoryJob = SupervisorJob()
     private val repositoryScope = CoroutineScope(repositoryJob + ioDispatcher)
@@ -89,6 +92,14 @@ class ConversationRepository(
      */
     private val messageFlows = ConcurrentHashMap<String, SharedFlow<Message>>()
 
+    /**
+     * Directly observes the active [Client] instance when the engine enters [XmtpEngineState.Ready].
+     */
+    val readyClientFlow: Flow<Client> = engine.state
+        .filterIsInstance<XmtpEngineState.Ready>()
+        .map { it.client }
+        .distinctUntilChanged()
+
     // ────────────────────────────────────────────────────────────────────────
     //  Reactive Data Streams (Cold Channel Flows & Multicast Sharing)
     // ────────────────────────────────────────────────────────────────────────
@@ -97,10 +108,9 @@ class ConversationRepository(
      * Shared multicast flow of conversations to prevent duplicate network syncs and gRPC streams.
      */
     private val sharedConversationsFlow: SharedFlow<List<Conversation>> by lazy {
-        xmtpEngine.state
-            .filterIsInstance<XmtpEngineState.Ready>()
-            .flatMapLatest { readyState ->
-                createConversationsPipeline(readyState.client)
+        readyClientFlow
+            .flatMapLatest { client ->
+                createConversationsPipeline(client)
             }
             .shareIn(
                 scope = repositoryScope,
@@ -308,6 +318,43 @@ class ConversationRepository(
      * @param content        Plaintext message content.
      * @return [Result.success] on network confirmation, or [Result.failure].
      */
+    /**
+     * Live message stream for a direct [Conversation] reference.
+     */
+    fun observeMessages(conversation: Conversation): Flow<DecodedMessage> = channelFlow {
+        val history = withContext(ioDispatcher) {
+            try {
+                conversation.messages()
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                emptyList()
+            }
+        }
+        history.forEach { send(it) }
+
+        val streamJob = launch {
+            try {
+                conversation.streamMessages().collect { message ->
+                    send(message)
+                }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+            }
+        }
+
+        awaitClose { streamJob.cancel() }
+    }.buffer(capacity = 128, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    .flowOn(ioDispatcher)
+
+    /**
+     * Direct message dispatch on a [Conversation] reference.
+     */
+    suspend fun sendMessage(conversation: Conversation, text: String): Result<String> = withContext(ioDispatcher) {
+        runCatching {
+            conversation.send(text)
+        }
+    }
+
     suspend fun sendMessage(conversationId: String, content: String): Result<Unit> = withContext(ioDispatcher) {
         if (content.isBlank()) {
             return@withContext Result.failure(IllegalArgumentException("Message content cannot be blank"))
@@ -525,3 +572,9 @@ fun DecodedMessage.toDomainMessage(): Message = Message(
         DecodedMessage.MessageDeliveryStatus.ALL -> MessageDeliveryStatus.PUBLISHED
     }
 )
+
+
+/**
+ * Typealias providing backwards-compatibility for callers referring to [DecodedMessage].
+ */
+typealias DecryptedMessage = DecodedMessage
