@@ -19,8 +19,22 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import java.util.UUID
 import org.xmtp.android.library.Conversation
 import org.xmtp.android.library.XMTPEnvironment
+
+
+/**
+ * Action log entry capturing runtime operations, security milestones, and benchmark latencies.
+ */
+data class ActionLogEntry(
+    val id: String = UUID.randomUUID().toString(),
+    val timestamp: Long = System.currentTimeMillis(),
+    val tag: String,
+    val message: String,
+    val durationMs: Double? = null,
+    val isError: Boolean = false
+)
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -51,12 +65,40 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _statusBanner = MutableStateFlow<String?>(null)
     val statusBanner: StateFlow<String?> = _statusBanner.asStateFlow()
 
+    private val _actionLogs = MutableStateFlow<List<ActionLogEntry>>(emptyList())
+    val actionLogs: StateFlow<List<ActionLogEntry>> = _actionLogs.asStateFlow()
+
+    fun logAction(tag: String, message: String, durationMs: Double? = null, isError: Boolean = false) {
+        val entry = ActionLogEntry(
+            tag = tag,
+            message = message,
+            durationMs = durationMs,
+            isError = isError
+        )
+        _actionLogs.value = (_actionLogs.value + entry).takeLast(100)
+    }
+
+    fun clearActionLogs() {
+        _actionLogs.value = emptyList()
+    }
+
     init {
         viewModelScope.launch {
             repository.observeConversations().collectLatest { list ->
                 _conversations.value = list
             }
         }
+        viewModelScope.launch {
+            ThesisTelemetry.eventsFlow.collect { event ->
+                logAction(
+                    tag = "METRIC",
+                    message = event.operationName,
+                    durationMs = event.durationMs,
+                    isError = !event.isSuccess
+                )
+            }
+        }
+
     }
 
     /**
@@ -64,6 +106,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun initializeSession() {
         viewModelScope.launch {
+            logAction("KEYSTORE", "Requesting hardware DEK unwrap (AES-256-GCM)...")
             val dekResult = ThesisTelemetry.measureOperation("1. Keystore AES-256-GCM DEK Unwrap") {
                 keystoreManager.getOrCreateDatabaseKey()
             }
@@ -71,6 +114,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 dekResult.getOrThrow()
             } catch (e: Throwable) {
                 _statusBanner.value = "Σφάλμα Hardware Keystore: ${e.message}"
+                logAction("KEYSTORE", "Hardware Keystore failure: ${e.message}", isError = true)
                 return@launch
             }
 
@@ -79,6 +123,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     activeSigner ?: ThesisSigner.createEphemeral().also { activeSigner = it }
                 }
                 _walletAddress.value = signer.address
+                logAction("IDENTITY", "Ephemeral SECP256K1 signer active: ${signer.address}")
 
                 val dbFile = databaseFactory.resolveDatabaseFile(signer.address)
                 val dbDirectory = dbFile.parentFile ?: appContext.filesDir
@@ -91,6 +136,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
                 _statusBanner.value = "Σύνδεση με Hardware-Backed SQLCipher & MLS..."
+                logAction("XMTP", "Connected to XMTP v4 MLS network with SQLCipher storage")
             } finally {
                 // Άμεσος μηδενισμός του DEK στη μνήμη RAM
                 dekBytes.fill(0x00)
@@ -114,15 +160,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun startNewConversation(peerAddress: String) {
         viewModelScope.launch {
+            logAction("MLS", "Initiating MLS handshake with ${peerAddress.take(10)}...")
             ThesisTelemetry.measureSuspendOperation("4. MLS Conversation Handshake") {
                 repository.createConversation(peerAddress)
             }
             .onSuccess { conv ->
                 _statusBanner.value = "Η συνομιλία MLS δημιουργήθηκε."
+                logAction("MLS", "MLS conversation established. Topic: ${conv.topic.take(24)}...")
                 selectConversation(conv)
             }
             .onFailure { err ->
                 _statusBanner.value = "Αποτυχία δημιουργίας συνομιλίας: ${err.message}"
+                logAction("MLS", "Handshake failed: ${err.message}", isError = true)
             }
         }
     }
@@ -130,11 +179,16 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun sendMessage(text: String) {
         val conv = _selectedConversation.value ?: return
         viewModelScope.launch {
+            logAction("E2EE", "Dispatching encrypted MLS payload...")
             ThesisTelemetry.measureSuspendOperation("5. MLS E2EE Message Dispatch") {
                 repository.sendMessage(conv, text)
             }
+            .onSuccess { msgId ->
+                logAction("E2EE", "Message committed to XMTP ledger (ID: ${msgId.take(16)}...)")
+            }
             .onFailure { err ->
                 _statusBanner.value = "Αποτυχία αποστολής: ${err.message}"
+                logAction("E2EE", "Dispatch failed: ${err.message}", isError = true)
             }
         }
     }
@@ -148,6 +202,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun performCryptoShredding() {
         val address = _walletAddress.value ?: return
         viewModelScope.launch {
+            logAction("GDPR", "Executing GDPR Art. 17 cryptographic wipe...")
             messagesJob?.cancel()
             _selectedConversation.value = null
             _messages.value = emptyList()
@@ -164,17 +219,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 is ShredResult.Success -> {
                     _walletAddress.value = null
                     _statusBanner.value = "GDPR Wipe: Κλειδί Keystore & ${res.deletedFilesCount} αρχεία βάσης καταστράφηκαν οριστικά."
+                    logAction("GDPR", "KEK destroyed & ${res.deletedFilesCount} database files expunged")
                 }
                 is ShredResult.PartialSuccessCryptoShreddedOnly -> {
                     _walletAddress.value = null
                     _statusBanner.value = "Crypto-Shredded: ${res.message}"
+                    logAction("GDPR", "Crypto-shredded: ${res.message}")
                 }
                 is ShredResult.PartialSuccess -> {
                     _walletAddress.value = null
                     _statusBanner.value = "Crypto-Shredded: ${res.message}"
+                    logAction("GDPR", "Crypto-shredded: ${res.message}")
                 }
                 is ShredResult.Failure -> {
                     _statusBanner.value = "Σφάλμα κατά το Crypto-Shredding."
+                    logAction("GDPR", "Crypto-shredding failed", isError = true)
                 }
             }
         }

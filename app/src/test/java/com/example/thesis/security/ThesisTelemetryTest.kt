@@ -8,6 +8,8 @@ import io.mockk.unmockkAll
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.runTest
+import app.cash.turbine.test
+import org.junit.Assert.assertTrue
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.fail
@@ -71,6 +73,19 @@ class ThesisTelemetryTest {
             fail("Expected CancellationException")
         } catch (e: CancellationException) {
             assertEquals("Operation cancelled", e.message)
+        }
+    }
+    @Test
+    fun test_telemetryEventsFlow_emitsRecordedMetrics() = runTest {
+        ThesisTelemetry.eventsFlow.test {
+            ThesisTelemetry.measureOperation("Telemetry Stream Test") {
+                100
+            }
+            val event = awaitItem()
+            assertEquals("Telemetry Stream Test", event.operationName)
+            assertTrue(event.durationMs >= 0.0)
+            assertTrue(event.isSuccess)
+            cancelAndIgnoreRemainingEvents()
         }
     }
 }

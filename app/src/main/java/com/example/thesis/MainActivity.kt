@@ -40,6 +40,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.sp
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import com.example.thesis.ui.ActionLogEntry
 import com.example.thesis.ui.ChatViewModel
 import com.example.thesis.xmtp.XmtpEngineState
 
@@ -68,6 +77,8 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     val selectedConversation by viewModel.selectedConversation.collectAsState()
     val messages by viewModel.messages.collectAsState()
     val statusBanner by viewModel.statusBanner.collectAsState()
+    val actionLogs by viewModel.actionLogs.collectAsState()
+    var isActionLogExpanded by remember { mutableStateOf(true) }
 
     var peerAddressInput by remember { mutableStateOf("") }
     var messageInput by remember { mutableStateOf("") }
@@ -126,7 +137,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
 
             when (engineState) {
                 is XmtpEngineState.Idle -> {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Box(modifier = Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
                         Button(onClick = { viewModel.initializeSession() }) {
                             Text("Εκκίνηση Hardware Keystore & XMTP MLS")
                         }
@@ -134,7 +145,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                 }
 
                 is XmtpEngineState.Loading -> {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Box(modifier = Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             CircularProgressIndicator()
                             Spacer(modifier = Modifier.height(12.dp))
@@ -145,7 +156,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
 
                 is XmtpEngineState.Error -> {
                     Column(
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier.fillMaxWidth().weight(1f),
                         verticalArrangement = Arrangement.Center,
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
@@ -191,7 +202,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                         Text("Ενεργές Συνομιλίες MLS (${conversations.size})", style = MaterialTheme.typography.titleMedium)
                         Spacer(modifier = Modifier.height(8.dp))
 
-                        LazyColumn(modifier = Modifier.fillMaxSize()) {
+                        LazyColumn(modifier = Modifier.fillMaxWidth().weight(1f)) {
                             items(conversations) { conv ->
                                 Card(
                                     modifier = Modifier
@@ -274,6 +285,117 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                                 }
                             ) {
                                 Text("Αποστολή")
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+            ActionLogPanel(
+                logs = actionLogs,
+                isExpanded = isActionLogExpanded,
+                onToggleExpand = { isActionLogExpanded = !isActionLogExpanded },
+                onClear = { viewModel.clearActionLogs() }
+            )
+        }
+    }
+}
+
+@Composable
+fun ActionLogPanel(
+    logs: List<ActionLogEntry>,
+    isExpanded: Boolean,
+    onToggleExpand: () -> Unit,
+    onClear: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
+        )
+    ) {
+        Column(modifier = Modifier.padding(8.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { onToggleExpand() },
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = if (isExpanded) "▼ Action & Telemetry Log (${logs.size})" else "▶ Action & Telemetry Log (${logs.size})",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
+                if (isExpanded && logs.isNotEmpty()) {
+                    TextButton(
+                        onClick = onClear,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                    ) {
+                        Text("Clear", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
+
+            if (isExpanded) {
+                Spacer(modifier = Modifier.height(6.dp))
+                if (logs.isEmpty()) {
+                    Text(
+                        text = "No runtime actions recorded yet. Tap Initialize to start.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(4.dp)
+                    )
+                } else {
+                    val timeFormat = remember { SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()) }
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 160.dp)
+                    ) {
+                        items(logs.reversed()) { entry ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 2.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = timeFormat.format(Date(entry.timestamp)),
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontFamily = FontFamily.Monospace,
+                                        fontSize = 10.sp
+                                    ),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "[${entry.tag}]",
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 10.sp
+                                    ),
+                                    color = if (entry.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = entry.message,
+                                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
+                                    modifier = Modifier.weight(1f)
+                                )
+                                entry.durationMs?.let { ms ->
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = String.format(Locale.US, "%.1f ms", ms),
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 10.sp,
+                                            color = MaterialTheme.colorScheme.tertiary
+                                        )
+                                    )
+                                }
                             }
                         }
                     }
