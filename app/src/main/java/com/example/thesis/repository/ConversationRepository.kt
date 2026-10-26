@@ -313,6 +313,20 @@ class ConversationRepository(
         }
     }
 
+    /**
+     * Triggers an explicit network sync of MLS conversations from the XMTP ledger.
+     */
+    suspend fun syncConversations(): Result<Unit> = withContext(ioDispatcher) {
+        val client = xmtpEngine.client
+            ?: return@withContext Result.failure(
+                IllegalStateException("XMTP engine is not ready (current state: ${xmtpEngine.state.value})")
+            )
+        runCatching {
+            client.conversations.sync()
+            conversationRefreshTrigger.emit(Unit)
+        }
+    }
+
     // ────────────────────────────────────────────────────────────────────────
     //  Message Dispatch (Two-Phase Optimistic Persistence)
     // ────────────────────────────────────────────────────────────────────────

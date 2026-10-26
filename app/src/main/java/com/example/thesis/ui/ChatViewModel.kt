@@ -68,6 +68,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _actionLogs = MutableStateFlow<List<ActionLogEntry>>(emptyList())
     val actionLogs: StateFlow<List<ActionLogEntry>> = _actionLogs.asStateFlow()
 
+    private val _isSending = MutableStateFlow(false)
+    val isSending: StateFlow<Boolean> = _isSending.asStateFlow()
+
+    private val _isSyncing = MutableStateFlow(false)
+    val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
+
     fun logAction(tag: String, message: String, durationMs: Double? = null, isError: Boolean = false) {
         val entry = ActionLogEntry(
             tag = tag,
@@ -176,19 +182,55 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun syncConversations() {
+        viewModelScope.launch {
+            _isSyncing.value = true
+            logAction("SYNC", "Syncing MLS conversations from XMTP network...")
+            ThesisTelemetry.measureSuspendOperation("MLS Network Sync") {
+                repository.syncConversations()
+            }
+            .onSuccess {
+                logAction("SYNC", "Sync complete. Active conversations: ${_conversations.value.size}")
+            }
+            .onFailure { err ->
+                logAction("SYNC", "Sync failed: ${err.message}", isError = true)
+            }
+            _isSyncing.value = false
+        }
+    }
+
+    fun startSelfConversation() {
+        val self = _walletAddress.value ?: return
+        logAction("MLS", "Starting MLS loopback conversation with self address...")
+        startNewConversation(self)
+    }
+
+    fun createTestPeerConversation() {
+        val randomSigner = ThesisSigner.createEphemeral()
+        val peer = randomSigner.address
+        randomSigner.close()
+        logAction("IDENTITY", "Generated ephemeral peer address: $peer")
+        startNewConversation(peer)
+    }
+
     fun sendMessage(text: String) {
         val conv = _selectedConversation.value ?: return
         viewModelScope.launch {
-            logAction("E2EE", "Dispatching encrypted MLS payload...")
-            ThesisTelemetry.measureSuspendOperation("5. MLS E2EE Message Dispatch") {
-                repository.sendMessage(conv, text)
-            }
-            .onSuccess { msgId ->
-                logAction("E2EE", "Message committed to XMTP ledger (ID: ${msgId.take(16)}...)")
-            }
-            .onFailure { err ->
-                _statusBanner.value = "Αποτυχία αποστολής: ${err.message}"
-                logAction("E2EE", "Dispatch failed: ${err.message}", isError = true)
+            _isSending.value = true
+            try {
+                logAction("E2EE", "Dispatching encrypted MLS payload...")
+                ThesisTelemetry.measureSuspendOperation("5. MLS E2EE Message Dispatch") {
+                    repository.sendMessage(conv, text)
+                }
+                .onSuccess { msgId ->
+                    logAction("E2EE", "Message committed to XMTP ledger (ID: ${msgId.take(16)}...)")
+                }
+                .onFailure { err ->
+                    _statusBanner.value = "Αποτυχία αποστολής: ${err.message}"
+                    logAction("E2EE", "Dispatch failed: ${err.message}", isError = true)
+                }
+            } finally {
+                _isSending.value = false
             }
         }
     }
