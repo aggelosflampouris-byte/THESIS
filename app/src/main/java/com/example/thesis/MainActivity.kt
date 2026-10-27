@@ -127,7 +127,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
 
     var peerAddressInput by remember { mutableStateOf("") }
     var messageInput by remember { mutableStateOf("") }
-    var isActionLogExpanded by remember { mutableStateOf(true) }
+    var isActionLogExpanded by remember { mutableStateOf(false) }
     var showShredDialog by remember { mutableStateOf(false) }
 
     @Suppress("DEPRECATION")
@@ -170,213 +170,272 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (selectedConversation != null) {
+                TopAppBar(
+                    title = {
+                        Column {
                             Text(
-                                text = "XMTP v4 (MLS)",
+                                text = "MLS Chat: ${selectedConversation!!.topic.take(16)}...",
                                 style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Bold
                             )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Surface(
-                                shape = RoundedCornerShape(4.dp),
-                                color = MaterialTheme.colorScheme.primaryContainer
-                            ) {
-                                Text(
-                                    text = "SQLCipher",
-                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer
-                                )
-                            }
-                        }
-                        walletAddress?.let { address ->
-                            Row(
-                                modifier = Modifier
-                                    .padding(top = 2.dp)
-                                    .clickable {
-                                        clipboardManager.setText(AnnotatedString(address))
-                                        scope.launch {
-                                            snackbarHostState.showSnackbar("Η διεύθυνση αντιγράφηκε στο πρόχειρο")
-                                        }
-                                    },
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = "ID: ${address.take(8)}...${address.takeLast(6)}",
-                                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(
-                                    text = "📋",
-                                    fontSize = 11.sp
-                                )
-                            }
-                        }
-                    }
-                },
-                actions = {
-                    if (engineState is XmtpEngineState.Ready) {
-                        val rotation by animateFloatAsState(
-                            targetValue = if (isSyncing) 360f else 0f,
-                            label = "SyncRotation"
-                        )
-                        IconButton(
-                            onClick = { viewModel.syncConversations() },
-                            enabled = !isSyncing
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Refresh,
-                                contentDescription = "Συγχρονισμός",
-                                modifier = Modifier.rotate(rotation)
+                            Text(
+                                text = "End-to-End Encrypted • SQLCipher Sandbox",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontSize = 11.sp
                             )
                         }
-                    }
-
-                    if (walletAddress != null) {
-                        Button(
-                            onClick = { showShredDialog = true },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.error
-                            ),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
-                        ) {
-                            Text("GDPR Shred", fontSize = 12.sp)
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = { viewModel.selectConversation(null) }) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Πίσω")
                         }
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.surface
-                )
-            )
-        }
-    ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .padding(horizontal = 16.dp, vertical = 8.dp)
-        ) {
-            // Live Security Status Card
-            SecurityEngineStatusCard(
-                engineState = engineState,
-                walletAddress = walletAddress
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            statusBanner?.let { banner ->
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 8.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.secondaryContainer
-                    )
-                ) {
-                    Text(
-                        text = banner,
-                        modifier = Modifier.padding(10.dp),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer
-                    )
-                }
-            }
-
-            when (val state = engineState) {
-                is XmtpEngineState.Idle -> {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Surface(
-                                shape = CircleShape,
-                                color = MaterialTheme.colorScheme.primaryContainer,
-                                modifier = Modifier.size(64.dp)
+                    },
+                    actions = {
+                        if (walletAddress != null) {
+                            Button(
+                                onClick = { showShredDialog = true },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.error
+                                ),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
                             ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Icon(
-                                        imageVector = Icons.Default.Lock,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary,
-                                        modifier = Modifier.size(32.dp)
+                                Text("GDPR Shred", fontSize = 12.sp)
+                            }
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    )
+                )
+            } else {
+                TopAppBar(
+                    title = {
+                        Column {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = "XMTP v4 (MLS)",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Surface(
+                                    shape = RoundedCornerShape(4.dp),
+                                    color = MaterialTheme.colorScheme.primaryContainer
+                                ) {
+                                    Text(
+                                        text = "SQLCipher",
+                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer
                                     )
                                 }
                             }
-                            Spacer(modifier = Modifier.height(16.dp))
-                            Text(
-                                text = "XMTP v4 MLS + SQLCipher Sandbox",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
+                            walletAddress?.let { address ->
+                                Row(
+                                    modifier = Modifier
+                                        .padding(top = 2.dp)
+                                        .clickable {
+                                            clipboardManager.setText(AnnotatedString(address))
+                                            scope.launch {
+                                                snackbarHostState.showSnackbar("Η διεύθυνση αντιγράφηκε στο πρόχειρο")
+                                            }
+                                        },
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "ID: ${address.take(8)}...${address.takeLast(6)}",
+                                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = "📋",
+                                        fontSize = 11.sp
+                                    )
+                                }
+                            }
+                        }
+                    },
+                    actions = {
+                        if (engineState is XmtpEngineState.Ready) {
+                            val rotation by animateFloatAsState(
+                                targetValue = if (isSyncing) 360f else 0f,
+                                label = "SyncRotation"
                             )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = "Αποκεντρωμένη κρυπτογράφηση MLS με Hardware Keystore DEK.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Spacer(modifier = Modifier.height(20.dp))
-                            Button(onClick = { viewModel.initializeSession() }) {
-                                Text("Εκκίνηση Hardware Keystore & XMTP MLS")
+                            IconButton(
+                                onClick = { viewModel.syncConversations() },
+                                enabled = !isSyncing
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = "Συγχρονισμός",
+                                    modifier = Modifier.rotate(rotation)
+                                )
+                            }
+                        }
+
+                        if (walletAddress != null) {
+                            Button(
+                                onClick = { showShredDialog = true },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.error
+                                ),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                Text("GDPR Shred", fontSize = 12.sp)
+                            }
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.surface
+                    )
+                )
+            }
+        }
+    ) { padding ->
+        if (selectedConversation != null) {
+            // ─── PURE FULL-HEIGHT CHAT VIEW ───
+            ChatView(
+                conversation = selectedConversation!!,
+                messages = messages,
+                messageInput = messageInput,
+                isSending = isSending,
+                onMessageInputChange = { messageInput = it },
+                onSendMessage = { text ->
+                    viewModel.sendMessage(text)
+                    messageInput = ""
+                },
+                onBackClick = { viewModel.selectConversation(null) },
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
+            )
+        } else {
+            // ─── INBOX & SYSTEM DASHBOARD ───
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .padding(horizontal = 16.dp, vertical = 6.dp)
+            ) {
+                // Live Security Status Card
+                SecurityEngineStatusCard(
+                    engineState = engineState,
+                    walletAddress = walletAddress
+                )
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                statusBanner?.let { banner ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 6.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer
+                        )
+                    ) {
+                        Text(
+                            text = banner,
+                            modifier = Modifier.padding(8.dp),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                    }
+                }
+
+                when (val state = engineState) {
+                    is XmtpEngineState.Idle -> {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Surface(
+                                    shape = CircleShape,
+                                    color = MaterialTheme.colorScheme.primaryContainer,
+                                    modifier = Modifier.size(64.dp)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Icon(
+                                            imageVector = Icons.Default.Lock,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(32.dp)
+                                        )
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(16.dp))
+                                Text(
+                                    text = "XMTP v4 MLS + SQLCipher Sandbox",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Text(
+                                    text = "Αποκεντρωμένη κρυπτογράφηση MLS με Hardware Keystore DEK.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(modifier = Modifier.height(20.dp))
+                                Button(onClick = { viewModel.initializeSession() }) {
+                                    Text("Εκκίνηση Hardware Keystore & XMTP MLS")
+                                }
                             }
                         }
                     }
-                }
 
-                is XmtpEngineState.Loading -> {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            CircularProgressIndicator()
-                            Spacer(modifier = Modifier.height(14.dp))
+                    is XmtpEngineState.Loading -> {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                CircularProgressIndicator()
+                                Spacer(modifier = Modifier.height(14.dp))
+                                Text(
+                                    text = "Hardware DEK Unwrap & Σύνδεση MLS...",
+                                    style = MaterialTheme.typography.bodyMedium
+                                )
+                            }
+                        }
+                    }
+
+                    is XmtpEngineState.Error -> {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f),
+                            verticalArrangement = Arrangement.Center,
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Warning,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(48.dp)
+                            )
+                            Spacer(modifier = Modifier.height(12.dp))
                             Text(
-                                text = "Hardware DEK Unwrap & Σύνδεση MLS...",
+                                text = "Σφάλμα: ${state.error.message}",
+                                color = MaterialTheme.colorScheme.error,
                                 style = MaterialTheme.typography.bodyMedium
                             )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Button(onClick = { viewModel.initializeSession() }) {
+                                Text("Επανάληψη Σύνδεσης")
+                            }
                         }
                     }
-                }
 
-                is XmtpEngineState.Error -> {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f),
-                        verticalArrangement = Arrangement.Center,
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Warning,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.size(48.dp)
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Text(
-                            text = "Σφάλμα: ${state.error.message}",
-                            color = MaterialTheme.colorScheme.error,
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Button(onClick = { viewModel.initializeSession() }) {
-                            Text("Επανάληψη Σύνδεσης")
-                        }
-                    }
-                }
-
-                is XmtpEngineState.Ready -> {
-                    if (selectedConversation == null) {
-                        // ─── Inbox Screen (Conversations List & Quick Actions) ───
+                    is XmtpEngineState.Ready -> {
                         InboxView(
                             conversations = conversations,
                             peerAddressInput = peerAddressInput,
@@ -396,38 +455,22 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                             },
                             modifier = Modifier.weight(1f)
                         )
-                    } else {
-                        // ─── Chat Screen (Active Conversation) ───
-                        ChatView(
-                            conversation = selectedConversation!!,
-                            messages = messages,
-                            messageInput = messageInput,
-                            isSending = isSending,
-                            onMessageInputChange = { messageInput = it },
-                            onSendMessage = { text ->
-                                viewModel.sendMessage(text)
-                                messageInput = ""
-                            },
-                            onBackClick = { viewModel.selectConversation(null) },
-                            modifier = Modifier.weight(1f)
-                        )
                     }
                 }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                // Action & Telemetry Log Panel (Collapsed by default)
+                ActionLogPanel(
+                    logs = actionLogs,
+                    isExpanded = isActionLogExpanded,
+                    onToggleExpand = { isActionLogExpanded = !isActionLogExpanded },
+                    onClear = { viewModel.clearActionLogs() }
+                )
             }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Action & Telemetry Log Panel
-            ActionLogPanel(
-                logs = actionLogs,
-                isExpanded = isActionLogExpanded,
-                onToggleExpand = { isActionLogExpanded = !isActionLogExpanded },
-                onClear = { viewModel.clearActionLogs() }
-            )
         }
     }
 }
-
 // ────────────────────────────────────────────────────────────────────────────
 //  UI Component: Security Engine Status Card
 // ────────────────────────────────────────────────────────────────────────────
@@ -543,51 +586,65 @@ private fun InboxView(
     onPasteAddress: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var showAddressInput by remember { mutableStateOf(false) }
+
     Column(modifier = modifier.fillMaxWidth()) {
-        // Research Loopback Action Button
-        Button(
-            onClick = onStartSelfConversation,
-            modifier = Modifier.fillMaxWidth(),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.primary
-            )
-        ) {
-            Text("▶ Έναρξη Πειραματικής Συνεδρίας MLS (Loopback Test)", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // New Conversation Input Row
+        // Compact Action Bar
         Row(
             modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            OutlinedTextField(
-                value = peerAddressInput,
-                onValueChange = onPeerAddressChange,
-                label = { Text("Παραλήπτης (Inbox ID ή 0x...)") },
-                modifier = Modifier.weight(1f),
-                singleLine = true,
-                trailingIcon = {
-                    TextButton(onClick = onPasteAddress) {
-                        Text("📋", fontSize = 14.sp)
-                    }
-                }
-            )
-            Spacer(modifier = Modifier.width(8.dp))
             Button(
-                onClick = {
-                    if (peerAddressInput.isNotBlank()) {
-                        onStartNewConversation(peerAddressInput)
-                    }
-                },
-                enabled = peerAddressInput.isNotBlank()
+                onClick = onStartSelfConversation,
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
             ) {
-                Text("Νέα")
+                Text("▶ Νέα Συνεδρία MLS (Loopback)", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+            }
+
+            OutlinedButton(
+                onClick = { showAddressInput = !showAddressInput },
+                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
+            ) {
+                Text(if (showAddressInput) "✕" else "+ Peer", fontSize = 12.sp)
             }
         }
 
-        Spacer(modifier = Modifier.height(12.dp))
+        if (showAddressInput) {
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = peerAddressInput,
+                    onValueChange = onPeerAddressChange,
+                    label = { Text("Inbox ID ή 0x Address", fontSize = 11.sp) },
+                    modifier = Modifier.weight(1f),
+                    singleLine = true,
+                    trailingIcon = {
+                        TextButton(onClick = onPasteAddress) {
+                            Text("📋", fontSize = 13.sp)
+                        }
+                    }
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Button(
+                    onClick = {
+                        if (peerAddressInput.isNotBlank()) {
+                            onStartNewConversation(peerAddressInput)
+                        }
+                    },
+                    enabled = peerAddressInput.isNotBlank(),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                ) {
+                    Text("OK", fontSize = 12.sp)
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
 
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -601,7 +658,7 @@ private fun InboxView(
             )
         }
 
-        Spacer(modifier = Modifier.height(6.dp))
+        Spacer(modifier = Modifier.height(4.dp))
 
         if (conversations.isEmpty()) {
             Card(
@@ -625,22 +682,19 @@ private fun InboxView(
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "Ξεκινήστε μια πειραματική συνεδρία MLS (Loopback) για επιτόπου δοκιμή E2EE και μέτρηση SQLCipher latency.",
+                        text = "Πατήστε 'Νέα Συνεδρία MLS (Loopback)' για επιτόπου δοκιμή E2EE.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 12.sp
                     )
-                    Spacer(modifier = Modifier.height(12.dp))
-                    OutlinedButton(onClick = onStartSelfConversation) {
-                        Text("Έναρξη Πειραματικής Συνεδρίας MLS")
-                    }
                 }
             }
         } else {
             LazyColumn(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f)
+                    .weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 items(conversations) { conv ->
                     ConversationItemCard(
@@ -656,13 +710,12 @@ private fun InboxView(
 @Composable
 private fun ConversationItemCard(
     conversation: Conversation,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp)
-            .clickable { onClick() },
+        onClick = onClick,
+        modifier = modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surface
         ),
@@ -747,34 +800,8 @@ private fun ChatView(
         }
     }
 
-    Column(modifier = modifier.fillMaxWidth()) {
-        // Chat Header
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            IconButton(onClick = onBackClick) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Πίσω")
-            }
-            Spacer(modifier = Modifier.width(4.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "MLS Chat: ${conversation.topic.take(16)}...",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold
-                )
-                Text(
-                    text = "End-to-End Encrypted • SQLCipher Sandbox",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                    fontSize = 10.sp
-                )
-            }
-        }
-
-        HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
-
-        // Message List
+    Column(modifier = modifier.fillMaxSize()) {
+        // Message List takes full height
         if (messages.isEmpty()) {
             Box(
                 modifier = Modifier
@@ -790,7 +817,7 @@ private fun ChatView(
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "Στείλτε ένα μήνυμα για να δοκιμάσετε τον κρυπτογραφικό ratchet tree.",
+                        text = "Στείλτε μήνυμα για να δοκιμάσετε το MLS ratchet tree και την καταγραφή SQLCipher.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 11.sp
@@ -802,7 +829,8 @@ private fun ChatView(
                 state = listState,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f)
+                    .weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 items(messages) { msg ->
                     MessageBubble(message = msg)
@@ -810,11 +838,11 @@ private fun ChatView(
             }
         }
 
-        // Quick Message Template Chips
+        Spacer(modifier = Modifier.height(4.dp))
+
+        // Quick Message Template Chips (Compact 1-row)
         LazyRow(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(vertical = 4.dp),
+            modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             item {
@@ -837,23 +865,25 @@ private fun ChatView(
             }
         }
 
+        Spacer(modifier = Modifier.height(4.dp))
+
         // Message Input Row
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 4.dp),
+                .padding(bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             OutlinedTextField(
                 value = messageInput,
                 onValueChange = onMessageInputChange,
-                label = { Text("Μήνυμα E2EE...") },
+                placeholder = { Text("Μήνυμα E2EE...", fontSize = 12.sp) },
                 modifier = Modifier.weight(1f),
                 singleLine = true,
                 enabled = !isSending
             )
-            Spacer(modifier = Modifier.width(8.dp))
-            Button(
+            Spacer(modifier = Modifier.width(6.dp))
+            IconButton(
                 onClick = {
                     if (messageInput.isNotBlank()) {
                         onSendMessage(messageInput)
@@ -863,15 +893,14 @@ private fun ChatView(
             ) {
                 if (isSending) {
                     CircularProgressIndicator(
-                        modifier = Modifier.size(16.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onPrimary
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp
                     )
                 } else {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.Send,
                         contentDescription = "Αποστολή",
-                        modifier = Modifier.size(18.dp)
+                        tint = if (messageInput.isNotBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
