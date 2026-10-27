@@ -386,7 +386,6 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                                 peerAddressInput = ""
                             },
                             onStartSelfConversation = { viewModel.startSelfConversation() },
-                            onGenerateTestPeer = { viewModel.createTestPeerConversation() },
                             onSelectConversation = { conv -> viewModel.selectConversation(conv) },
                             onPasteAddress = {
                                 val clip = clipboardManager.getText()?.text
@@ -540,39 +539,20 @@ private fun InboxView(
     onPeerAddressChange: (String) -> Unit,
     onStartNewConversation: (String) -> Unit,
     onStartSelfConversation: () -> Unit,
-    onGenerateTestPeer: () -> Unit,
     onSelectConversation: (Conversation) -> Unit,
     onPasteAddress: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
-        // Quick Action Chips Row
-        Text(
-            text = "Γρήγορες Ενέργειες Δοκιμών MLS",
-            style = MaterialTheme.typography.labelMedium,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Spacer(modifier = Modifier.height(4.dp))
-        LazyRow(
+        // Research Loopback Action Button
+        Button(
+            onClick = onStartSelfConversation,
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.primary
+            )
         ) {
-            item {
-                AssistChip(
-                    onClick = onStartSelfConversation,
-                    label = { Text("💬 Self-Chat (Loopback)", fontSize = 11.sp) },
-                    colors = AssistChipDefaults.assistChipColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
-                    )
-                )
-            }
-            item {
-                AssistChip(
-                    onClick = onGenerateTestPeer,
-                    label = { Text("🎲 Τυχαίος Peer", fontSize = 11.sp) }
-                )
-            }
+            Text("▶ Έναρξη Πειραματικής Συνεδρίας MLS (Loopback Test)", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
         }
 
         Spacer(modifier = Modifier.height(8.dp))
@@ -585,7 +565,7 @@ private fun InboxView(
             OutlinedTextField(
                 value = peerAddressInput,
                 onValueChange = onPeerAddressChange,
-                label = { Text("Διεύθυνση Παραλήπτη (0x...)") },
+                label = { Text("Παραλήπτης (Inbox ID ή 0x...)") },
                 modifier = Modifier.weight(1f),
                 singleLine = true,
                 trailingIcon = {
@@ -645,14 +625,14 @@ private fun InboxView(
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "Ξεκινήστε μια κρυπτογραφημένη συνομιλία MLS πατώντας 'Self-Chat' ή εισάγοντας ένα Ethereum address παραπάνω.",
+                        text = "Ξεκινήστε μια πειραματική συνεδρία MLS (Loopback) για επιτόπου δοκιμή E2EE και μέτρηση SQLCipher latency.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 12.sp
                     )
                     Spacer(modifier = Modifier.height(12.dp))
                     OutlinedButton(onClick = onStartSelfConversation) {
-                        Text("Έναρξη Δοκιμής Self-Chat")
+                        Text("Έναρξη Πειραματικής Συνεδρίας MLS")
                     }
                 }
             }

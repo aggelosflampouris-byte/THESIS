@@ -200,17 +200,21 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startSelfConversation() {
-        val self = _walletAddress.value ?: return
-        logAction("MLS", "Starting MLS loopback conversation with self address...")
-        startNewConversation(self)
-    }
-
-    fun createTestPeerConversation() {
-        val randomSigner = ThesisSigner.createEphemeral()
-        val peer = randomSigner.address
-        randomSigner.close()
-        logAction("IDENTITY", "Generated ephemeral peer address: $peer")
-        startNewConversation(peer)
+        viewModelScope.launch {
+            logAction("MLS", "Initiating MLS Loopback Ratchet Session...")
+            ThesisTelemetry.measureSuspendOperation("4. MLS Conversation Handshake") {
+                repository.createLoopbackConversation()
+            }
+            .onSuccess { conv ->
+                _statusBanner.value = "Πειραματική Συνεδρία MLS (Loopback) ενεργή."
+                logAction("MLS", "Loopback Ratchet Group established. Topic: ${conv.topic.take(24)}...")
+                selectConversation(conv)
+            }
+            .onFailure { err ->
+                _statusBanner.value = "Αποτυχία εκκίνησης loopback: ${err.message}"
+                logAction("MLS", "Loopback failed: ${err.message}", isError = true)
+            }
+        }
     }
 
     fun sendMessage(text: String) {

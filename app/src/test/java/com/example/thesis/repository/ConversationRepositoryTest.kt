@@ -35,6 +35,8 @@ import org.junit.Test
 import org.xmtp.android.library.Client
 import org.xmtp.android.library.Conversation
 import org.xmtp.android.library.Conversations
+import org.xmtp.android.library.Dm
+import org.xmtp.android.library.Group
 import org.xmtp.android.library.libxmtp.DecodedMessage
 import org.xmtp.android.library.libxmtp.PublicIdentity
 import java.io.IOException
@@ -294,15 +296,14 @@ class ConversationRepositoryTest {
 
     @Test
     fun test_createConversation_validAddress_returnsSuccess() = runTest(testDispatcher) {
-        val createdConv = mockk<Conversation>(relaxed = true)
-        every { createdConv.id } returns "conv_new_111"
-        coEvery { mockConversations.newConversation(testPeerAddress) } returns createdConv
+        val mockDm = mockk<Dm>(relaxed = true)
+        coEvery { mockConversations.findOrCreateDmWithIdentity(any()) } returns mockDm
 
         val result = repository.createConversation(testPeerAddress)
 
         assertTrue(result.isSuccess)
-        assertEquals(createdConv, result.getOrNull())
-        coVerify(exactly = 1) { mockConversations.newConversation(testPeerAddress) }
+        assertTrue(result.getOrNull() is Conversation.Dm)
+        coVerify(exactly = 1) { mockConversations.findOrCreateDmWithIdentity(match { it.identifier.equals(testPeerAddress, ignoreCase = true) }) }
     }
 
     @Test
@@ -311,7 +312,19 @@ class ConversationRepositoryTest {
 
         assertTrue(result.isFailure)
         assertTrue(result.exceptionOrNull() is IllegalArgumentException)
-        coVerify(exactly = 0) { mockConversations.newConversation(any()) }
+        coVerify(exactly = 0) { mockConversations.findOrCreateDmWithIdentity(any()) }
+    }
+
+    @Test
+    fun test_createLoopbackConversation_returnsSuccess() = runTest(testDispatcher) {
+        val mockGroup = mockk<Group>(relaxed = true)
+        coEvery { mockConversations.newGroup(inboxIds = emptyList(), groupName = any()) } returns mockGroup
+
+        val result = repository.createLoopbackConversation()
+
+        assertTrue(result.isSuccess)
+        assertTrue(result.getOrNull() is Conversation.Group)
+        coVerify(exactly = 1) { mockConversations.newGroup(inboxIds = emptyList(), groupName = any()) }
     }
 
     @Test

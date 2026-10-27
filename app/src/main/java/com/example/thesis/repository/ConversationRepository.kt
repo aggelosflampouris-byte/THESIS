@@ -35,6 +35,8 @@ import kotlinx.coroutines.withContext
 import org.xmtp.android.library.Client
 import org.xmtp.android.library.Conversation
 import org.xmtp.android.library.libxmtp.DecodedMessage
+import org.xmtp.android.library.libxmtp.PublicIdentity
+import org.xmtp.android.library.libxmtp.IdentityKind
 import java.util.Collections
 import java.util.LinkedHashMap
 import java.util.UUID
@@ -289,6 +291,41 @@ class ConversationRepository(
      * @param peerAddress Target peer Ethereum address (e.g., `0x1234...`).
      * @return [Result.success] containing the resolved [Conversation], or [Result.failure].
      */
+    /**
+     * Creates or retrieves a local MLS Group conversation for loopback testing and benchmarking.
+     *
+     * In XMTP v4 MLS, 1-on-1 direct messages cannot be opened with oneself (enforcing
+     * "Recipient is sender" safety). Loopback testing is achieved via an MLS Group
+     * where the current user is the sole member/admin.
+     */
+    suspend fun createLoopbackConversation(): Result<Conversation> = withContext(ioDispatcher) {
+        val client = xmtpEngine.client
+            ?: return@withContext Result.failure(
+                IllegalStateException("XMTP engine is not ready (current state: ${xmtpEngine.state.value})")
+            )
+        try {
+            Log.i(TAG, "Creating MLS Loopback Group for self-benchmarking")
+            val group = client.conversations.newGroup(
+                inboxIds = emptyList<String>(),
+                groupName = "MLS Research Loopback"
+            )
+            val conversation = Conversation.Group(group)
+            conversationRefreshTrigger.emit(Unit)
+            Result.success(conversation)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to create MLS loopback session: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Creates or retrieves an MLS conversation with the specified peer Ethereum address.
+     *
+     * Validates that [peerAddress] conforms to standard Ethereum hex address format
+     * before delegating to libxmtp PublicIdentity resolution.
+     */
     suspend fun createConversation(peerAddress: String): Result<Conversation> = withContext(ioDispatcher) {
         val sanitisedAddress = CryptoUtils.sanitiseEthereumAddress(peerAddress)
             ?: return@withContext Result.failure(
@@ -301,8 +338,10 @@ class ConversationRepository(
             )
 
         try {
-            Log.i(TAG, "Creating or resolving MLS 1-on-1 conversation with peer=$sanitisedAddress")
-            val conversation = client.conversations.newConversation(sanitisedAddress)
+            Log.i(TAG, "Resolving MLS conversation via PublicIdentity(ETHEREUM) with peer=$sanitisedAddress")
+            val identity = PublicIdentity(IdentityKind.ETHEREUM, sanitisedAddress)
+            val dm = client.conversations.findOrCreateDmWithIdentity(identity)
+            val conversation = Conversation.Dm(dm)
             conversationRefreshTrigger.emit(Unit)
             Result.success(conversation)
         } catch (e: CancellationException) {
