@@ -138,11 +138,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
             logAction(
                 tag = "MLS",
-                message = "⛓️ [POC_IDENTITY_PROOF] EthAddress: $ethAddress | InboxID: ${client.inboxId} | InstallationID: ${client.installationId} | Env: ${client.environment.name}"
+                message = "[POC_IDENTITY_PROOF] EthAddress: $ethAddress | InboxID: ${client.inboxId} | InstallationID: ${client.installationId} | Env: ${client.environment.name}"
             )
 
             if (activeConvs.isEmpty()) {
-                logAction("SYNC", "⛓️ [POC_GROUPS] 0 active MLS groups found on network for InboxID ${client.inboxId.take(12)}...")
+                logAction("SYNC", "[POC_GROUPS] 0 active MLS groups found on network for InboxID ${client.inboxId.take(12)}...")
                 return@launch
             }
 
@@ -154,13 +154,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 logAction(
                     tag = "SYNC",
-                    message = "⛓️ [POC_GROUP #${index + 1}] Topic: ${conv.topic} | $peerInfo | Cached Messages: ${convMessages.size}"
+                    message = "[POC_GROUP #${index + 1}] Topic: ${conv.topic} | $peerInfo | Cached Messages: ${convMessages.size}"
                 )
 
                 convMessages.forEach { msg ->
                     logAction(
                         tag = "E2EE",
-                        message = "🧾 [POC_MSG_PROOF] MsgID: ${msg.id} | SenderInbox: ${msg.senderInboxId} | SentNs: ${msg.sentAtNs} | Topic: ${conv.topic.take(16)}..."
+                        message = "[POC_MSG_PROOF] MsgID: ${msg.id} | SenderInbox: ${msg.senderInboxId} | SentNs: ${msg.sentAtNs} | Topic: ${conv.topic.take(16)}..."
                     )
                 }
             }
@@ -513,7 +513,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     var successfulSamples = 0
 
                     for (i in 1..iterations) {
-                        val payload = "⚡ MLS Latency Benchmark Probe #$i [${System.currentTimeMillis()}]"
+                        val payload = "MLS Latency Benchmark Probe #$i [${System.currentTimeMillis()}]"
                         val sendResult = ThesisTelemetry.measureSuspendOperation("5. MLS E2EE Message Dispatch") {
                             repository.sendMessage(conv, payload)
                         }

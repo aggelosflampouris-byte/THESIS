@@ -26,6 +26,16 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -453,14 +463,23 @@ private fun MessagingTopBar(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    Text(
-                        text = "🔒 MLS End-to-End Encrypted",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                        fontSize = 11.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = null,
+                            modifier = Modifier.size(11.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.width(3.dp))
+                        Text(
+                            text = "MLS End-to-End Encrypted",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             } else {
                 Column {
@@ -504,7 +523,7 @@ private fun MessagingTopBar(
             if (selectedConversation != null) {
                 // Active Chat Screen Actions: Refined, non-cluttered
                 IconButton(onClick = onOpenProtocolInspector) {
-                    Text("ℹ️", fontSize = 16.sp)
+                    Icon(Icons.Default.Info, contentDescription = "Protocol Info")
                 }
 
                 if (engineState is XmtpEngineState.Ready) {
@@ -522,7 +541,7 @@ private fun MessagingTopBar(
                 }
 
                 IconButton(onClick = onOpenLogs) {
-                    Text("📊", fontSize = 16.sp)
+                    Icon(Icons.AutoMirrored.Filled.List, contentDescription = "Logs & Telemetry")
                 }
             } else {
                 // Dashboard Home Actions
@@ -546,13 +565,13 @@ private fun MessagingTopBar(
                         colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
                         contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
                     ) {
-                        Text("🚀 v${(updateStatus as UpdateStatus.UpdateAvailable).updateInfo.latestVersion}", fontSize = 11.sp)
+                        Text("Update v${(updateStatus as UpdateStatus.UpdateAvailable).updateInfo.latestVersion}", fontSize = 11.sp)
                     }
                 }
 
                 if (walletAddress != null) {
                     IconButton(onClick = onOpenLogs) {
-                        Text("📊", fontSize = 16.sp)
+                        Icon(Icons.AutoMirrored.Filled.List, contentDescription = "Logs & Telemetry")
                     }
 
                     TextButton(onClick = onOpenIdentity) {
@@ -718,10 +737,12 @@ private fun InboxDashboardScreen(
         ) {
             Button(
                 onClick = onStartLoopback,
-                modifier = Modifier.weight(1.2f),
+                modifier = Modifier.weight(1f),
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
             ) {
-                Text("▶ Loopback MLS (1-Device)", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+                Text("Loopback MLS", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
             }
 
             OutlinedButton(
@@ -836,7 +857,12 @@ private fun InboxDashboardScreen(
                         modifier = Modifier.size(32.dp)
                     ) {
                         Box(contentAlignment = Alignment.Center) {
-                            Text("📊", fontSize = 14.sp)
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.List,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
                         }
                     }
                     Spacer(modifier = Modifier.width(10.dp))
@@ -847,17 +873,18 @@ private fun InboxDashboardScreen(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "${actionLogs.size} καταγεγραμμένα συμβάντα • Πατήστε για άνοιγμα",
+                            text = "${actionLogs.size} καταγραφές",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             fontSize = 11.sp
                         )
                     }
                 }
-                Text(
-                    text = "›",
-                    style = MaterialTheme.typography.headlineSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
@@ -889,9 +916,9 @@ private fun ConversationItemCard(
     }
 
     val subtitle = when {
-        isDm -> "👤 Direct Message • MLS Ratchet"
-        isLoopback -> "🔄 Τοπική δοκιμή συσκευής • MLS Loopback"
-        else -> "👥 Ομαδική συνομιλία • MLS Ratchet"
+        isDm -> "Direct Message"
+        isLoopback -> "Τοπική δοκιμή συσκευής"
+        else -> "Ομαδική συνομιλία"
     }
 
     Card(
@@ -916,16 +943,22 @@ private fun ConversationItemCard(
                     isLoopback -> MaterialTheme.colorScheme.secondaryContainer
                     else -> MaterialTheme.colorScheme.tertiaryContainer
                 },
-                modifier = Modifier.size(42.dp)
+                modifier = Modifier.size(40.dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {
-                    Text(
-                        text = when {
-                            isDm -> "👤"
-                            isLoopback -> "🔄"
-                            else -> "👥"
+                    Icon(
+                        imageVector = when {
+                            isDm -> Icons.Default.Person
+                            isLoopback -> Icons.Default.PlayArrow
+                            else -> Icons.Default.AccountCircle
                         },
-                        fontSize = 18.sp
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp),
+                        tint = when {
+                            isDm -> MaterialTheme.colorScheme.onPrimaryContainer
+                            isLoopback -> MaterialTheme.colorScheme.onSecondaryContainer
+                            else -> MaterialTheme.colorScheme.onTertiaryContainer
+                        }
                     )
                 }
             }
@@ -936,7 +969,9 @@ private fun ConversationItemCard(
                 Text(
                     text = title,
                     style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -956,10 +991,11 @@ private fun ConversationItemCard(
                 }
             }
 
-            Text(
-                text = "›",
-                style = MaterialTheme.typography.headlineSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
     }
@@ -1005,18 +1041,11 @@ private fun MessagingChatScreen(
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
-                        text = "Δεν υπάρχουν ακόμη μηνύματα",
+                        text = "Δεν υπάρχουν μηνύματα",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "Στείλτε μήνυμα για να παρατηρήσετε την εξέλιξη του MLS ratchet tree.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 11.sp
-                    )
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
                     OutlinedButton(
                         onClick = onSync,
                         enabled = !isSyncing
@@ -1028,7 +1057,7 @@ private fun MessagingChatScreen(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = if (isSyncing) "Συγχρονισμός..." else "Συγχρονισμός μηνυμάτων",
+                            text = if (isSyncing) "Συγχρονισμός..." else "Συγχρονισμός",
                             fontSize = 12.sp
                         )
                     }
@@ -1056,28 +1085,7 @@ private fun MessagingChatScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(4.dp))
-
-        // Quick Message Template Chips (Refined for real conversation)
-        LazyRow(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            item {
-                AssistChip(
-                    onClick = { onSendMessage("👋 Hello XMTP MLS!") },
-                    label = { Text("👋 Hello XMTP!", fontSize = 10.sp) }
-                )
-            }
-            item {
-                AssistChip(
-                    onClick = { onSendMessage("🔐 SQLCipher Storage Test") },
-                    label = { Text("🔐 Test SQLCipher", fontSize = 10.sp) }
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(4.dp))
+        Spacer(modifier = Modifier.height(6.dp))
 
         // Message Input Row
         Row(
@@ -1147,6 +1155,7 @@ private fun MessagingMessageBubble(
         horizontalAlignment = if (isOwnMessage) Alignment.End else Alignment.Start
     ) {
         Surface(
+            modifier = Modifier.widthIn(min = 60.dp, max = 340.dp),
             shape = RoundedCornerShape(
                 topStart = 16.dp,
                 topEnd = 16.dp,
@@ -1316,7 +1325,7 @@ private fun IdentityDetailsDialog(
                 }
 
                 Text(
-                    "💡 Για επικοινωνία μεταξύ 2 συσκευών: Αντιγράψτε το Inbox ID ή τη Διεύθυνση και επικολλήστε τη στη 2η συσκευή στο '+ Νέα'.",
+                    "Για επικοινωνία μεταξύ συσκευών, αντιγράψτε το Inbox ID ή τη Διεύθυνση και εισάγετέ τη στη δεύτερη συσκευή στο '+ Νέα'.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.primary
                 )
@@ -1462,16 +1471,16 @@ private fun SecurityEngineStatusCard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                StatusBadge(icon = "🛡️", text = "SQLCipher 4.6.1", modifier = Modifier.weight(1f))
-                StatusBadge(icon = "🔑", text = "Keystore KEK", modifier = Modifier.weight(1f))
-                StatusBadge(icon = "🔒", text = "MLS Ratchet", modifier = Modifier.weight(1f))
+                StatusBadge(icon = Icons.Default.Lock, text = "SQLCipher 4.6.1", modifier = Modifier.weight(1f))
+                StatusBadge(icon = Icons.Default.Build, text = "Keystore KEK", modifier = Modifier.weight(1f))
+                StatusBadge(icon = Icons.Default.Refresh, text = "MLS Ratchet", modifier = Modifier.weight(1f))
             }
         }
     }
 }
 
 @Composable
-private fun StatusBadge(icon: String, text: String, modifier: Modifier = Modifier) {
+private fun StatusBadge(icon: androidx.compose.ui.graphics.vector.ImageVector, text: String, modifier: Modifier = Modifier) {
     Surface(
         modifier = modifier,
         shape = RoundedCornerShape(6.dp),
@@ -1482,13 +1491,20 @@ private fun StatusBadge(icon: String, text: String, modifier: Modifier = Modifie
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center
         ) {
-            Text(text = icon, fontSize = 11.sp)
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                modifier = Modifier.size(12.dp),
+                tint = MaterialTheme.colorScheme.primary
+            )
             Spacer(modifier = Modifier.width(4.dp))
             Text(
                 text = text,
                 style = MaterialTheme.typography.labelSmall,
                 fontSize = 10.sp,
-                fontWeight = FontWeight.Medium
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         }
     }
@@ -1595,8 +1611,16 @@ fun LogsTelemetryScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("⛓️", fontSize = 16.sp)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Lock,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
                             Spacer(Modifier.width(8.dp))
                             Column {
                                 Text(
@@ -1611,10 +1635,11 @@ fun LogsTelemetryScreen(
                                 )
                             }
                         }
-                        Text(
-                            text = if (isPoCCardExpanded) "▲" else "▼",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        Icon(
+                            imageVector = if (isPoCCardExpanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
 
@@ -1692,70 +1717,81 @@ fun LogsTelemetryScreen(
                 ),
                 shape = RoundedCornerShape(12.dp)
             ) {
-                Column(modifier = Modifier.padding(12.dp)) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text(
+                        text = "MLS Performance & Ratchet Metrics",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column {
+                        Text(
+                            text = "Metrics: $metricCount",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = "Errors: $errorCount",
+                            fontSize = 11.sp,
+                            color = if (errorCount > 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        avgLatency?.let { avg ->
                             Text(
-                                text = "MLS Performance & Ratchet Metrics",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold
+                                text = String.format(Locale.US, "Avg: %.1f ms", avg),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.tertiary
                             )
-                            Row(
-                                modifier = Modifier.padding(top = 2.dp),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                Text(
-                                    text = "Metrics: $metricCount",
-                                    fontSize = 11.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                Text(
-                                    text = "Errors: $errorCount",
-                                    fontSize = 11.sp,
-                                    color = if (errorCount > 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                avgLatency?.let { avg ->
-                                    Text(
-                                        text = String.format(Locale.US, "Avg: %.1f ms", avg),
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = MaterialTheme.colorScheme.tertiary
-                                    )
-                                }
-                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedButton(
+                            onClick = onEmitBlockchainPoC,
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Info,
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text("PoC IDs", fontSize = 11.sp, maxLines = 1)
                         }
 
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        Button(
+                            onClick = onRunBatchBenchmark,
+                            enabled = !isBenchmarking,
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
                         ) {
-                            OutlinedButton(
-                                onClick = onEmitBlockchainPoC,
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
-                            ) {
-                                Text("⛓️ PoC IDs", fontSize = 11.sp)
-                            }
-
-                            Button(
-                                onClick = onRunBatchBenchmark,
-                                enabled = !isBenchmarking,
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
-                            ) {
-                                if (isBenchmarking) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(14.dp),
-                                        strokeWidth = 2.dp,
-                                        color = MaterialTheme.colorScheme.onPrimary
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text("Running...", fontSize = 11.sp)
-                                } else {
-                                    Text("⚡ Batch (10x)", fontSize = 11.sp)
-                                }
+                            if (isBenchmarking) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(14.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.onPrimary
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Running...", fontSize = 11.sp)
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.PlayArrow,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(Modifier.width(4.dp))
+                                Text("Batch (10x)", fontSize = 11.sp, maxLines = 1)
                             }
                         }
                     }
@@ -1993,7 +2029,12 @@ private fun MLSProtocolInspectorDialog(
         onDismissRequest = onDismiss,
         title = {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("🔬", fontSize = 20.sp)
+                Icon(
+                    imageVector = Icons.Default.Info,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
                 Spacer(Modifier.width(8.dp))
                 Text(
                     text = "MLS Protocol Inspector",
@@ -2133,7 +2174,7 @@ private fun AppUpdateDialog(
                                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                                 )
                             }
-                            Text("➔", style = MaterialTheme.typography.bodySmall)
+                            Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, modifier = Modifier.size(14.dp))
                             Surface(
                                 shape = RoundedCornerShape(12.dp),
                                 color = MaterialTheme.colorScheme.primaryContainer
