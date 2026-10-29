@@ -148,6 +148,7 @@ class ConversationRepository(
                         try {
                             client.conversations.streamAllMessages().collect { msg ->
                                 messageRefreshTrigger.emit(msg.conversationId)
+                                messageRefreshTrigger.emit("")
                             }
                         } catch (e: CancellationException) {
                             throw e
@@ -546,11 +547,31 @@ class ConversationRepository(
      */
     fun observeMessages(conversation: Conversation): Flow<List<DecryptedMessage>> = callbackFlow {
         val messageMap = LinkedHashMap<String, DecryptedMessage>()
-        var isSyncing = false
-        suspend fun syncAndReloadMessages(): Boolean {
-            if (isSyncing) return false
-            isSyncing = true
+        val syncChannel = Channel<Unit>(Channel.CONFLATED)
+
+        fun getSortedList(): List<DecryptedMessage> {
+            return messageMap.values.sortedWith(
+                compareBy<DecryptedMessage> { it.sentAt?.time ?: (it.sentAtNs / 1_000_000L) }
+                    .thenBy { it.id }
+            )
+        }
+
+        // 1. Instantly load local cached messages from SQLite to eliminate initial UI latency (0ms wait)
+        val initialCached = try {
+            conversation.messages()
+        } catch (_: Exception) {
             try {
+                conversation.messages()
+            } catch (_: Exception) {
+                emptyList()
+            }
+        }
+        initialCached.forEach { msg -> messageMap[msg.id] = msg }
+        trySend(getSortedList())
+
+        // 2. Dedicated single-flight sync processor consuming from CONFLATED channel
+        val syncProcessorJob = launch(ioDispatcher) {
+            for (signal in syncChannel) {
                 try {
                     conversation.sync()
                 } catch (e: CancellationException) {
@@ -564,7 +585,11 @@ class ConversationRepository(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (_: Exception) {
-                    emptyList()
+                    try {
+                        conversation.messages()
+                    } catch (_: Exception) {
+                        emptyList()
+                    }
                 }
 
                 var hasChanges = latest.size != messageMap.size
@@ -575,40 +600,23 @@ class ConversationRepository(
                         hasChanges = true
                     }
                 }
-                return hasChanges
-            } finally {
-                isSyncing = false
+                if (hasChanges) {
+                    trySend(getSortedList())
+                }
             }
         }
 
-        // 1. Instantly load local cached messages from SQLite to eliminate initial UI latency (0ms wait)
-        val initialCached = try {
-            conversation.messages()
-        } catch (_: Exception) {
-            emptyList()
-        }
-        initialCached.forEach { msg -> messageMap[msg.id] = msg }
-        trySend(messageMap.values.toList())
+        // Trigger immediate background network sync upon entering
+        syncChannel.trySend(Unit)
 
-        // 2. Perform initial network sync and emit updates if newer messages arrived
-        withContext(ioDispatcher) {
-            if (syncAndReloadMessages()) {
-                trySend(messageMap.values.toList())
-            }
-        }
-
-        // 3. Real-time gRPC stream for incoming push messages with proactive background ratchet sync
+        // 3. Real-time gRPC stream for incoming push messages
         val streamJob = launch(ioDispatcher) {
             while (isActive) {
                 try {
                     conversation.streamMessages().collect { incoming ->
                         messageMap[incoming.id] = incoming
-                        trySend(messageMap.values.toList())
-                        launch(ioDispatcher) {
-                            if (syncAndReloadMessages()) {
-                                trySend(messageMap.values.toList())
-                            }
-                        }
+                        trySend(getSortedList())
+                        syncChannel.trySend(Unit)
                     }
                 } catch (e: CancellationException) {
                     throw e
@@ -619,55 +627,74 @@ class ConversationRepository(
             }
         }
 
-        // 4. Ultra-low-latency background sync ticker for active conversation (sub-second 600ms)
+        // 4. Low-latency background sync ticker (sub-second 600ms)
         val pollJob = if (syncIntervalMs > 0L) {
             launch(ioDispatcher) {
                 while (isActive) {
                     delay(minOf(maxOf(syncIntervalMs, 200L), 600L))
-                    try {
-                        val changed = syncAndReloadMessages()
-                        if (changed) {
-                            trySend(messageMap.values.toList())
-                        }
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (_: Exception) {
-                        // Non-fatal periodic poll error
-                    }
+                    syncChannel.trySend(Unit)
                 }
             }
         } else null
 
         // 5. Instant reload upon local message dispatch, network push, or explicit sync
         val refreshJob = launch(ioDispatcher) {
-            messageRefreshTrigger
-                .filter { it == conversation.id || it.isBlank() }
-                .collect {
-                    val changed = syncAndReloadMessages()
-                    if (changed) {
-                        trySend(messageMap.values.toList())
-                    }
+            messageRefreshTrigger.collect { triggerId ->
+                if (triggerId.isBlank() ||
+                    triggerId.equals(conversation.id, ignoreCase = true) ||
+                    triggerId.equals(conversation.topic, ignoreCase = true)
+                ) {
+                    syncChannel.trySend(Unit)
                 }
+            }
         }
 
         awaitClose {
             streamJob.cancel()
             pollJob?.cancel()
             refreshJob.cancel()
+            syncProcessorJob.cancel()
+            syncChannel.close()
         }
     }
     .buffer(capacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     .flowOn(ioDispatcher)
 
     /**
-     * Direct message dispatch on a [Conversation] reference.
+     * Direct message dispatch on a [Conversation] reference with instant local preparation (optimistic UI).
      */
     suspend fun sendMessage(conversation: Conversation, text: String): Result<String> = withContext(ioDispatcher) {
         runCatching {
-            val msgId = conversation.send(text)
+            val prepId = try {
+                conversation.prepareMessage(text)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "prepareMessage fallback: ${e.message}")
+                null
+            }
+
+            // Instantly emit to local flow so user sees the message in 0ms (UNPUBLISHED)
+            messageRefreshTrigger.emit(conversation.id)
+
+            val msgId = if (prepId != null && prepId.isNotBlank()) {
+                try {
+                    conversation.publishMessages()
+                    prepId
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    Log.w(TAG, "publishMessages failed, falling back to send: ${e.message}")
+                    conversation.send(text)
+                }
+            } else {
+                conversation.send(text)
+            }
+
             try {
                 conversation.sync()
             } catch (_: Exception) {}
+
+            // Trigger flow update to transition message to PUBLISHED state with server timestamp
             messageRefreshTrigger.emit(conversation.id)
             msgId
         }

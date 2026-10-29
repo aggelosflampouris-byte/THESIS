@@ -1130,8 +1130,9 @@ private fun MessagingMessageBubble(
     isOwnMessage: Boolean,
     onRetry: () -> Unit
 ) {
-    val timeLabel = remember(message.sentAt) {
-        message.sentAt?.let { SimpleDateFormat("HH:mm", Locale.getDefault()).format(it) }
+    val timeLabel = remember(message.sentAt, message.sentAtNs) {
+        val date = message.sentAt ?: if (message.sentAtNs > 0L) java.util.Date(message.sentAtNs / 1_000_000L) else java.util.Date()
+        SimpleDateFormat("HH:mm", Locale.getDefault()).format(date)
     }
     val status = when (message.deliveryStatus) {
         DecodedMessage.MessageDeliveryStatus.FAILED -> "Δεν στάλθηκε"
