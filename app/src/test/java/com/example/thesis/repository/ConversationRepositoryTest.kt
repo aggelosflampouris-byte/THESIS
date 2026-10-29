@@ -92,9 +92,12 @@ class ConversationRepositoryTest {
         every { mockConversation.id } returns testConvId
         coEvery { mockConversations.findConversation(testConvId) } returns mockConversation
 
+        coEvery { mockClient.canMessage(any()) } returns mapOf(testPeerAddress to true)
+
         repository = ConversationRepository(
             xmtpEngine = mockEngine,
-            ioDispatcher = testDispatcher
+            ioDispatcher = testDispatcher,
+            syncIntervalMs = 0L
         )
     }
 

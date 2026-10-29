@@ -349,6 +349,8 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                             localInboxId = state.client.inboxId,
                             draft = draft,
                             isSending = isSending,
+                            isSyncing = isSyncing,
+                            onSync = { viewModel.syncConversations() },
                             onDraftChange = { draft = it },
                             onSendMessage = { text ->
                                 failedDraft = text
@@ -460,7 +462,7 @@ private fun MessagingTopBar(
             }
         },
         actions = {
-            if (selectedConversation == null && engineState is XmtpEngineState.Ready) {
+            if (engineState is XmtpEngineState.Ready) {
                 val rotation by animateFloatAsState(
                     targetValue = if (isSyncing) 360f else 0f,
                     label = "SyncRotation"
@@ -833,6 +835,8 @@ private fun MessagingChatScreen(
     localInboxId: String,
     draft: String,
     isSending: Boolean,
+    isSyncing: Boolean = false,
+    onSync: () -> Unit = {},
     onDraftChange: (String) -> Unit,
     onSendMessage: (String) -> Unit
 ) {
@@ -871,6 +875,22 @@ private fun MessagingChatScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         fontSize = 11.sp
                     )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedButton(
+                        onClick = onSync,
+                        enabled = !isSyncing
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (isSyncing) "Συγχρονισμός..." else "Συγχρονισμός μηνυμάτων",
+                            fontSize = 12.sp
+                        )
+                    }
                 }
             }
         } else {

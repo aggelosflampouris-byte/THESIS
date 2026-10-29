@@ -195,17 +195,30 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun syncConversations() {
+        val activeConv = _selectedConversation.value
         viewModelScope.launch {
             _isSyncing.value = true
-            logAction("SYNC", "Syncing MLS conversations from XMTP network...")
-            ThesisTelemetry.measureSuspendOperation("MLS Network Sync") {
-                repository.syncConversations()
-            }
-            .onSuccess {
-                logAction("SYNC", "Sync complete. Active conversations: ${_conversations.value.size}")
-            }
-            .onFailure { err ->
-                logAction("SYNC", "Sync failed: ${err.message}", isError = true)
+            logAction("SYNC", "Syncing with XMTP DEV network...")
+            if (activeConv != null) {
+                ThesisTelemetry.measureSuspendOperation("MLS Conversation Sync") {
+                    repository.syncConversation(activeConv)
+                }
+                .onSuccess {
+                    logAction("SYNC", "Active conversation messages synced.")
+                }
+                .onFailure { err ->
+                    logAction("SYNC", "Conversation sync failed: ${err.message}", isError = true)
+                }
+            } else {
+                ThesisTelemetry.measureSuspendOperation("MLS Network Sync") {
+                    repository.syncConversations()
+                }
+                .onSuccess {
+                    logAction("SYNC", "Sync complete. Active conversations: ${_conversations.value.size}")
+                }
+                .onFailure { err ->
+                    logAction("SYNC", "Sync failed: ${err.message}", isError = true)
+                }
             }
             _isSyncing.value = false
         }
