@@ -14,6 +14,7 @@ import com.example.thesis.security.ThesisTelemetry
 import com.example.thesis.xmtp.XmtpEngine
 import com.example.thesis.xmtp.XmtpEngineState
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -74,6 +75,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _isSyncing = MutableStateFlow(false)
     val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
 
+    private val _isBenchmarking = MutableStateFlow(false)
+    val isBenchmarking: StateFlow<Boolean> = _isBenchmarking.asStateFlow()
+
     fun logAction(tag: String, message: String, durationMs: Double? = null, isError: Boolean = false) {
         val entry = ActionLogEntry(
             tag = tag,
@@ -86,7 +90,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearActionLogs() {
         _actionLogs.value = emptyList()
+        ThesisTelemetry.clearTelemetryData()
     }
+
+    fun exportBenchmarkReport(): String = ThesisTelemetry.exportFullReport()
+
+    fun exportBenchmarkCsv(): String = ThesisTelemetry.exportAsCsv()
 
     init {
         viewModelScope.launch {
@@ -129,7 +138,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     activeSigner ?: ThesisSigner.createEphemeral().also { activeSigner = it }
                 }
                 _walletAddress.value = signer.address
-                logAction("IDENTITY", "Ephemeral SECP256K1 signer active: ${signer.address}")
+                val maskedAddress = if (signer.address.length >= 10) {
+                    "${signer.address.take(6)}...${signer.address.takeLast(4)}"
+                } else signer.address
+                logAction("IDENTITY", "Ephemeral SECP256K1 signer active: $maskedAddress")
 
                 val dbFile = databaseFactory.resolveDatabaseFile(signer.address)
                 val dbDirectory = dbFile.parentFile ?: appContext.filesDir
@@ -281,6 +293,79 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     _statusBanner.value = "Σφάλμα κατά το Crypto-Shredding."
                     logAction("GDPR", "Crypto-shredding failed", isError = true)
                 }
+            }
+        }
+    }
+
+    /**
+     * Executes an automated sequence of N loopback ratchet dispatches
+     * to gather empirical latency distributions for research evaluation.
+     */
+    fun runBatchBenchmark(iterations: Int = 10) {
+        if (_isBenchmarking.value) return
+        val readyClient = (engine.state.value as? XmtpEngineState.Ready)?.client
+        if (readyClient == null) {
+            _statusBanner.value = "Απαιτείται ενεργή σύνδεση XMTP για την εκτέλεση benchmark."
+            return
+        }
+
+        viewModelScope.launch {
+            _isBenchmarking.value = true
+            _statusBanner.value = "Εκτέλεση Batch Benchmark ($iterations δοκιμές MLS)..."
+            logAction("BENCHMARK", "Starting automated batch benchmark (N=$iterations)...")
+
+            try {
+                var activeConv = _selectedConversation.value
+                if (activeConv == null) {
+                    logAction("BENCHMARK", "No active conversation; establishing loopback ratchet...")
+                    val loopbackResult = ThesisTelemetry.measureSuspendOperation("4. MLS Conversation Handshake") {
+                        repository.createLoopbackConversation()
+                    }
+                    loopbackResult.onSuccess { conv ->
+                        activeConv = conv
+                        selectConversation(conv)
+                    }.onFailure { err ->
+                        _statusBanner.value = "Αποτυχία εκκίνησης loopback: ${err.message}"
+                        logAction("BENCHMARK", "Loopback failed: ${err.message}", isError = true)
+                        return@launch
+                    }
+                }
+
+                val conv = activeConv ?: return@launch
+                var successfulSamples = 0
+
+                for (i in 1..iterations) {
+                    val payload = "⚡ MLS Latency Benchmark Probe #$i [${System.currentTimeMillis()}]"
+                    val sendResult = ThesisTelemetry.measureSuspendOperation("5. MLS E2EE Message Dispatch") {
+                        repository.sendMessage(conv, payload)
+                    }
+
+                    if (sendResult.isSuccess) {
+                        successfulSamples++
+                        logAction(
+                            tag = "BENCHMARK",
+                            message = "Probe #$i/$iterations dispatched successfully"
+                        )
+                    } else {
+                        logAction(
+                            tag = "BENCHMARK",
+                            message = "Probe #$i/$iterations failed: ${sendResult.exceptionOrNull()?.message}",
+                            isError = true
+                        )
+                    }
+                    delay(120)
+                }
+
+                _statusBanner.value = "Ολοκληρώθηκε Batch Benchmark: $successfulSamples/$iterations επιτυχείς δοκιμές."
+                logAction(
+                    tag = "BENCHMARK",
+                    message = "Batch complete ($successfulSamples/$iterations). Summaries ready for export."
+                )
+            } catch (e: Exception) {
+                _statusBanner.value = "Σφάλμα κατά το batch benchmark: ${e.message}"
+                logAction("BENCHMARK", "Batch test error: ${e.message}", isError = true)
+            } finally {
+                _isBenchmarking.value = false
             }
         }
     }

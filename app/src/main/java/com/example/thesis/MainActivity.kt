@@ -155,6 +155,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     val actionLogs by viewModel.actionLogs.collectAsState()
     val isSending by viewModel.isSending.collectAsState()
     val isSyncing by viewModel.isSyncing.collectAsState()
+    val isBenchmarking by viewModel.isBenchmarking.collectAsState()
 
     var showNewConversationDialog by rememberSaveable { mutableStateOf(false) }
     var showIdentityDialog by rememberSaveable { mutableStateOf(false) }
@@ -170,6 +171,14 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     val context = LocalContext.current
     @Suppress("DEPRECATION")
     val clipboardManager = LocalClipboardManager.current
+
+    val onExportLogs: () -> Unit = {
+        val report = viewModel.exportBenchmarkReport()
+        clipboardManager.setText(AnnotatedString(report))
+        scope.launch {
+            snackbarHostState.showSnackbar("Η αναφορά Benchmark αντιγράφηκε στο πρόχειρο (Markdown & CSV)")
+        }
+    }
 
     // Resilient Status Banner & Failure Recovery
     LaunchedEffect(statusBanner) {
@@ -249,7 +258,8 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                 onBack = { viewModel.selectConversation(null) },
                 onSync = { viewModel.syncConversations() },
                 onOpenIdentity = { showIdentityDialog = true },
-                onOpenShred = { showShredConfirmationDialog = true }
+                onOpenShred = { showShredConfirmationDialog = true },
+                onExport = onExportLogs
             )
         }
     ) { padding ->
@@ -297,6 +307,9 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                             isActionLogExpanded = isActionLogExpanded,
                             onToggleActionLog = { isActionLogExpanded = !isActionLogExpanded },
                             onClearLogs = { viewModel.clearActionLogs() },
+                            isBenchmarking = isBenchmarking,
+                            onExportLogs = onExportLogs,
+                            onRunBatchBenchmark = { viewModel.runBatchBenchmark(10) },
                             onNewConversation = { showNewConversationDialog = true },
                             onStartLoopback = { viewModel.startSelfConversation() },
                             onSelectConversation = { conv -> viewModel.selectConversation(conv) }
@@ -322,7 +335,8 @@ private fun MessagingTopBar(
     onBack: () -> Unit,
     onSync: () -> Unit,
     onOpenIdentity: () -> Unit,
-    onOpenShred: () -> Unit
+    onOpenShred: () -> Unit,
+    onExport: (() -> Unit)? = null
 ) {
     TopAppBar(
         title = {
@@ -394,6 +408,10 @@ private fun MessagingTopBar(
             }
 
             if (walletAddress != null) {
+                IconButton(onClick = { onExport?.invoke() }) {
+                    Text("📊", fontSize = 16.sp)
+                }
+
                 TextButton(onClick = onOpenIdentity) {
                     Text("Ταυτότητα", fontSize = 12.sp)
                 }
@@ -533,6 +551,9 @@ private fun InboxDashboardScreen(
     isActionLogExpanded: Boolean,
     onToggleActionLog: () -> Unit,
     onClearLogs: () -> Unit,
+    isBenchmarking: Boolean = false,
+    onExportLogs: () -> Unit = {},
+    onRunBatchBenchmark: () -> Unit = {},
     onNewConversation: () -> Unit,
     onStartLoopback: () -> Unit,
     onSelectConversation: (Conversation) -> Unit
@@ -653,8 +674,11 @@ private fun InboxDashboardScreen(
         ActionLogPanel(
             logs = actionLogs,
             isExpanded = isActionLogExpanded,
+            isBenchmarking = isBenchmarking,
             onToggleExpand = onToggleActionLog,
-            onClear = onClearLogs
+            onClear = onClearLogs,
+            onExport = onExportLogs,
+            onRunBatchBenchmark = onRunBatchBenchmark
         )
     }
 }
@@ -1217,8 +1241,11 @@ private fun StatusBadge(icon: String, text: String, modifier: Modifier = Modifie
 fun ActionLogPanel(
     logs: List<ActionLogEntry>,
     isExpanded: Boolean,
+    isBenchmarking: Boolean = false,
     onToggleExpand: () -> Unit,
     onClear: () -> Unit,
+    onExport: () -> Unit = {},
+    onRunBatchBenchmark: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var selectedTagFilter by remember { mutableStateOf("ALL") }
@@ -1248,15 +1275,51 @@ fun ActionLogPanel(
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold
                 )
-                if (isExpanded && logs.isNotEmpty()) {
-                    Text(
-                        text = "Clear",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier
-                            .clickable(onClick = onClear)
-                            .padding(4.dp)
-                    )
+                if (isExpanded) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (isBenchmarking) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(12.dp),
+                                strokeWidth = 1.5.dp
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Testing...",
+                                style = MaterialTheme.typography.labelSmall,
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        } else {
+                            Text(
+                                text = "Auto 10x",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.tertiary,
+                                modifier = Modifier
+                                    .clickable(onClick = onRunBatchBenchmark)
+                                    .padding(horizontal = 4.dp, vertical = 2.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "Export",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier
+                                    .clickable(onClick = onExport)
+                                    .padding(horizontal = 4.dp, vertical = 2.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            if (logs.isNotEmpty()) {
+                                Text(
+                                    text = "Clear",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier
+                                        .clickable(onClick = onClear)
+                                        .padding(horizontal = 4.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1268,7 +1331,7 @@ fun ActionLogPanel(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    val filterTags = listOf("ALL", "METRIC", "KEYSTORE", "MLS", "E2EE", "GDPR")
+                    val filterTags = listOf("ALL", "BENCHMARK", "METRIC", "KEYSTORE", "MLS", "E2EE", "GDPR")
                     items(filterTags) { tag ->
                         FilterChip(
                             selected = selectedTagFilter == tag,
