@@ -92,6 +92,13 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.thesis.ui.ActionLogEntry
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material3.LinearProgressIndicator
+import com.example.thesis.updater.AppUpdateInfo
+import com.example.thesis.updater.UpdateStatus
+import java.io.File
 import com.example.thesis.ui.ChatViewModel
 import com.example.thesis.xmtp.XmtpEngineState
 import com.example.thesis.xmtp.XmtpInitError
@@ -160,6 +167,8 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     val isSyncing by viewModel.isSyncing.collectAsState()
     val isBenchmarking by viewModel.isBenchmarking.collectAsState()
 
+    val updateStatus by viewModel.updateStatus.collectAsState()
+    var showUpdateDialog by rememberSaveable { mutableStateOf(false) }
     var showNewConversationDialog by rememberSaveable { mutableStateOf(false) }
     var showIdentityDialog by rememberSaveable { mutableStateOf(false) }
     var showShredConfirmationDialog by rememberSaveable { mutableStateOf(false) }
@@ -173,6 +182,14 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
 
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+
+    LaunchedEffect(updateStatus) {
+        if (updateStatus is UpdateStatus.UpdateAvailable) {
+            showUpdateDialog = true
+        } else if (updateStatus is UpdateStatus.UpToDate) {
+            snackbarHostState.showSnackbar("Η εφαρμογή είναι ενημερωμένη (v${(updateStatus as UpdateStatus.UpToDate).currentVersion})")
+        }
+    }
     val context = LocalContext.current
     @Suppress("DEPRECATION")
     val clipboardManager = LocalClipboardManager.current
@@ -227,6 +244,9 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     if (showIdentityDialog) {
         IdentityDetailsDialog(
             address = walletAddress,
+            currentVersion = viewModel.appUpdateManager.getCurrentVersionName(),
+            isCheckingUpdate = updateStatus is UpdateStatus.Checking,
+            onCheckForUpdates = { viewModel.checkForUpdates(manual = true) },
             onCopy = {
                 walletAddress?.let { addr ->
                     clipboardManager.setText(AnnotatedString(addr))
@@ -238,6 +258,20 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                 showShredConfirmationDialog = true
             },
             onDismiss = { showIdentityDialog = false }
+        )
+    }
+
+    if (showUpdateDialog || updateStatus is UpdateStatus.Downloading || updateStatus is UpdateStatus.ReadyToInstall || updateStatus is UpdateStatus.Error) {
+        AppUpdateDialog(
+            updateStatus = updateStatus,
+            canRequestInstall = viewModel.appUpdateManager.canRequestPackageInstalls(),
+            onDownload = { viewModel.downloadUpdate(it) },
+            onInstall = { viewModel.installUpdate(it) },
+            onOpenSettings = { viewModel.appUpdateManager.openInstallPermissionSettings() },
+            onDismiss = {
+                showUpdateDialog = false
+                viewModel.dismissUpdate()
+            }
         )
     }
 
@@ -314,8 +348,10 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                 walletAddress = walletAddress,
                 engineState = engineState,
                 isSyncing = isSyncing,
+                updateStatus = updateStatus,
                 onBack = { viewModel.selectConversation(null) },
                 onSync = { viewModel.syncConversations() },
+                onOpenUpdate = { showUpdateDialog = true },
                 onOpenIdentity = { showIdentityDialog = true },
                 onOpenShred = { showShredConfirmationDialog = true },
                 onOpenTelemetrySheet = { showTelemetryBottomSheet = true },
@@ -394,8 +430,10 @@ private fun MessagingTopBar(
     walletAddress: String?,
     engineState: XmtpEngineState,
     isSyncing: Boolean,
+    updateStatus: UpdateStatus = UpdateStatus.Idle,
     onBack: () -> Unit,
     onSync: () -> Unit,
+    onOpenUpdate: () -> Unit = {},
     onOpenIdentity: () -> Unit,
     onOpenShred: () -> Unit,
     onOpenTelemetrySheet: () -> Unit = {},
@@ -473,6 +511,16 @@ private fun MessagingTopBar(
                         contentDescription = "Συγχρονισμός",
                         modifier = Modifier.rotate(rotation)
                     )
+                }
+            }
+
+            if (updateStatus is UpdateStatus.UpdateAvailable) {
+                Button(
+                    onClick = onOpenUpdate,
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Text("🚀 v${(updateStatus as UpdateStatus.UpdateAvailable).updateInfo.latestVersion}", fontSize = 11.sp)
                 }
             }
 
@@ -1136,6 +1184,9 @@ private fun NewConversationDialog(
 @Composable
 private fun IdentityDetailsDialog(
     address: String?,
+    currentVersion: String = "1.0.4",
+    isCheckingUpdate: Boolean = false,
+    onCheckForUpdates: () -> Unit = {},
     onCopy: () -> Unit,
     onTriggerShred: () -> Unit,
     onDismiss: () -> Unit
@@ -1163,6 +1214,17 @@ private fun IdentityDetailsDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                HorizontalDivider()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Έκδοση: v$currentVersion", style = MaterialTheme.typography.bodySmall)
+                    TextButton(onClick = onCheckForUpdates, enabled = !isCheckingUpdate) {
+                        Text(if (isCheckingUpdate) "Έλεγχος..." else "Έλεγχος Ενημερώσεων", fontSize = 12.sp)
+                    }
+                }
             }
         },
         confirmButton = {
@@ -1621,5 +1683,232 @@ private fun InspectorParamRow(label: String, value: String) {
             fontWeight = FontWeight.SemiBold,
             fontSize = 11.sp
         )
+    }
+}
+
+
+@Composable
+private fun AppUpdateDialog(
+    updateStatus: UpdateStatus,
+    canRequestInstall: Boolean,
+    onDownload: (AppUpdateInfo) -> Unit,
+    onInstall: (File) -> Unit,
+    onOpenSettings: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    when (updateStatus) {
+        is UpdateStatus.UpdateAvailable -> {
+            val info = updateStatus.updateInfo
+            AlertDialog(
+                onDismissRequest = onDismiss,
+                icon = {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(28.dp)
+                    )
+                },
+                title = {
+                    Text(
+                        text = "Νέα Έκδοση: v${info.latestVersion}",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                },
+                text = {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant
+                            ) {
+                                Text(
+                                    text = "Τρέχουσα: v${info.currentVersion}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
+                            Text("➔", style = MaterialTheme.typography.bodySmall)
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.primaryContainer
+                            ) {
+                                Text(
+                                    text = "Νέα: v${info.latestVersion}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+
+                        if (info.releaseTitle.isNotBlank()) {
+                            Text(
+                                text = info.releaseTitle,
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+
+                        if (info.assetSizeBytes > 0L) {
+                            val sizeMb = info.assetSizeBytes / (1024f * 1024f)
+                            Text(
+                                text = "Μέγεθος: ${String.format(Locale.US, "%.1f", sizeMb)} MB",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        Text(
+                            text = "Σημειώσεις Έκδοσης:",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 140.dp),
+                            shape = RoundedCornerShape(8.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .padding(8.dp)
+                                    .verticalScroll(rememberScrollState())
+                            ) {
+                                Text(
+                                    text = info.releaseNotes,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    Button(onClick = { onDownload(info) }) {
+                        Text("Λήψη & Ενημέρωση")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = onDismiss) {
+                        Text("Αργότερα")
+                    }
+                }
+            )
+        }
+
+        is UpdateStatus.Downloading -> {
+            val info = updateStatus.updateInfo
+            AlertDialog(
+                onDismissRequest = { /* Modal during active download */ },
+                title = { Text("Λήψη Ενημέρωσης v${info.latestVersion}") },
+                text = {
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        LinearProgressIndicator(
+                            progress = { updateStatus.progressPercent / 100f },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(8.dp)
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "${updateStatus.progressPercent}%",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            if (updateStatus.totalBytes > 0) {
+                                val downloadedMb = updateStatus.bytesDownloaded / (1024f * 1024f)
+                                val totalMb = updateStatus.totalBytes / (1024f * 1024f)
+                                Text(
+                                    text = "${String.format(Locale.US, "%.1f", downloadedMb)} / ${String.format(Locale.US, "%.1f", totalMb)} MB",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        Text(
+                            text = "Παρακαλώ περιμένετε καθώς ολοκληρώνεται η ασφαλής λήψη του νέου πακέτου APK.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
+                confirmButton = {}
+            )
+        }
+
+        is UpdateStatus.ReadyToInstall -> {
+            val info = updateStatus.updateInfo
+            AlertDialog(
+                onDismissRequest = onDismiss,
+                icon = {
+                    Icon(
+                        imageVector = Icons.Default.CheckCircle,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(28.dp)
+                    )
+                },
+                title = { Text("Η Λήψη Ολοκληρώθηκε!") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Το πακέτο v${info.latestVersion} είναι έτοιμο για εγκατάσταση.")
+                        if (!canRequestInstall) {
+                            Text(
+                                text = "Απαιτείται άδεια εγκατάστασης από άγνωστες πηγές.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    if (!canRequestInstall) {
+                        Button(onClick = onOpenSettings) {
+                            Text("Ενεργοποίηση Άδειας")
+                        }
+                    } else {
+                        Button(onClick = { onInstall(updateStatus.apkFile) }) {
+                            Text("Εγκατάσταση Τώρα")
+                        }
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = onDismiss) {
+                        Text("Κλείσιμο")
+                    }
+                }
+            )
+        }
+
+        is UpdateStatus.Error -> {
+            AlertDialog(
+                onDismissRequest = onDismiss,
+                title = { Text("Σφάλμα Ενημέρωσης") },
+                text = { Text(updateStatus.message) },
+                confirmButton = {
+                    TextButton(onClick = onDismiss) {
+                        Text("Εντάξει")
+                    }
+                }
+            )
+        }
+
+        else -> {}
     }
 }

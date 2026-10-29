@@ -6,6 +6,10 @@ import androidx.lifecycle.viewModelScope
 import com.example.thesis.database.DatabaseFactory
 import com.example.thesis.identity.ThesisSigner
 import com.example.thesis.repository.ConversationRepository
+import com.example.thesis.updater.AppUpdateInfo
+import com.example.thesis.updater.AppUpdateManager
+import com.example.thesis.updater.UpdateStatus
+import java.io.File
 import org.xmtp.android.library.libxmtp.DecodedMessage
 import com.example.thesis.security.CryptoShredder
 import com.example.thesis.security.KeystoreManager
@@ -47,6 +51,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val cryptoShredder = CryptoShredder(appContext, keystoreManager, databaseFactory)
     private val engine = XmtpEngine(appContext, XMTPEnvironment.DEV)
     private val repository = ConversationRepository(engine, viewModelScope)
+    val appUpdateManager = AppUpdateManager(appContext)
+    val updateStatus: StateFlow<UpdateStatus> = appUpdateManager.updateStatus
 
     private val sessionStateMutex = Mutex()
     private var activeSigner: ThesisSigner? = null
@@ -122,7 +128,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
         }
-
+        checkForUpdates(manual = false)
     }
 
     /**
@@ -426,6 +432,51 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
+    }
+
+
+    fun checkForUpdates(manual: Boolean = false) {
+        viewModelScope.launch {
+            if (manual) {
+                logAction("UPDATE", "Checking for updates on GitHub Releases...")
+            }
+            appUpdateManager.checkForUpdates(manual = manual)
+                .onSuccess { info ->
+                    if (info.isUpdateAvailable) {
+                        logAction("UPDATE", "Update available: v${info.latestVersion} (Current: v${info.currentVersion})")
+                    } else if (manual) {
+                        logAction("UPDATE", "App is up to date (v${info.currentVersion}).")
+                    }
+                }
+                .onFailure { err ->
+                    logAction("UPDATE", "Update check failed: ${err.message}", isError = true)
+                }
+        }
+    }
+
+    fun downloadUpdate(updateInfo: AppUpdateInfo) {
+        viewModelScope.launch {
+            logAction("UPDATE", "Starting download of v${updateInfo.latestVersion}...")
+            appUpdateManager.downloadUpdate(updateInfo)
+                .onSuccess { apkFile ->
+                    logAction("UPDATE", "Downloaded update APK (${apkFile.length() / 1024} KB). Ready to install.")
+                }
+                .onFailure { err ->
+                    logAction("UPDATE", "Download error: ${err.message}", isError = true)
+                }
+        }
+    }
+
+    fun installUpdate(apkFile: File) {
+        logAction("UPDATE", "Launching package installer for update...")
+        appUpdateManager.installUpdate(apkFile)
+            .onFailure { err ->
+                logAction("UPDATE", "Installation dispatch failed: ${err.message}", isError = true)
+            }
+    }
+
+    fun dismissUpdate() {
+        appUpdateManager.dismissUpdate()
     }
 
     override fun onCleared() {
