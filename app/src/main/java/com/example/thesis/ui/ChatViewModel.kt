@@ -278,16 +278,32 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     _walletAddress.value = null
                     _statusBanner.value = "GDPR Wipe: Κλειδί Keystore & ${res.deletedFilesCount} αρχεία βάσης καταστράφηκαν οριστικά."
                     logAction("GDPR", "KEK destroyed & ${res.deletedFilesCount} database files expunged")
+                    res.auditProof?.let { proof ->
+                        val certMsg = "Certificate: Keystore=" + (if (proof.isKeystoreEntryPurged) "PURGED" else "FAILED") +
+                            ", Storage=" + (if (proof.isPrimaryDatabaseUnlinked) "EXPUNGED" else "FAILED") +
+                            ", Compliant=" + proof.isCompliant
+                        logAction("GDPR", certMsg)
+                    }
                 }
                 is ShredResult.PartialSuccessCryptoShreddedOnly -> {
                     _walletAddress.value = null
                     _statusBanner.value = "Crypto-Shredded: ${res.message}"
                     logAction("GDPR", "Crypto-shredded: ${res.message}")
+                    res.auditProof?.let { proof ->
+                        val certMsg = "Certificate: Keystore=" + (if (proof.isKeystoreEntryPurged) "PURGED" else "FAILED") +
+                            ", Compliant=" + proof.isCompliant
+                        logAction("GDPR", certMsg)
+                    }
                 }
                 is ShredResult.PartialSuccess -> {
                     _walletAddress.value = null
                     _statusBanner.value = "Crypto-Shredded: ${res.message}"
                     logAction("GDPR", "Crypto-shredded: ${res.message}")
+                    res.auditProof?.let { proof ->
+                        val certMsg = "Certificate: Keystore=" + (if (proof.isKeystoreEntryPurged) "PURGED" else "FAILED") +
+                            ", Storage=" + (if (proof.isPrimaryDatabaseUnlinked) "EXPUNGED" else "FAILED")
+                        logAction("GDPR", certMsg)
+                    }
                 }
                 is ShredResult.Failure -> {
                     _statusBanner.value = "Σφάλμα κατά το Crypto-Shredding."
