@@ -1,5 +1,7 @@
 package com.example.thesis
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.ui.text.style.TextOverflow
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -175,8 +177,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     var showIdentityDialog by rememberSaveable { mutableStateOf(false) }
     var showShredConfirmationDialog by rememberSaveable { mutableStateOf(false) }
     var isCreatingConversation by rememberSaveable { mutableStateOf(false) }
-    var isActionLogExpanded by rememberSaveable { mutableStateOf(false) }
-    var showTelemetryBottomSheet by rememberSaveable { mutableStateOf(false) }
+    var showLogsScreen by rememberSaveable { mutableStateOf(false) }
     var showProtocolInspectorDialog by rememberSaveable { mutableStateOf(false) }
 
     var draft by rememberSaveable(selectedConversation?.id) { mutableStateOf("") }
@@ -224,6 +225,14 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
         if (selectedConversation != null) {
             isCreatingConversation = false
         }
+    }
+
+    BackHandler(enabled = showLogsScreen) {
+        showLogsScreen = false
+    }
+
+    BackHandler(enabled = !showLogsScreen && selectedConversation != null) {
+        viewModel.selectConversation(null)
     }
 
     // Modal: New Conversation & Loopback Dispatch
@@ -309,118 +318,84 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
         )
     }
 
-    // Bottom Sheet: Live Telemetry & In-Chat Benchmark Drawer
-    if (showTelemetryBottomSheet) {
-        ModalBottomSheet(
-            onDismissRequest = { showTelemetryBottomSheet = false },
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "🔬 Telemetry & MLS Ratchet Inspector",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                    TextButton(onClick = { showTelemetryBottomSheet = false }) {
-                        Text("Κλείσιμο", fontSize = 12.sp)
-                    }
-                }
-                Spacer(modifier = Modifier.height(6.dp))
-                ActionLogPanel(
-                    logs = actionLogs,
-                    isExpanded = true,
-                    isBenchmarking = isBenchmarking,
-                    onToggleExpand = {},
-                    onClear = { viewModel.clearActionLogs() },
-                    onExport = onExportLogs,
-                    onRunBatchBenchmark = { viewModel.runBatchBenchmark(10) }
+    if (showLogsScreen) {
+        LogsTelemetryScreen(
+            logs = actionLogs,
+            isBenchmarking = isBenchmarking,
+            onBack = { showLogsScreen = false },
+            onClear = { viewModel.clearActionLogs() },
+            onExport = onExportLogs,
+            onRunBatchBenchmark = { viewModel.runBatchBenchmark(10) }
+        )
+    } else {
+        Scaffold(
+            snackbarHost = { SnackbarHost(snackbarHostState) },
+            topBar = {
+                MessagingTopBar(
+                    selectedConversation = selectedConversation,
+                    walletAddress = walletAddress,
+                    engineState = engineState,
+                    isSyncing = isSyncing,
+                    updateStatus = updateStatus,
+                    onBack = { viewModel.selectConversation(null) },
+                    onSync = { viewModel.syncConversations() },
+                    onOpenUpdate = { showUpdateDialog = true },
+                    onOpenIdentity = { showIdentityDialog = true },
+                    onOpenShred = { showShredConfirmationDialog = true },
+                    onOpenLogs = { showLogsScreen = true },
+                    onOpenProtocolInspector = { showProtocolInspectorDialog = true }
                 )
-                Spacer(modifier = Modifier.height(24.dp))
             }
-        }
-    }
-
-    Scaffold(
-        snackbarHost = { SnackbarHost(snackbarHostState) },
-        topBar = {
-            MessagingTopBar(
-                selectedConversation = selectedConversation,
-                walletAddress = walletAddress,
-                engineState = engineState,
-                isSyncing = isSyncing,
-                updateStatus = updateStatus,
-                onBack = { viewModel.selectConversation(null) },
-                onSync = { viewModel.syncConversations() },
-                onOpenUpdate = { showUpdateDialog = true },
-                onOpenIdentity = { showIdentityDialog = true },
-                onOpenShred = { showShredConfirmationDialog = true },
-                onOpenTelemetrySheet = { showTelemetryBottomSheet = true },
-                onOpenProtocolInspector = { showProtocolInspectorDialog = true }
-            )
-        }
-    ) { padding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-        ) {
-            when (val state = engineState) {
-                is XmtpEngineState.Idle -> {
-                    MessagingStartScreen(onStart = { viewModel.initializeSession() })
-                }
-                is XmtpEngineState.Loading -> {
-                    MessagingLoadingScreen()
-                }
-                is XmtpEngineState.Error -> {
-                    MessagingConnectionError(
-                        state = state,
-                        onRetry = { viewModel.initializeSession() }
-                    )
-                }
-                is XmtpEngineState.Ready -> {
-                    if (selectedConversation != null) {
-                        MessagingChatScreen(
-                            conversation = selectedConversation!!,
-                            messages = messages,
-                            localInboxId = state.client.inboxId,
-                            draft = draft,
-                            isSending = isSending,
-                            isSyncing = isSyncing,
-                            onSync = { viewModel.syncConversations() },
-                            onDraftChange = { draft = it },
-                            onSendMessage = { text ->
-                                failedDraft = text
-                                viewModel.sendMessage(text)
-                                draft = ""
-                            }
+        ) { padding ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+            ) {
+                when (val state = engineState) {
+                    is XmtpEngineState.Idle -> {
+                        MessagingStartScreen(onStart = { viewModel.initializeSession() })
+                    }
+                    is XmtpEngineState.Loading -> {
+                        MessagingLoadingScreen()
+                    }
+                    is XmtpEngineState.Error -> {
+                        MessagingConnectionError(
+                            state = state,
+                            onRetry = { viewModel.initializeSession() }
                         )
-                    } else {
-                        InboxDashboardScreen(
-                            conversations = conversations,
-                            engineState = engineState,
-                            walletAddress = walletAddress,
-                            isSyncing = isSyncing,
-                            isCreatingConversation = isCreatingConversation,
-                            actionLogs = actionLogs,
-                            isActionLogExpanded = isActionLogExpanded,
-                            onToggleActionLog = { isActionLogExpanded = !isActionLogExpanded },
-                            onClearLogs = { viewModel.clearActionLogs() },
-                            isBenchmarking = isBenchmarking,
-                            onExportLogs = onExportLogs,
-                            onRunBatchBenchmark = { viewModel.runBatchBenchmark(10) },
-                            onNewConversation = { showNewConversationDialog = true },
-                            onStartLoopback = { viewModel.startSelfConversation() },
-                            onSelectConversation = { conv -> viewModel.selectConversation(conv) }
-                        )
+                    }
+                    is XmtpEngineState.Ready -> {
+                        if (selectedConversation != null) {
+                            MessagingChatScreen(
+                                conversation = selectedConversation!!,
+                                messages = messages,
+                                localInboxId = state.client.inboxId,
+                                draft = draft,
+                                isSending = isSending,
+                                isSyncing = isSyncing,
+                                onSync = { viewModel.syncConversations() },
+                                onDraftChange = { draft = it },
+                                onSendMessage = { text ->
+                                    failedDraft = text
+                                    viewModel.sendMessage(text)
+                                    draft = ""
+                                }
+                            )
+                        } else {
+                            InboxDashboardScreen(
+                                conversations = conversations,
+                                engineState = engineState,
+                                walletAddress = walletAddress,
+                                isSyncing = isSyncing,
+                                isCreatingConversation = isCreatingConversation,
+                                actionLogs = actionLogs,
+                                onOpenLogs = { showLogsScreen = true },
+                                onNewConversation = { showNewConversationDialog = true },
+                                onStartLoopback = { viewModel.startSelfConversation() },
+                                onSelectConversation = { conv -> viewModel.selectConversation(conv) }
+                            )
+                        }
                     }
                 }
             }
@@ -445,7 +420,7 @@ private fun MessagingTopBar(
     onOpenUpdate: () -> Unit = {},
     onOpenIdentity: () -> Unit,
     onOpenShred: () -> Unit,
-    onOpenTelemetrySheet: () -> Unit = {},
+    onOpenLogs: () -> Unit = {},
     onOpenProtocolInspector: () -> Unit = {}
 ) {
     TopAppBar(
@@ -466,20 +441,20 @@ private fun MessagingTopBar(
                 Column(
                     modifier = Modifier.clickable { onOpenProtocolInspector() }
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = headerTitle,
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(Modifier.width(4.dp))
-                        Text("ℹ️", fontSize = 12.sp)
-                    }
                     Text(
-                        text = "End-to-End Encrypted • SQLCipher Sandbox (Tap for RFC 9420)",
+                        text = headerTitle,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "🔒 MLS End-to-End Encrypted",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary,
-                        fontSize = 11.sp
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             } else {
@@ -521,45 +496,71 @@ private fun MessagingTopBar(
             }
         },
         actions = {
-            if (engineState is XmtpEngineState.Ready) {
-                val rotation by animateFloatAsState(
-                    targetValue = if (isSyncing) 360f else 0f,
-                    label = "SyncRotation"
-                )
-                IconButton(onClick = onSync, enabled = !isSyncing) {
-                    Icon(
-                        imageVector = Icons.Default.Refresh,
-                        contentDescription = "Συγχρονισμός",
-                        modifier = Modifier.rotate(rotation)
+            if (selectedConversation != null) {
+                // Active Chat Screen Actions: Refined, non-cluttered
+                IconButton(onClick = onOpenProtocolInspector) {
+                    Text("ℹ️", fontSize = 16.sp)
+                }
+
+                if (engineState is XmtpEngineState.Ready) {
+                    val rotation by animateFloatAsState(
+                        targetValue = if (isSyncing) 360f else 0f,
+                        label = "SyncRotation"
                     )
+                    IconButton(onClick = onSync, enabled = !isSyncing) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "Συγχρονισμός",
+                            modifier = Modifier.rotate(rotation)
+                        )
+                    }
                 }
-            }
 
-            if (updateStatus is UpdateStatus.UpdateAvailable) {
-                Button(
-                    onClick = onOpenUpdate,
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                ) {
-                    Text("🚀 v${(updateStatus as UpdateStatus.UpdateAvailable).updateInfo.latestVersion}", fontSize = 11.sp)
-                }
-            }
-
-            if (walletAddress != null) {
-                IconButton(onClick = onOpenTelemetrySheet) {
+                IconButton(onClick = onOpenLogs) {
                     Text("📊", fontSize = 16.sp)
                 }
-
-                TextButton(onClick = onOpenIdentity) {
-                    Text("Ταυτότητα", fontSize = 12.sp)
+            } else {
+                // Dashboard Home Actions
+                if (engineState is XmtpEngineState.Ready) {
+                    val rotation by animateFloatAsState(
+                        targetValue = if (isSyncing) 360f else 0f,
+                        label = "SyncRotation"
+                    )
+                    IconButton(onClick = onSync, enabled = !isSyncing) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = "Συγχρονισμός",
+                            modifier = Modifier.rotate(rotation)
+                        )
+                    }
                 }
 
-                Button(
-                    onClick = onOpenShred,
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
-                ) {
-                    Text("GDPR Shred", fontSize = 12.sp)
+                if (updateStatus is UpdateStatus.UpdateAvailable) {
+                    Button(
+                        onClick = onOpenUpdate,
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text("🚀 v${(updateStatus as UpdateStatus.UpdateAvailable).updateInfo.latestVersion}", fontSize = 11.sp)
+                    }
+                }
+
+                if (walletAddress != null) {
+                    IconButton(onClick = onOpenLogs) {
+                        Text("📊", fontSize = 16.sp)
+                    }
+
+                    TextButton(onClick = onOpenIdentity) {
+                        Text("Ταυτότητα", fontSize = 12.sp)
+                    }
+
+                    Button(
+                        onClick = onOpenShred,
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                    ) {
+                        Text("GDPR Shred", fontSize = 12.sp)
+                    }
                 }
             }
         },
@@ -686,12 +687,7 @@ private fun InboxDashboardScreen(
     isSyncing: Boolean,
     isCreatingConversation: Boolean,
     actionLogs: List<ActionLogEntry>,
-    isActionLogExpanded: Boolean,
-    onToggleActionLog: () -> Unit,
-    onClearLogs: () -> Unit,
-    isBenchmarking: Boolean = false,
-    onExportLogs: () -> Unit = {},
-    onRunBatchBenchmark: () -> Unit = {},
+    onOpenLogs: () -> Unit,
     onNewConversation: () -> Unit,
     onStartLoopback: () -> Unit,
     onSelectConversation: (Conversation) -> Unit
@@ -806,18 +802,60 @@ private fun InboxDashboardScreen(
             }
         }
 
-        Spacer(modifier = Modifier.height(6.dp))
+        Spacer(modifier = Modifier.height(8.dp))
 
-        // Collapsed Action & Telemetry Benchmark Drawer
-        ActionLogPanel(
-            logs = actionLogs,
-            isExpanded = isActionLogExpanded,
-            isBenchmarking = isBenchmarking,
-            onToggleExpand = onToggleActionLog,
-            onClear = onClearLogs,
-            onExport = onExportLogs,
-            onRunBatchBenchmark = onRunBatchBenchmark
-        )
+        // Navigation Card to dedicated Action & Telemetry Log Screen
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onOpenLogs),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            ),
+            shape = RoundedCornerShape(12.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        modifier = Modifier.size(32.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Text("📊", fontSize = 14.sp)
+                        }
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column {
+                        Text(
+                            text = "Action & Telemetry Log",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "${actionLogs.size} καταγεγραμμένα συμβάντα • Πατήστε για άνοιγμα",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+                Text(
+                    text = "›",
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
     }
 }
 
@@ -1015,7 +1053,7 @@ private fun MessagingChatScreen(
 
         Spacer(modifier = Modifier.height(4.dp))
 
-        // Quick Message Template Chips
+        // Quick Message Template Chips (Refined for real conversation)
         LazyRow(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -1030,12 +1068,6 @@ private fun MessagingChatScreen(
                 AssistChip(
                     onClick = { onSendMessage("🔐 SQLCipher Storage Test") },
                     label = { Text("🔐 Test SQLCipher", fontSize = 10.sp) }
-                )
-            }
-            item {
-                AssistChip(
-                    onClick = { onSendMessage("⚡ Benchmark MLS Latency") },
-                    label = { Text("⚡ Benchmark", fontSize = 10.sp) }
                 )
             }
         }
@@ -1457,9 +1489,278 @@ private fun StatusBadge(icon: String, text: String, modifier: Modifier = Modifie
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-//  UI Component: Action & Telemetry Log Panel (Thesis Benchmarking)
+//  UI Component: Dedicated Logs & Telemetry Full-Page Screen (Thesis Research)
 // ────────────────────────────────────────────────────────────────────────────
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun LogsTelemetryScreen(
+    logs: List<ActionLogEntry>,
+    isBenchmarking: Boolean = false,
+    onBack: () -> Unit,
+    onClear: () -> Unit,
+    onExport: () -> Unit = {},
+    onRunBatchBenchmark: () -> Unit = {},
+    modifier: Modifier = Modifier
+) {
+    var selectedTagFilter by rememberSaveable { mutableStateOf("ALL") }
+    @Suppress("DEPRECATION")
+    val clipboardManager = LocalClipboardManager.current
+    val context = LocalContext.current
+
+    val filteredLogs = remember(logs, selectedTagFilter) {
+        if (selectedTagFilter == "ALL") logs
+        else logs.filter { it.tag.equals(selectedTagFilter, ignoreCase = true) }
+    }
+
+    val metricCount = remember(logs) { logs.count { it.tag.equals("METRIC", ignoreCase = true) } }
+    val errorCount = remember(logs) { logs.count { it.isError } }
+    val avgLatency = remember(logs) {
+        val latencies = logs.mapNotNull { it.durationMs }
+        if (latencies.isNotEmpty()) latencies.average() else null
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text(
+                            text = "Action & Telemetry Log",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "${logs.size} συμβάντα • RFC 9420 / SQLCipher",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Πίσω")
+                    }
+                },
+                actions = {
+                    TextButton(onClick = onExport) {
+                        Text("Export", fontSize = 12.sp)
+                    }
+                    if (logs.isNotEmpty()) {
+                        TextButton(onClick = onClear) {
+                            Text("Clear", color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                        }
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                )
+            )
+        }
+    ) { padding ->
+        Column(
+            modifier = modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(horizontal = 16.dp, vertical = 8.dp)
+        ) {
+            // Performance & Ratchet Metrics Summary Card
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+                ),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(
+                                text = "MLS Performance & Ratchet Metrics",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Row(
+                                modifier = Modifier.padding(top = 2.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Text(
+                                    text = "Metrics: $metricCount",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Text(
+                                    text = "Errors: $errorCount",
+                                    fontSize = 11.sp,
+                                    color = if (errorCount > 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                avgLatency?.let { avg ->
+                                    Text(
+                                        text = String.format(Locale.US, "Avg: %.1f ms", avg),
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.tertiary
+                                    )
+                                }
+                            }
+                        }
+
+                        Button(
+                            onClick = onRunBatchBenchmark,
+                            enabled = !isBenchmarking,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            if (isBenchmarking) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(14.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.onPrimary
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Running...", fontSize = 11.sp)
+                            } else {
+                                Text("⚡ Batch (10x)", fontSize = 11.sp)
+                            }
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Tag Filter Chips
+            val filterTags = listOf("ALL", "METRIC", "E2EE", "MLS", "KEYSTORE", "SYNC", "BENCHMARK", "GDPR", "UPDATE")
+            LazyRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                items(filterTags) { tag ->
+                    FilterChip(
+                        selected = selectedTagFilter == tag,
+                        onClick = { selectedTagFilter = tag },
+                        label = { Text(tag, fontSize = 11.sp) }
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Full Height Scrollable Logs List
+            if (filteredLogs.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "Δεν υπάρχουν καταγραφές για το φίλτρο $selectedTagFilter.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            } else {
+                val timeFormat = remember { SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()) }
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    items(filteredLogs.reversed()) { entry ->
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    val logText = "${timeFormat.format(Date(entry.timestamp))} [${entry.tag}] ${entry.message}" +
+                                        (entry.durationMs?.let { " (${String.format(Locale.US, "%.1f ms", it)})" } ?: "")
+                                    clipboardManager.setText(AnnotatedString(logText))
+                                    Toast.makeText(context, "Αντιγράφηκε στο πρόχειρο", Toast.LENGTH_SHORT).show()
+                                },
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (entry.isError) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
+                                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                            ),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.Top
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = timeFormat.format(Date(entry.timestamp)),
+                                            fontSize = 11.sp,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Surface(
+                                            shape = RoundedCornerShape(4.dp),
+                                            color = when (entry.tag.uppercase(Locale.ROOT)) {
+                                                "METRIC" -> MaterialTheme.colorScheme.tertiary.copy(alpha = 0.2f)
+                                                "E2EE", "MLS" -> MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
+                                                "KEYSTORE" -> MaterialTheme.colorScheme.secondary.copy(alpha = 0.2f)
+                                                "GDPR" -> MaterialTheme.colorScheme.error.copy(alpha = 0.2f)
+                                                else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f)
+                                            }
+                                        ) {
+                                            Text(
+                                                text = entry.tag,
+                                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (entry.isError) MaterialTheme.colorScheme.error
+                                                else when (entry.tag.uppercase(Locale.ROOT)) {
+                                                    "METRIC" -> MaterialTheme.colorScheme.tertiary
+                                                    "GDPR" -> MaterialTheme.colorScheme.error
+                                                    else -> MaterialTheme.colorScheme.primary
+                                                }
+                                            )
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = entry.message,
+                                        fontSize = 12.sp,
+                                        color = if (entry.isError) MaterialTheme.colorScheme.error
+                                        else MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                                entry.durationMs?.let { ms ->
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Surface(
+                                        shape = RoundedCornerShape(4.dp),
+                                        color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f)
+                                    ) {
+                                        Text(
+                                            text = String.format(Locale.US, "%.1f ms", ms),
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = MaterialTheme.colorScheme.tertiary
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Retain backward-compatible ActionLogPanel alias if invoked
 @Composable
 fun ActionLogPanel(
     logs: List<ActionLogEntry>,
@@ -1471,166 +1772,15 @@ fun ActionLogPanel(
     onRunBatchBenchmark: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
-    var selectedTagFilter by remember { mutableStateOf("ALL") }
-
-    val filteredLogs = remember(logs, selectedTagFilter) {
-        if (selectedTagFilter == "ALL") logs
-        else logs.filter { it.tag.equals(selectedTagFilter, ignoreCase = true) }
-    }
-
-    Card(
-        modifier = modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-        ),
-        shape = RoundedCornerShape(10.dp)
-    ) {
-        Column(modifier = Modifier.padding(8.dp)) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable(onClick = onToggleExpand),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = if (isExpanded) "▼ Action & Telemetry Log (${logs.size})" else "▶ Action & Telemetry Log (${logs.size})",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold
-                )
-                if (isExpanded) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        if (isBenchmarking) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(12.dp),
-                                strokeWidth = 1.5.dp
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = "Testing...",
-                                style = MaterialTheme.typography.labelSmall,
-                                fontSize = 10.sp,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                        } else {
-                            Text(
-                                text = "Auto 10x",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.tertiary,
-                                modifier = Modifier
-                                    .clickable(onClick = onRunBatchBenchmark)
-                                    .padding(horizontal = 4.dp, vertical = 2.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = "Export",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier
-                                    .clickable(onClick = onExport)
-                                    .padding(horizontal = 4.dp, vertical = 2.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            if (logs.isNotEmpty()) {
-                                Text(
-                                    text = "Clear",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.error,
-                                    modifier = Modifier
-                                        .clickable(onClick = onClear)
-                                        .padding(horizontal = 4.dp, vertical = 2.dp)
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (isExpanded) {
-                Spacer(modifier = Modifier.height(4.dp))
-
-                // Tag Filter Chips
-                LazyRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    val filterTags = listOf("ALL", "BENCHMARK", "METRIC", "KEYSTORE", "MLS", "E2EE", "GDPR")
-                    items(filterTags) { tag ->
-                        FilterChip(
-                            selected = selectedTagFilter == tag,
-                            onClick = { selectedTagFilter = tag },
-                            label = { Text(tag, fontSize = 9.sp) }
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(4.dp))
-
-                if (filteredLogs.isEmpty()) {
-                    Text(
-                        text = "Δεν υπάρχουν καταγραφές για το φίλτρο $selectedTagFilter.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(4.dp),
-                        fontSize = 11.sp
-                    )
-                } else {
-                    val timeFormat = remember { SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()) }
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 160.dp)
-                    ) {
-                        items(filteredLogs.reversed()) { entry ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 2.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.Top
-                            ) {
-                                Row(
-                                    modifier = Modifier.weight(1f),
-                                    verticalAlignment = Alignment.Top
-                                ) {
-                                    Text(
-                                        text = timeFormat.format(Date(entry.timestamp)),
-                                        fontSize = 10.sp,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = "[${entry.tag}]",
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (entry.isError) MaterialTheme.colorScheme.error
-                                        else MaterialTheme.colorScheme.primary
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    Text(
-                                        text = entry.message,
-                                        fontSize = 10.sp,
-                                        color = if (entry.isError) MaterialTheme.colorScheme.error
-                                        else MaterialTheme.colorScheme.onSurface
-                                    )
-                                }
-                                entry.durationMs?.let { ms ->
-                                    Text(
-                                        text = String.format(Locale.US, "%.1f ms", ms),
-                                        fontSize = 10.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = MaterialTheme.colorScheme.tertiary
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    LogsTelemetryScreen(
+        logs = logs,
+        isBenchmarking = isBenchmarking,
+        onBack = onToggleExpand,
+        onClear = onClear,
+        onExport = onExport,
+        onRunBatchBenchmark = onRunBatchBenchmark,
+        modifier = modifier
+    )
 }
 
 // ────────────────────────────────────────────────────────────────────────────
