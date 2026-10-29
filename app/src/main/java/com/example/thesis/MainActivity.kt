@@ -162,6 +162,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     val engineState by viewModel.engineState.collectAsState()
     val walletAddress by viewModel.walletAddress.collectAsState()
     val inboxId by viewModel.inboxId.collectAsState()
+    val installationId by viewModel.installationId.collectAsState()
     val conversations by viewModel.conversations.collectAsState()
     val selectedConversation by viewModel.selectedConversation.collectAsState()
     val messages by viewModel.messages.collectAsState()
@@ -321,11 +322,15 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     if (showLogsScreen) {
         LogsTelemetryScreen(
             logs = actionLogs,
+            walletAddress = walletAddress,
+            inboxId = inboxId,
+            installationId = installationId,
             isBenchmarking = isBenchmarking,
             onBack = { showLogsScreen = false },
             onClear = { viewModel.clearActionLogs() },
             onExport = onExportLogs,
-            onRunBatchBenchmark = { viewModel.runBatchBenchmark(10) }
+            onRunBatchBenchmark = { viewModel.runBatchBenchmark(10) },
+            onEmitBlockchainPoC = { viewModel.emitBlockchainPoCProof() }
         )
     } else {
         Scaffold(
@@ -1496,11 +1501,15 @@ private fun StatusBadge(icon: String, text: String, modifier: Modifier = Modifie
 @Composable
 fun LogsTelemetryScreen(
     logs: List<ActionLogEntry>,
+    walletAddress: String? = null,
+    inboxId: String? = null,
+    installationId: String? = null,
     isBenchmarking: Boolean = false,
     onBack: () -> Unit,
     onClear: () -> Unit,
     onExport: () -> Unit = {},
     onRunBatchBenchmark: () -> Unit = {},
+    onEmitBlockchainPoC: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var selectedTagFilter by rememberSaveable { mutableStateOf("ALL") }
@@ -1564,6 +1573,116 @@ fun LogsTelemetryScreen(
                 .padding(padding)
                 .padding(horizontal = 16.dp, vertical = 8.dp)
         ) {
+            // ── Active Network Proof Card (Blockchain & MLS Chain of Custody) ──
+            var isPoCCardExpanded by rememberSaveable { mutableStateOf(true) }
+            val verifiedMsgCount = remember(logs) {
+                logs.count { it.message.contains("MsgID:") || it.message.contains("POC_MSG_PROOF") }
+            }
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                ),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { isPoCCardExpanded = !isPoCCardExpanded },
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("⛓️", fontSize = 16.sp)
+                            Spacer(Modifier.width(8.dp))
+                            Column {
+                                Text(
+                                    text = "Blockchain & MLS Chain of Custody",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "EIP-191 Identity • RFC 9420 TreeKEM Ledger",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        Text(
+                            text = if (isPoCCardExpanded) "▲" else "▼",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+
+                    if (isPoCCardExpanded) {
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        PoCIdentifierRow(
+                            label = "Ethereum (L1)",
+                            value = walletAddress ?: "0x (Αναμονή αρχικοποίησης...)",
+                            onCopy = {
+                                walletAddress?.let {
+                                    clipboardManager.setText(AnnotatedString(it))
+                                    Toast.makeText(context, "Το Ethereum 0x Address αντιγράφηκε", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        )
+
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        PoCIdentifierRow(
+                            label = "XMTP Inbox ID",
+                            value = inboxId ?: "Αναμονή δικτύου...",
+                            onCopy = {
+                                inboxId?.let {
+                                    clipboardManager.setText(AnnotatedString(it))
+                                    Toast.makeText(context, "Το XMTP Inbox ID αντιγράφηκε", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        )
+
+                        Spacer(modifier = Modifier.height(6.dp))
+
+                        PoCIdentifierRow(
+                            label = "Installation ID",
+                            value = installationId ?: "Αναμονή MLS leaf node...",
+                            onCopy = {
+                                installationId?.let {
+                                    clipboardManager.setText(AnnotatedString(it))
+                                    Toast.makeText(context, "Το MLS Installation ID αντιγράφηκε", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Επαληθευμένα Network Msg IDs: $verifiedMsgCount",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+
+                            Text(
+                                text = "Tap row to copy full ID",
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
             // Performance & Ratchet Metrics Summary Card
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -1609,21 +1728,33 @@ fun LogsTelemetryScreen(
                             }
                         }
 
-                        Button(
-                            onClick = onRunBatchBenchmark,
-                            enabled = !isBenchmarking,
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            if (isBenchmarking) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(14.dp),
-                                    strokeWidth = 2.dp,
-                                    color = MaterialTheme.colorScheme.onPrimary
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Running...", fontSize = 11.sp)
-                            } else {
-                                Text("⚡ Batch (10x)", fontSize = 11.sp)
+                            OutlinedButton(
+                                onClick = onEmitBlockchainPoC,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
+                            ) {
+                                Text("⛓️ PoC IDs", fontSize = 11.sp)
+                            }
+
+                            Button(
+                                onClick = onRunBatchBenchmark,
+                                enabled = !isBenchmarking,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                if (isBenchmarking) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(14.dp),
+                                        strokeWidth = 2.dp,
+                                        color = MaterialTheme.colorScheme.onPrimary
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Running...", fontSize = 11.sp)
+                                } else {
+                                    Text("⚡ Batch (10x)", fontSize = 11.sp)
+                                }
                             }
                         }
                     }
@@ -1781,6 +1912,49 @@ fun ActionLogPanel(
         onRunBatchBenchmark = onRunBatchBenchmark,
         modifier = modifier
     )
+}
+
+@Composable
+private fun PoCIdentifierRow(
+    label: String,
+    value: String,
+    onCopy: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(6.dp),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.6f),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onCopy)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = label,
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = FontWeight.Medium
+                )
+                Text(
+                    text = if (value.length > 28) "${value.take(14)}...${value.takeLast(10)}" else value,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+            Text(
+                text = "Copy",
+                fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.Bold
+            )
+        }
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────

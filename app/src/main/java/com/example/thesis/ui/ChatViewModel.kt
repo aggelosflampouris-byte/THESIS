@@ -1,5 +1,11 @@
 package com.example.thesis.ui
 
+import java.text.SimpleDateFormat
+import java.util.Collections
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
+import kotlinx.coroutines.Dispatchers
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -76,6 +82,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         .map { (it as? XmtpEngineState.Ready)?.client?.inboxId }
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
+    val installationId: StateFlow<String?> = engine.state
+        .map { (it as? XmtpEngineState.Ready)?.client?.installationId }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
     private val _conversations = MutableStateFlow<List<Conversation>>(emptyList())
     val conversations: StateFlow<List<Conversation>> = _conversations.asStateFlow()
 
@@ -110,12 +120,90 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _actionLogs.value = (_actionLogs.value + entry).takeLast(100)
     }
 
+    /**
+     * Generates a complete Proof-of-Operation cryptographic manifest in the Action Log,
+     * dumping active 0x addresses, XMTP Inbox/Installation IDs, MLS Group IDs, and Message IDs.
+     */
+    fun emitBlockchainPoCProof() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val currentState = engine.state.value
+            if (currentState !is XmtpEngineState.Ready) {
+                logAction("MLS", "PoC Proof aborted: XMTP Engine is not in Ready state.")
+                return@launch
+            }
+
+            val client = currentState.client
+            val ethAddress = _walletAddress.value ?: "UNKNOWN_0x"
+            val activeConvs = runCatching { client.conversations.list() }.getOrDefault(emptyList())
+
+            logAction(
+                tag = "MLS",
+                message = "⛓️ [POC_IDENTITY_PROOF] EthAddress: $ethAddress | InboxID: ${client.inboxId} | InstallationID: ${client.installationId} | Env: ${client.environment.name}"
+            )
+
+            if (activeConvs.isEmpty()) {
+                logAction("SYNC", "⛓️ [POC_GROUPS] 0 active MLS groups found on network for InboxID ${client.inboxId.take(12)}...")
+                return@launch
+            }
+
+            activeConvs.forEachIndexed { index, conv ->
+                val convMessages = runCatching { conv.messages(limit = 10) }.getOrDefault(emptyList())
+                val peerInfo = when (conv) {
+                    is Conversation.Dm -> "PeerInbox: ${conv.dm.peerInboxId}"
+                    is Conversation.Group -> "GroupName: ${conv.group.name.ifBlank { "Group" }}"
+                }
+                logAction(
+                    tag = "SYNC",
+                    message = "⛓️ [POC_GROUP #${index + 1}] Topic: ${conv.topic} | $peerInfo | Cached Messages: ${convMessages.size}"
+                )
+
+                convMessages.forEach { msg ->
+                    logAction(
+                        tag = "E2EE",
+                        message = "🧾 [POC_MSG_PROOF] MsgID: ${msg.id} | SenderInbox: ${msg.senderInboxId} | SentNs: ${msg.sentAtNs} | Topic: ${conv.topic.take(16)}..."
+                    )
+                }
+            }
+        }
+    }
+
     fun clearActionLogs() {
         _actionLogs.value = emptyList()
         ThesisTelemetry.clearTelemetryData()
     }
 
-    fun exportBenchmarkReport(): String = ThesisTelemetry.exportFullReport()
+    fun exportBenchmarkReport(): String {
+        val client = (engine.state.value as? XmtpEngineState.Ready)?.client
+        val ethAddress = _walletAddress.value ?: "N/A"
+        val activeInboxId = client?.inboxId ?: inboxId.value ?: "N/A"
+        val activeInstallationId = client?.installationId ?: installationId.value ?: "N/A"
+        val convList = _conversations.value
+        val msgList = _messages.value
+
+        val pocHeader = buildString {
+            appendLine("# XMTP v4 (MLS) & Blockchain Identity Proof of Concept")
+            appendLine("- **Ethereum Wallet (EIP-191):** `$ethAddress`")
+            appendLine("- **XMTP Network Inbox ID:** `$activeInboxId`")
+            appendLine("- **MLS Installation ID:** `$activeInstallationId`")
+            appendLine("- **Active MLS Conversations:** `${convList.size}`")
+            appendLine("- **Export Timestamp (UTC):** `${SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") }.format(Date())}`")
+            appendLine()
+            appendLine("## Committed Message ID Ledger (Cryptographic Proof of Operation)")
+            if (msgList.isNotEmpty()) {
+                appendLine("| Message ID (SHA-256 / MLS Envelope) | Sender Inbox ID | Conversation Topic | Timestamp (ns) |")
+                appendLine("| :--- | :--- | :--- | :--- |")
+                msgList.take(25).forEach { msg ->
+                    appendLine("| `${msg.id}` | `${msg.senderInboxId}` | `${msg.topic}` | `${msg.sentAtNs}` |")
+                }
+            } else {
+                appendLine("_No messages currently cached in active session view._")
+            }
+            appendLine()
+            appendLine("---")
+            appendLine()
+        }
+        return pocHeader + ThesisTelemetry.exportFullReport()
+    }
 
     fun exportBenchmarkCsv(): String = ThesisTelemetry.exportAsCsv()
 
@@ -195,6 +283,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private val loggedMessageIds = Collections.synchronizedSet(mutableSetOf<String>())
+
     fun selectConversation(conversation: Conversation?) {
         _selectedConversation.value = conversation
         messagesJob?.cancel()
@@ -202,8 +292,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
         if (conversation != null) {
             messagesJob = viewModelScope.launch {
+                val currentInboxId = (engine.state.value as? XmtpEngineState.Ready)?.client?.inboxId
                 repository.observeMessages(conversation).collectLatest { msgList ->
                     _messages.value = msgList
+                    msgList.forEach { msg ->
+                        if (msg.id.isNotBlank() && loggedMessageIds.add(msg.id)) {
+                            val isOwn = msg.senderInboxId == currentInboxId
+                            if (!isOwn) {
+                                logAction(
+                                    "E2EE",
+                                    "RX COMMITTED | MsgID: ${msg.id} | Topic: ${conversation.topic} | SenderInbox: ${msg.senderInboxId} | SentNs: ${msg.sentAtNs}"
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -286,7 +388,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     repository.sendMessage(conv, text)
                 }
                 .onSuccess { msgId ->
-                    logAction("E2EE", "Message committed to XMTP ledger (ID: ${msgId.take(16)}...)")
+                    val sender0x = _walletAddress.value ?: "0x..."
+                    val clientInbox = (engine.state.value as? XmtpEngineState.Ready)?.client?.inboxId ?: "N/A"
+                    logAction(
+                        "MLS",
+                        "TX COMMITTED | MsgID: $msgId | Topic: ${conv.topic} | Sender0x: $sender0x | InboxID: $clientInbox"
+                    )
                 }
                 .onFailure { err ->
                     _statusBanner.value = "Αποτυχία αποστολής: ${err.message}"
