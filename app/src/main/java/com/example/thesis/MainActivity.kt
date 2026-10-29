@@ -54,6 +54,8 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -144,6 +146,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ThesisMessagingApp(viewModel: ChatViewModel) {
     val engineState by viewModel.engineState.collectAsState()
@@ -162,6 +165,8 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     var showShredConfirmationDialog by rememberSaveable { mutableStateOf(false) }
     var isCreatingConversation by rememberSaveable { mutableStateOf(false) }
     var isActionLogExpanded by rememberSaveable { mutableStateOf(false) }
+    var showTelemetryBottomSheet by rememberSaveable { mutableStateOf(false) }
+    var showProtocolInspectorDialog by rememberSaveable { mutableStateOf(false) }
 
     var draft by rememberSaveable(selectedConversation?.id) { mutableStateOf("") }
     var failedDraft by rememberSaveable { mutableStateOf<String?>(null) }
@@ -247,6 +252,60 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
         )
     }
 
+    // Modal: MLS RFC 9420 Protocol & Ratchet Inspector
+    if (showProtocolInspectorDialog && selectedConversation != null && engineState is XmtpEngineState.Ready) {
+        MLSProtocolInspectorDialog(
+            conversation = selectedConversation!!,
+            localInboxId = (engineState as XmtpEngineState.Ready).client.inboxId,
+            messageCount = messages.size,
+            onDismiss = { showProtocolInspectorDialog = false },
+            onCopyTopic = {
+                clipboardManager.setText(AnnotatedString(selectedConversation!!.topic))
+                scope.launch { snackbarHostState.showSnackbar("Το Topic του MLS group αντιγράφηκε στο πρόχειρο") }
+            }
+        )
+    }
+
+    // Bottom Sheet: Live Telemetry & In-Chat Benchmark Drawer
+    if (showTelemetryBottomSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showTelemetryBottomSheet = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "🔬 Telemetry & MLS Ratchet Inspector",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    TextButton(onClick = { showTelemetryBottomSheet = false }) {
+                        Text("Κλείσιμο", fontSize = 12.sp)
+                    }
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                ActionLogPanel(
+                    logs = actionLogs,
+                    isExpanded = true,
+                    isBenchmarking = isBenchmarking,
+                    onToggleExpand = {},
+                    onClear = { viewModel.clearActionLogs() },
+                    onExport = onExportLogs,
+                    onRunBatchBenchmark = { viewModel.runBatchBenchmark(10) }
+                )
+                Spacer(modifier = Modifier.height(24.dp))
+            }
+        }
+    }
+
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
@@ -259,7 +318,8 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                 onSync = { viewModel.syncConversations() },
                 onOpenIdentity = { showIdentityDialog = true },
                 onOpenShred = { showShredConfirmationDialog = true },
-                onExport = onExportLogs
+                onOpenTelemetrySheet = { showTelemetryBottomSheet = true },
+                onOpenProtocolInspector = { showProtocolInspectorDialog = true }
             )
         }
     ) { padding ->
@@ -336,19 +396,26 @@ private fun MessagingTopBar(
     onSync: () -> Unit,
     onOpenIdentity: () -> Unit,
     onOpenShred: () -> Unit,
-    onExport: (() -> Unit)? = null
+    onOpenTelemetrySheet: () -> Unit = {},
+    onOpenProtocolInspector: () -> Unit = {}
 ) {
     TopAppBar(
         title = {
             if (selectedConversation != null) {
-                Column {
+                Column(
+                    modifier = Modifier.clickable { onOpenProtocolInspector() }
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "MLS Chat: ${selectedConversation.topic.take(16)}...",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text("ℹ️", fontSize = 12.sp)
+                    }
                     Text(
-                        text = "MLS Chat: ${selectedConversation.topic.take(16)}...",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold
-                    )
-                    Text(
-                        text = "End-to-End Encrypted • SQLCipher Sandbox",
+                        text = "End-to-End Encrypted • SQLCipher Sandbox (Tap for RFC 9420)",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary,
                         fontSize = 11.sp
@@ -408,7 +475,7 @@ private fun MessagingTopBar(
             }
 
             if (walletAddress != null) {
-                IconButton(onClick = { onExport?.invoke() }) {
+                IconButton(onClick = onOpenTelemetrySheet) {
                     Text("📊", fontSize = 16.sp)
                 }
 
@@ -1426,5 +1493,113 @@ private fun messagingStatusText(message: String): String {
         normalized.contains("αποστολ") ->
             "Το μήνυμα καταχωρήθηκε κρυπτογραφημένο στο MLS ratchet."
         else -> message
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  UI Component: MLS Protocol Inspector (RFC 9420 Research View)
+// ────────────────────────────────────────────────────────────────────────────
+
+@Composable
+private fun MLSProtocolInspectorDialog(
+    conversation: Conversation,
+    localInboxId: String,
+    messageCount: Int,
+    onDismiss: () -> Unit,
+    onCopyTopic: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("🔬", fontSize = 20.sp)
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = "MLS Protocol Inspector",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                InspectorParamRow(label = "Protocol Standard", value = "RFC 9420 (TreeKEM MLS)")
+                InspectorParamRow(label = "Cipher Suite", value = "DHKEM-X25519-AES128GCM-SHA256")
+                InspectorParamRow(
+                    label = "Session Topology",
+                    value = when (conversation.type) {
+                        Conversation.Type.GROUP -> "MLS Group Ratchet (Loopback/Multi)"
+                        Conversation.Type.DM -> "MLS 1-on-1 Direct Message"
+                    }
+                )
+                InspectorParamRow(
+                    label = "Local Client Inbox",
+                    value = if (localInboxId.length >= 12) "${localInboxId.take(6)}...${localInboxId.takeLast(6)}" else localInboxId
+                )
+                InspectorParamRow(
+                    label = "Commit Counter",
+                    value = "$messageCount message commit(s)"
+                )
+                InspectorParamRow(
+                    label = "Forward Secrecy",
+                    value = "Continuous asymmetric ratchet update"
+                )
+
+                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
+
+                Column {
+                    Text(
+                        text = "MLS Topic Hash",
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        text = conversation.topic,
+                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onCopyTopic) {
+                Text("Αντιγραφή Topic", fontSize = 12.sp)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Κλείσιμο", fontSize = 12.sp)
+            }
+        }
+    )
+}
+
+@Composable
+private fun InspectorParamRow(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 11.sp
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 11.sp
+        )
     }
 }
