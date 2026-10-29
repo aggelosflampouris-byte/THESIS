@@ -20,6 +20,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.UUID
 import org.xmtp.android.library.Conversation
 import org.xmtp.android.library.XMTPEnvironment
@@ -46,8 +48,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val engine = XmtpEngine(appContext, XMTPEnvironment.DEV)
     private val repository = ConversationRepository(engine, viewModelScope)
 
+    private val sessionStateMutex = Mutex()
     private var activeSigner: ThesisSigner? = null
     private var messagesJob: Job? = null
+
+    private val _isInitializing = MutableStateFlow(false)
+    val isInitializing: StateFlow<Boolean> = _isInitializing.asStateFlow()
+
+    private val _isShredding = MutableStateFlow(false)
+    val isShredding: StateFlow<Boolean> = _isShredding.asStateFlow()
 
     val engineState: StateFlow<XmtpEngineState> = engine.state
 
@@ -121,43 +130,54 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun initializeSession() {
         viewModelScope.launch {
-            logAction("KEYSTORE", "Requesting hardware DEK unwrap (AES-256-GCM)...")
-            val dekResult = ThesisTelemetry.measureOperation("1. Keystore AES-256-GCM DEK Unwrap") {
-                keystoreManager.getOrCreateDatabaseKey()
-            }
-            val dekBytes = try {
-                dekResult.getOrThrow()
-            } catch (e: Throwable) {
-                _statusBanner.value = "Σφάλμα Hardware Keystore: ${e.message}"
-                logAction("KEYSTORE", "Hardware Keystore failure: ${e.message}", isError = true)
-                return@launch
-            }
-
-            try {
-                val signer = ThesisTelemetry.measureOperation("2. Secp256k1 Ephemeral KeyGen") {
-                    activeSigner ?: ThesisSigner.createEphemeral().also { activeSigner = it }
+            sessionStateMutex.withLock {
+                if (engine.state.value is XmtpEngineState.Ready) {
+                    logAction("SESSION", "Session already active, skipping re-initialization.")
+                    return@withLock
                 }
-                _walletAddress.value = signer.address
-                val maskedAddress = if (signer.address.length >= 10) {
-                    "${signer.address.take(6)}...${signer.address.takeLast(4)}"
-                } else signer.address
-                logAction("IDENTITY", "Ephemeral SECP256K1 signer active: $maskedAddress")
+                _isInitializing.value = true
+                try {
+                    logAction("KEYSTORE", "Requesting hardware DEK unwrap (AES-256-GCM)...")
+                    val dekResult = ThesisTelemetry.measureOperation("1. Keystore AES-256-GCM DEK Unwrap") {
+                        keystoreManager.getOrCreateDatabaseKey()
+                    }
+                    val dekBytes = try {
+                        dekResult.getOrThrow()
+                    } catch (e: Throwable) {
+                        _statusBanner.value = "Σφάλμα Hardware Keystore: ${e.message}"
+                        logAction("KEYSTORE", "Hardware Keystore failure: ${e.message}", isError = true)
+                        return@withLock
+                    }
 
-                val dbFile = databaseFactory.resolveDatabaseFile(signer.address)
-                val dbDirectory = dbFile.parentFile ?: appContext.filesDir
+                    try {
+                        val signer = ThesisTelemetry.measureOperation("2. Secp256k1 Ephemeral KeyGen") {
+                            activeSigner ?: ThesisSigner.createEphemeral().also { activeSigner = it }
+                        }
+                        _walletAddress.value = signer.address
+                        val maskedAddress = if (signer.address.length >= 10) {
+                            "${signer.address.take(6)}...${signer.address.takeLast(4)}"
+                        } else signer.address
+                        logAction("IDENTITY", "Ephemeral SECP256K1 signer active: $maskedAddress")
 
-                ThesisTelemetry.measureSuspendOperation("3. SQLCipher Sandbox & MLS Init") {
-                    engine.initialise(
-                        signer = signer,
-                        dbDirectory = dbDirectory,
-                        dbEncryptionKey = dekBytes.copyOf()
-                    )
+                        val dbFile = databaseFactory.resolveDatabaseFile(signer.address)
+                        val dbDirectory = dbFile.parentFile ?: appContext.filesDir
+
+                        ThesisTelemetry.measureSuspendOperation("3. SQLCipher Sandbox & MLS Init") {
+                            engine.initialise(
+                                signer = signer,
+                                dbDirectory = dbDirectory,
+                                dbEncryptionKey = dekBytes.copyOf()
+                            )
+                        }
+                        _statusBanner.value = "Σύνδεση με Hardware-Backed SQLCipher & MLS..."
+                        logAction("XMTP", "Connected to XMTP v4 MLS network with SQLCipher storage")
+                    } finally {
+                        // Άμεσος μηδενισμός του DEK στη μνήμη RAM
+                        dekBytes.fill(0x00)
+                    }
+                } finally {
+                    _isInitializing.value = false
                 }
-                _statusBanner.value = "Σύνδεση με Hardware-Backed SQLCipher & MLS..."
-                logAction("XMTP", "Connected to XMTP v4 MLS network with SQLCipher storage")
-            } finally {
-                // Άμεσος μηδενισμός του DEK στη μνήμη RAM
-                dekBytes.fill(0x00)
             }
         }
     }
@@ -273,54 +293,61 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun performCryptoShredding() {
         val address = _walletAddress.value ?: return
         viewModelScope.launch {
-            logAction("GDPR", "Executing GDPR Art. 17 cryptographic wipe...")
-            messagesJob?.cancel()
-            _selectedConversation.value = null
-            _messages.value = emptyList()
-            _conversations.value = emptyList()
+            sessionStateMutex.withLock {
+                _isShredding.value = true
+                try {
+                    logAction("GDPR", "Executing GDPR Art. 17 cryptographic wipe...")
+                    messagesJob?.cancel()
+                    _selectedConversation.value = null
+                    _messages.value = emptyList()
+                    _conversations.value = emptyList()
 
-            engine.shutdown()
-            activeSigner?.close()
-            activeSigner = null
+                    engine.shutdown()
+                    activeSigner?.close()
+                    activeSigner = null
 
-            val res = ThesisTelemetry.measureSuspendOperation("6. GDPR Art.17 Crypto-Shredding") {
-                cryptoShredder.shredAccountData(address)
-            }
-            when (res) {
-                is ShredResult.Success -> {
-                    _walletAddress.value = null
-                    _statusBanner.value = "GDPR Wipe: Κλειδί Keystore & ${res.deletedFilesCount} αρχεία βάσης καταστράφηκαν οριστικά."
-                    logAction("GDPR", "KEK destroyed & ${res.deletedFilesCount} database files expunged")
-                    res.auditProof?.let { proof ->
-                        val certMsg = "Certificate: Keystore=" + (if (proof.isKeystoreEntryPurged) "PURGED" else "FAILED") +
-                            ", Storage=" + (if (proof.isPrimaryDatabaseUnlinked) "EXPUNGED" else "FAILED") +
-                            ", Compliant=" + proof.isCompliant
-                        logAction("GDPR", certMsg)
+                    val res = ThesisTelemetry.measureSuspendOperation("6. GDPR Art.17 Crypto-Shredding") {
+                        cryptoShredder.shredAccountData(address)
                     }
-                }
-                is ShredResult.PartialSuccessCryptoShreddedOnly -> {
-                    _walletAddress.value = null
-                    _statusBanner.value = "Crypto-Shredded: ${res.message}"
-                    logAction("GDPR", "Crypto-shredded: ${res.message}")
-                    res.auditProof?.let { proof ->
-                        val certMsg = "Certificate: Keystore=" + (if (proof.isKeystoreEntryPurged) "PURGED" else "FAILED") +
-                            ", Compliant=" + proof.isCompliant
-                        logAction("GDPR", certMsg)
+                    when (res) {
+                        is ShredResult.Success -> {
+                            _walletAddress.value = null
+                            _statusBanner.value = "GDPR Wipe: Κλειδί Keystore & ${res.deletedFilesCount} αρχεία βάσης καταστράφηκαν οριστικά."
+                            logAction("GDPR", "KEK destroyed & ${res.deletedFilesCount} database files expunged")
+                            res.auditProof?.let { proof ->
+                                val certMsg = "Certificate: Keystore=" + (if (proof.isKeystoreEntryPurged) "PURGED" else "FAILED") +
+                                    ", Storage=" + (if (proof.isPrimaryDatabaseUnlinked) "EXPUNGED" else "FAILED") +
+                                    ", Compliant=" + proof.isCompliant
+                                logAction("GDPR", certMsg)
+                            }
+                        }
+                        is ShredResult.PartialSuccessCryptoShreddedOnly -> {
+                            _walletAddress.value = null
+                            _statusBanner.value = "Crypto-Shredded: ${res.message}"
+                            logAction("GDPR", "Crypto-shredded: ${res.message}")
+                            res.auditProof?.let { proof ->
+                                val certMsg = "Certificate: Keystore=" + (if (proof.isKeystoreEntryPurged) "PURGED" else "FAILED") +
+                                    ", Compliant=" + proof.isCompliant
+                                logAction("GDPR", certMsg)
+                            }
+                        }
+                        is ShredResult.PartialSuccess -> {
+                            _walletAddress.value = null
+                            _statusBanner.value = "Crypto-Shredded: ${res.message}"
+                            logAction("GDPR", "Crypto-shredded: ${res.message}")
+                            res.auditProof?.let { proof ->
+                                val certMsg = "Certificate: Keystore=" + (if (proof.isKeystoreEntryPurged) "PURGED" else "FAILED") +
+                                    ", Storage=" + (if (proof.isPrimaryDatabaseUnlinked) "EXPUNGED" else "FAILED")
+                                logAction("GDPR", certMsg)
+                            }
+                        }
+                        is ShredResult.Failure -> {
+                            _statusBanner.value = "Σφάλμα κατά το Crypto-Shredding."
+                            logAction("GDPR", "Crypto-shredding failed", isError = true)
+                        }
                     }
-                }
-                is ShredResult.PartialSuccess -> {
-                    _walletAddress.value = null
-                    _statusBanner.value = "Crypto-Shredded: ${res.message}"
-                    logAction("GDPR", "Crypto-shredded: ${res.message}")
-                    res.auditProof?.let { proof ->
-                        val certMsg = "Certificate: Keystore=" + (if (proof.isKeystoreEntryPurged) "PURGED" else "FAILED") +
-                            ", Storage=" + (if (proof.isPrimaryDatabaseUnlinked) "EXPUNGED" else "FAILED")
-                        logAction("GDPR", certMsg)
-                    }
-                }
-                is ShredResult.Failure -> {
-                    _statusBanner.value = "Σφάλμα κατά το Crypto-Shredding."
-                    logAction("GDPR", "Crypto-shredding failed", isError = true)
+                } finally {
+                    _isShredding.value = false
                 }
             }
         }
@@ -339,62 +366,64 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         viewModelScope.launch {
-            _isBenchmarking.value = true
-            _statusBanner.value = "Εκτέλεση Batch Benchmark ($iterations δοκιμές MLS)..."
-            logAction("BENCHMARK", "Starting automated batch benchmark (N=$iterations)...")
+            sessionStateMutex.withLock {
+                _isBenchmarking.value = true
+                _statusBanner.value = "Εκτέλεση Batch Benchmark ($iterations δοκιμές MLS)..."
+                logAction("BENCHMARK", "Starting automated batch benchmark (N=$iterations)...")
 
-            try {
-                var activeConv = _selectedConversation.value
-                if (activeConv == null) {
-                    logAction("BENCHMARK", "No active conversation; establishing loopback ratchet...")
-                    val loopbackResult = ThesisTelemetry.measureSuspendOperation("4. MLS Conversation Handshake") {
-                        repository.createLoopbackConversation()
+                try {
+                    var activeConv = _selectedConversation.value
+                    if (activeConv == null) {
+                        logAction("BENCHMARK", "No active conversation; establishing loopback ratchet...")
+                        val loopbackResult = ThesisTelemetry.measureSuspendOperation("4. MLS Conversation Handshake") {
+                            repository.createLoopbackConversation()
+                        }
+                        loopbackResult.onSuccess { conv ->
+                            activeConv = conv
+                            selectConversation(conv)
+                        }.onFailure { err ->
+                            _statusBanner.value = "Αποτυχία εκκίνησης loopback: ${err.message}"
+                            logAction("BENCHMARK", "Loopback failed: ${err.message}", isError = true)
+                            return@withLock
+                        }
                     }
-                    loopbackResult.onSuccess { conv ->
-                        activeConv = conv
-                        selectConversation(conv)
-                    }.onFailure { err ->
-                        _statusBanner.value = "Αποτυχία εκκίνησης loopback: ${err.message}"
-                        logAction("BENCHMARK", "Loopback failed: ${err.message}", isError = true)
-                        return@launch
+
+                    val conv = activeConv ?: return@withLock
+                    var successfulSamples = 0
+
+                    for (i in 1..iterations) {
+                        val payload = "⚡ MLS Latency Benchmark Probe #$i [${System.currentTimeMillis()}]"
+                        val sendResult = ThesisTelemetry.measureSuspendOperation("5. MLS E2EE Message Dispatch") {
+                            repository.sendMessage(conv, payload)
+                        }
+
+                        if (sendResult.isSuccess) {
+                            successfulSamples++
+                            logAction(
+                                tag = "BENCHMARK",
+                                message = "Probe #$i/$iterations dispatched successfully"
+                            )
+                        } else {
+                            logAction(
+                                tag = "BENCHMARK",
+                                message = "Probe #$i/$iterations failed: ${sendResult.exceptionOrNull()?.message}",
+                                isError = true
+                            )
+                        }
+                        delay(120)
                     }
+
+                    _statusBanner.value = "Ολοκληρώθηκε Batch Benchmark: $successfulSamples/$iterations επιτυχείς δοκιμές."
+                    logAction(
+                        tag = "BENCHMARK",
+                        message = "Batch complete ($successfulSamples/$iterations). Summaries ready for export."
+                    )
+                } catch (e: Exception) {
+                    _statusBanner.value = "Σφάλμα κατά το batch benchmark: ${e.message}"
+                    logAction("BENCHMARK", "Batch test error: ${e.message}", isError = true)
+                } finally {
+                    _isBenchmarking.value = false
                 }
-
-                val conv = activeConv ?: return@launch
-                var successfulSamples = 0
-
-                for (i in 1..iterations) {
-                    val payload = "⚡ MLS Latency Benchmark Probe #$i [${System.currentTimeMillis()}]"
-                    val sendResult = ThesisTelemetry.measureSuspendOperation("5. MLS E2EE Message Dispatch") {
-                        repository.sendMessage(conv, payload)
-                    }
-
-                    if (sendResult.isSuccess) {
-                        successfulSamples++
-                        logAction(
-                            tag = "BENCHMARK",
-                            message = "Probe #$i/$iterations dispatched successfully"
-                        )
-                    } else {
-                        logAction(
-                            tag = "BENCHMARK",
-                            message = "Probe #$i/$iterations failed: ${sendResult.exceptionOrNull()?.message}",
-                            isError = true
-                        )
-                    }
-                    delay(120)
-                }
-
-                _statusBanner.value = "Ολοκληρώθηκε Batch Benchmark: $successfulSamples/$iterations επιτυχείς δοκιμές."
-                logAction(
-                    tag = "BENCHMARK",
-                    message = "Batch complete ($successfulSamples/$iterations). Summaries ready for export."
-                )
-            } catch (e: Exception) {
-                _statusBanner.value = "Σφάλμα κατά το batch benchmark: ${e.message}"
-                logAction("BENCHMARK", "Batch test error: ${e.message}", isError = true)
-            } finally {
-                _isBenchmarking.value = false
             }
         }
     }
