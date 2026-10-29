@@ -23,7 +23,9 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.channelFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOn
@@ -70,7 +72,7 @@ class ConversationRepository(
     val engine: XmtpEngine,
     private val repositoryScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
-    private val syncIntervalMs: Long = 2500L
+    private val syncIntervalMs: Long = 600L
 ) : AutoCloseable {
 
     val xmtpEngine: XmtpEngine get() = engine
@@ -82,7 +84,7 @@ class ConversationRepository(
         engine = xmtpEngine,
         repositoryScope = CoroutineScope(SupervisorJob() + ioDispatcher),
         ioDispatcher = ioDispatcher,
-        syncIntervalMs = 2500L
+        syncIntervalMs = 600L
     )
 
     constructor(
@@ -97,6 +99,8 @@ class ConversationRepository(
     )
 
     private val repositoryJob = SupervisorJob()
+
+
 
     /**
      * Internal event bus for optimistic and published outgoing messages.
@@ -135,6 +139,27 @@ class ConversationRepository(
         .filterIsInstance<XmtpEngineState.Ready>()
         .map { it.client }
         .distinctUntilChanged()
+
+    init {
+        if (syncIntervalMs > 0L) {
+            repositoryScope.launch(ioDispatcher) {
+                readyClientFlow.collectLatest { client ->
+                    while (isActive) {
+                        try {
+                            client.conversations.streamAllMessages().collect { msg ->
+                                messageRefreshTrigger.emit(msg.conversationId)
+                            }
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            Log.w(TAG, "streamAllMessages disconnected: ${e.message}. Reconnecting in 1s...")
+                            delay(1000L)
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // ────────────────────────────────────────────────────────────────────────
     //  Reactive Data Streams (Cold Channel Flows & Multicast Sharing)
@@ -243,11 +268,11 @@ class ConversationRepository(
             }
         }
 
-        // Periodic network pull to auto-discover incoming conversations from peers
+        // Periodic network pull to auto-discover incoming conversations from peers (sub-1.5s)
         val autoPollJob = if (syncIntervalMs > 0L) {
             launch(ioDispatcher) {
                 while (isActive) {
-                    delay(maxOf(syncIntervalMs, 3000L))
+                    delay(minOf(maxOf(syncIntervalMs, 500L), 1500L))
                     try {
                         val refreshed = fetchConversationsWithConsent(client)
                         if (refreshed.size != currentList.size || refreshed.map { it.id } != currentList.map { it.id }) {
@@ -521,48 +546,69 @@ class ConversationRepository(
      */
     fun observeMessages(conversation: Conversation): Flow<List<DecryptedMessage>> = callbackFlow {
         val messageMap = LinkedHashMap<String, DecryptedMessage>()
-
+        var isSyncing = false
         suspend fun syncAndReloadMessages(): Boolean {
+            if (isSyncing) return false
+            isSyncing = true
             try {
-                conversation.sync()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.w(TAG, "observeMessages: conversation.sync failed: ${e.message}")
-            }
-
-            val latest = try {
-                conversation.messages()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                emptyList()
-            }
-
-            var hasChanges = latest.size != messageMap.size
-            latest.forEach { msg ->
-                val prev = messageMap[msg.id]
-                if (prev != msg) {
-                    messageMap[msg.id] = msg
-                    hasChanges = true
+                try {
+                    conversation.sync()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "observeMessages: conversation.sync failed: ${e.message}")
                 }
+
+                val latest = try {
+                    conversation.messages()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    emptyList()
+                }
+
+                var hasChanges = latest.size != messageMap.size
+                latest.forEach { msg ->
+                    val prev = messageMap[msg.id]
+                    if (prev != msg) {
+                        messageMap[msg.id] = msg
+                        hasChanges = true
+                    }
+                }
+                return hasChanges
+            } finally {
+                isSyncing = false
             }
-            return hasChanges
         }
 
-        // 1. Initial network sync and load historical messages
+        // 1. Instantly load local cached messages from SQLite to eliminate initial UI latency (0ms wait)
+        val initialCached = try {
+            conversation.messages()
+        } catch (_: Exception) {
+            emptyList()
+        }
+        initialCached.forEach { msg -> messageMap[msg.id] = msg }
+        trySend(messageMap.values.toList())
+
+        // 2. Perform initial network sync and emit updates if newer messages arrived
         withContext(ioDispatcher) {
-            syncAndReloadMessages()
-            trySend(messageMap.values.toList())
+            if (syncAndReloadMessages()) {
+                trySend(messageMap.values.toList())
+            }
         }
 
-        // 2. Real-time gRPC stream for incoming push messages with resilient reconnection loop
+        // 3. Real-time gRPC stream for incoming push messages with proactive background ratchet sync
         val streamJob = launch(ioDispatcher) {
             while (isActive) {
                 try {
                     conversation.streamMessages().collect { incoming ->
                         messageMap[incoming.id] = incoming
                         trySend(messageMap.values.toList())
+                        launch(ioDispatcher) {
+                            if (syncAndReloadMessages()) {
+                                trySend(messageMap.values.toList())
+                            }
+                        }
                     }
                 } catch (e: CancellationException) {
                     throw e
@@ -573,11 +619,11 @@ class ConversationRepository(
             }
         }
 
-        // 3. Periodic background sync ticker to ensure MLS commits and newer epochs settle
+        // 4. Ultra-low-latency background sync ticker for active conversation (sub-second 600ms)
         val pollJob = if (syncIntervalMs > 0L) {
             launch(ioDispatcher) {
                 while (isActive) {
-                    delay(maxOf(syncIntervalMs, 2000L))
+                    delay(minOf(maxOf(syncIntervalMs, 200L), 600L))
                     try {
                         val changed = syncAndReloadMessages()
                         if (changed) {
@@ -592,13 +638,15 @@ class ConversationRepository(
             }
         } else null
 
-        // 4. Instant reload upon local message dispatch or explicit sync
+        // 5. Instant reload upon local message dispatch, network push, or explicit sync
         val refreshJob = launch(ioDispatcher) {
             messageRefreshTrigger
                 .filter { it == conversation.id || it.isBlank() }
                 .collect {
-                    syncAndReloadMessages()
-                    trySend(messageMap.values.toList())
+                    val changed = syncAndReloadMessages()
+                    if (changed) {
+                        trySend(messageMap.values.toList())
+                    }
                 }
         }
 
