@@ -1238,7 +1238,7 @@ private fun NewConversationDialog(
 private fun IdentityDetailsDialog(
     address: String?,
     inboxId: String?,
-    currentVersion: String = "1.0.4",
+    currentVersion: String = "1.0.5",
     isCheckingUpdate: Boolean = false,
     onCheckForUpdates: () -> Unit = {},
     onCopyAddress: () -> Unit,
