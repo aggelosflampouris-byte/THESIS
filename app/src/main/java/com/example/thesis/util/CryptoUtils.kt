@@ -22,6 +22,7 @@ import java.util.regex.Pattern
 object CryptoUtils {
 
     private val ETH_ADDRESS_REGEX: Regex = Pattern.compile("^0[xX][0-9a-fA-F]{40}$").toRegex()
+    private val INBOX_ID_REGEX: Regex = Pattern.compile("^[0-9a-fA-F]{64}$").toRegex()
 
     // ────────────────────────────────────────────────────────────────────────
     //  Address Format Validation & Normalization
@@ -48,6 +49,27 @@ object CryptoUtils {
      * Convenience check returning true if [address] matches standard Ethereum hex address format.
      */
     fun isValidEthereumAddress(address: String): Boolean = sanitiseEthereumAddress(address) != null
+
+    /**
+     * Validates and normalizes an XMTP v4 MLS Inbox ID (64-character lowercase hexadecimal string).
+     *
+     * Handles optional `@` or `0x` prefixes often present in user-copied identifiers or logs.
+     *
+     * @param rawInboxId Candidate XMTP Inbox ID string.
+     * @return Canonical 64-character lowercase hex string if valid, or `null` if invalid.
+     */
+    fun sanitiseInboxId(rawInboxId: String): String? {
+        val trimmed = rawInboxId.trim()
+            .removePrefix("@")
+            .let { if (it.startsWith("0x", ignoreCase = true)) it.substring(2) else it }
+        if (!INBOX_ID_REGEX.matches(trimmed)) return null
+        return trimmed.lowercase(Locale.ROOT)
+    }
+
+    /**
+     * Convenience check returning true if [rawInboxId] represents a valid XMTP Inbox ID.
+     */
+    fun isValidInboxId(rawInboxId: String): Boolean = sanitiseInboxId(rawInboxId) != null
 
     // ────────────────────────────────────────────────────────────────────────
     //  Entropy Source

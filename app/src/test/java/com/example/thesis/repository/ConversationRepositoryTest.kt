@@ -91,6 +91,8 @@ class ConversationRepositoryTest {
 
         every { mockConversation.id } returns testConvId
         coEvery { mockConversations.findConversation(testConvId) } returns mockConversation
+        coEvery { mockConversations.list() } returns emptyList()
+        coEvery { mockConversations.list(null, null, null, any()) } returns emptyList()
 
         coEvery { mockClient.canMessage(any()) } returns mapOf(testPeerAddress to true)
 
@@ -130,6 +132,7 @@ class ConversationRepositoryTest {
         every { mockConv2.createdAt } returns date2
 
         coEvery { mockConversations.list() } returns listOf(mockConv1)
+        coEvery { mockConversations.list(null, null, null, any()) } returns listOf(mockConv1)
         every { mockConversations.stream() } returns convStream.asSharedFlow()
 
         repository.observeConversations().test {
@@ -152,7 +155,7 @@ class ConversationRepositoryTest {
             cancelAndIgnoreRemainingEvents()
         }
 
-        coVerify(atLeast = 1) { mockConversations.list() }
+        coVerify(atLeast = 1) { mockConversations.list(null, null, null, any()) }
     }
 
     /**
@@ -296,6 +299,32 @@ class ConversationRepositoryTest {
     // ────────────────────────────────────────────────────────────────────────
     //  Additional Boundary & Reliability Tests
     // ────────────────────────────────────────────────────────────────────────
+
+    @Test
+    fun test_createConversation_validInboxId_returnsSuccess() = runTest(testDispatcher) {
+        val testInboxId = "072e41b1e11645b3745b4bcaf502f97b34a1b41237edb2b6705596e29875d377"
+        val mockDm = mockk<Dm>(relaxed = true)
+        coEvery { mockConversations.findOrCreateDm(testInboxId) } returns mockDm
+        every { mockClient.inboxId } returns "own_inbox_different_1234567890abcdef1234567890abcdef1234567890abcdef"
+
+        val result = repository.createConversation("@" + testInboxId)
+
+        assertTrue(result.isSuccess)
+        assertTrue(result.getOrNull() is Conversation.Dm)
+        coVerify(exactly = 1) { mockConversations.findOrCreateDm(testInboxId) }
+    }
+
+    @Test
+    fun test_createConversation_ownInboxId_failsClosed() = runTest(testDispatcher) {
+        val ownInboxId = "072e41b1e11645b3745b4bcaf502f97b34a1b41237edb2b6705596e29875d377"
+        every { mockClient.inboxId } returns ownInboxId
+
+        val result = repository.createConversation(ownInboxId)
+
+        assertTrue(result.isFailure)
+        assertTrue(result.exceptionOrNull() is IllegalArgumentException)
+        coVerify(exactly = 0) { mockConversations.findOrCreateDm(any()) }
+    }
 
     @Test
     fun test_createConversation_validAddress_returnsSuccess() = runTest(testDispatcher) {

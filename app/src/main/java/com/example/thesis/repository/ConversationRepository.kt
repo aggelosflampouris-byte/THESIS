@@ -34,7 +34,9 @@ import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.flow.shareIn
 import kotlinx.coroutines.withContext
 import org.xmtp.android.library.Client
+import org.xmtp.android.library.ConsentState
 import org.xmtp.android.library.Conversation
+import org.xmtp.android.library.Dm
 import org.xmtp.android.library.libxmtp.DecodedMessage
 import org.xmtp.android.library.libxmtp.PublicIdentity
 import org.xmtp.android.library.libxmtp.IdentityKind
@@ -114,6 +116,14 @@ class ConversationRepository(
     )
 
     /**
+     * Internal trigger notifying message stream observers when a new message is sent or synced locally.
+     */
+    private val messageRefreshTrigger = MutableSharedFlow<String>(
+        extraBufferCapacity = 8,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+
+    /**
      * Cache of active hot message streams per conversation ID to prevent duplicate gRPC network streams.
      */
     private val messageFlows = ConcurrentHashMap<String, SharedFlow<Message>>()
@@ -158,16 +168,39 @@ class ConversationRepository(
      */
     fun observeConversations(): Flow<List<Conversation>> = sharedConversationsFlow
 
-    private fun createConversationsPipeline(client: Client): Flow<List<Conversation>> = channelFlow {
-        // Initial sync with network ledger
+    private suspend fun fetchConversationsWithConsent(client: Client): List<Conversation> {
+        val allowedConsentStates = listOf(ConsentState.ALLOWED, ConsentState.UNKNOWN)
         try {
             client.conversations.sync()
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            Log.w(TAG, "Initial conversation sync failed; proceeding with local cache: ${e.message}")
+            Log.w(TAG, "Conversations sync (welcomes) failed: ${e.message}")
         }
+        try {
+            client.conversations.syncAllConversations(consentStates = allowedConsentStates)
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            Log.w(TAG, "Conversations syncAllConversations failed: ${e.message}")
+        }
+        val list = try {
+            client.conversations.list(consentStates = allowedConsentStates)
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            client.conversations.list()
+        }
+        list.forEach { conv ->
+            try {
+                if (conv.consentState() == ConsentState.UNKNOWN) {
+                    conv.updateConsentState(ConsentState.ALLOWED)
+                }
+            } catch (_: Exception) {}
+        }
+        return list
+    }
 
-        val currentList = client.conversations.list().toMutableList()
+    private fun createConversationsPipeline(client: Client): Flow<List<Conversation>> = channelFlow {
+        // Initial sync with network ledger discovering both ALLOWED and UNKNOWN incoming invites
+        val currentList = fetchConversationsWithConsent(client).toMutableList()
         send(currentList.toList())
 
         // Real-time network stream with resilient reconnection backoff
@@ -190,6 +223,11 @@ class ConversationRepository(
         val collectorJob = launch {
             merge(networkStream, refreshStream).collect { newConv ->
                 if (newConv != null) {
+                    try {
+                        if (newConv.consentState() == ConsentState.UNKNOWN) {
+                            newConv.updateConsentState(ConsentState.ALLOWED)
+                        }
+                    } catch (_: Exception) {}
                     val existingIndex = currentList.indexOfFirst { it.id == newConv.id }
                     if (existingIndex >= 0) {
                         currentList[existingIndex] = newConv
@@ -197,7 +235,7 @@ class ConversationRepository(
                         currentList.add(0, newConv)
                     }
                 } else {
-                    val refreshed = client.conversations.list()
+                    val refreshed = fetchConversationsWithConsent(client)
                     currentList.clear()
                     currentList.addAll(refreshed)
                 }
@@ -209,10 +247,9 @@ class ConversationRepository(
         val autoPollJob = if (syncIntervalMs > 0L) {
             launch(ioDispatcher) {
                 while (isActive) {
-                    delay(maxOf(syncIntervalMs, 4000L))
+                    delay(maxOf(syncIntervalMs, 3000L))
                     try {
-                        client.conversations.sync()
-                        val refreshed = client.conversations.list()
+                        val refreshed = fetchConversationsWithConsent(client)
                         if (refreshed.size != currentList.size || refreshed.map { it.id } != currentList.map { it.id }) {
                             currentList.clear()
                             currentList.addAll(refreshed)
@@ -362,56 +399,80 @@ class ConversationRepository(
      * Validates that [peerAddress] conforms to standard Ethereum hex address format
      * before delegating to libxmtp PublicIdentity resolution.
      */
-    suspend fun createConversation(peerAddress: String): Result<Conversation> = withContext(ioDispatcher) {
-        val sanitisedAddress = CryptoUtils.sanitiseEthereumAddress(peerAddress)
-            ?: return@withContext Result.failure(
-                IllegalArgumentException("Invalid Ethereum address format: $peerAddress")
-            )
-
+    suspend fun createConversation(peerIdentifier: String): Result<Conversation> = withContext(ioDispatcher) {
         val client = xmtpEngine.client
             ?: return@withContext Result.failure(
                 IllegalStateException("XMTP engine is not ready (current state: ${xmtpEngine.state.value})")
             )
 
+        val trimmed = peerIdentifier.trim()
+        val sanitisedEthAddress = CryptoUtils.sanitiseEthereumAddress(trimmed)
+        val sanitisedInboxId = CryptoUtils.sanitiseInboxId(trimmed)
+
+        if (sanitisedEthAddress == null && sanitisedInboxId == null) {
+            return@withContext Result.failure(
+                IllegalArgumentException("Invalid peer format: Provide a valid Ethereum address (0x...) or XMTP Inbox ID (64-hex)")
+            )
+        }
+
         try {
-            val identity = PublicIdentity(IdentityKind.ETHEREUM, sanitisedAddress)
-
-            // Step 1: Pre-flight reachability check on XMTP network
-            val canMessageMap = try {
-                client.canMessage(listOf(identity))
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                Log.w(TAG, "canMessage check error: ${e.message}")
-                emptyMap()
-            }
-
-            val isRegistered = canMessageMap[sanitisedAddress]
-                ?: canMessageMap[identity.identifier]
-                ?: canMessageMap[sanitisedAddress.lowercase()]
-                ?: true
-
-            if (!isRegistered) {
-                return@withContext Result.failure(
-                    IllegalStateException(
-                        "Ο χρήστης $sanitisedAddress δεν διαθέτει ενεργά κλειδιά MLS στο δίκτυο XMTP (${client.environment.name})."
+            val dm: Dm = if (sanitisedInboxId != null) {
+                if (sanitisedInboxId.equals(client.inboxId, ignoreCase = true)) {
+                    return@withContext Result.failure(
+                        IllegalArgumentException("Δεν μπορείτε να ανοίξετε 1-on-1 DM με το δικό σας Inbox ID. Χρησιμοποιήστε το Loopback.")
                     )
-                )
-            }
+                }
+                Log.i(TAG, "Resolving MLS conversation via findOrCreateDm with inboxId=$sanitisedInboxId")
+                client.conversations.findOrCreateDm(sanitisedInboxId)
+            } else {
+                val ethAddress = sanitisedEthAddress!!
+                val identity = PublicIdentity(IdentityKind.ETHEREUM, ethAddress)
 
-            Log.i(TAG, "Resolving MLS conversation via PublicIdentity(ETHEREUM) with peer=$sanitisedAddress")
-            val dm = client.conversations.findOrCreateDmWithIdentity(identity)
-            val conversation = Conversation.Dm(dm)
+                val canMessageMap = try {
+                    client.canMessage(listOf(identity))
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    Log.w(TAG, "canMessage check error: ${e.message}")
+                    emptyMap()
+                }
+
+                val isRegistered = canMessageMap[ethAddress]
+                    ?: canMessageMap[identity.identifier]
+                    ?: canMessageMap[ethAddress.lowercase()]
+                    ?: true
+
+                if (!isRegistered) {
+                    return@withContext Result.failure(
+                        IllegalStateException(
+                            "Ο χρήστης $ethAddress δεν διαθέτει ενεργά κλειδιά MLS στο δίκτυο XMTP (${client.environment.name})."
+                        )
+                    )
+                }
+
+                Log.i(TAG, "Resolving MLS conversation via PublicIdentity(ETHEREUM) with peer=$ethAddress")
+                client.conversations.findOrCreateDmWithIdentity(identity)
+            }
 
             try {
-                conversation.sync()
-            } catch (_: Exception) {}
+                dm.updateConsentState(ConsentState.ALLOWED)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                Log.w(TAG, "Could not update DM consent state: ${e.message}")
+            }
 
+            try {
+                dm.sync()
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+            }
+
+            val conversation = Conversation.Dm(dm)
             conversationRefreshTrigger.emit(Unit)
             Result.success(conversation)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to create MLS conversation with peer=$sanitisedAddress: ${e.message}", e)
+            Log.e(TAG, "Failed to create MLS conversation with peer=$peerIdentifier: ${e.message}", e)
             Result.failure(e)
         }
     }
@@ -419,6 +480,7 @@ class ConversationRepository(
     suspend fun syncConversation(conversation: Conversation): Result<Unit> = withContext(ioDispatcher) {
         runCatching {
             conversation.sync()
+            messageRefreshTrigger.emit(conversation.id)
         }
     }
 
@@ -431,11 +493,7 @@ class ConversationRepository(
                 IllegalStateException("XMTP engine is not ready (current state: ${xmtpEngine.state.value})")
             )
         runCatching {
-            try {
-                client.conversations.syncAllConversations()
-            } catch (_: Throwable) {
-                client.conversations.sync()
-            }
+            fetchConversationsWithConsent(client)
             conversationRefreshTrigger.emit(Unit)
         }
     }
@@ -464,60 +522,65 @@ class ConversationRepository(
     fun observeMessages(conversation: Conversation): Flow<List<DecryptedMessage>> = callbackFlow {
         val messageMap = LinkedHashMap<String, DecryptedMessage>()
 
-        // 1. Initial network sync to pull remote commits into local SQLite
-        withContext(ioDispatcher) {
+        suspend fun syncAndReloadMessages(): Boolean {
             try {
                 conversation.sync()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                Log.w(TAG, "observeMessages: Initial conversation sync failed: ${e.message}")
+                Log.w(TAG, "observeMessages: conversation.sync failed: ${e.message}")
             }
-        }
 
-        // 2. Load historical messages from local decrypted store
-        val initialHistory = withContext(ioDispatcher) {
-            try {
+            val latest = try {
                 conversation.messages()
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
                 emptyList()
             }
-        }
-        initialHistory.forEach { messageMap[it.id] = it }
-        trySend(messageMap.values.toList())
 
-        // 3. Real-time gRPC stream for incoming push messages
-        val streamJob = launch(ioDispatcher) {
-            try {
-                conversation.streamMessages().collect { incoming ->
-                    messageMap[incoming.id] = incoming
-                    trySend(messageMap.values.toList())
+            var hasChanges = latest.size != messageMap.size
+            latest.forEach { msg ->
+                val prev = messageMap[msg.id]
+                if (prev != msg) {
+                    messageMap[msg.id] = msg
+                    hasChanges = true
                 }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                // Disconnected gRPC push
+            }
+            return hasChanges
+        }
+
+        // 1. Initial network sync and load historical messages
+        withContext(ioDispatcher) {
+            syncAndReloadMessages()
+            trySend(messageMap.values.toList())
+        }
+
+        // 2. Real-time gRPC stream for incoming push messages with resilient reconnection loop
+        val streamJob = launch(ioDispatcher) {
+            while (isActive) {
+                try {
+                    conversation.streamMessages().collect { incoming ->
+                        messageMap[incoming.id] = incoming
+                        trySend(messageMap.values.toList())
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "streamMessages disconnected for ${conversation.id}: ${e.message}. Reconnecting in 1s...")
+                    delay(1000L)
+                }
             }
         }
 
-        // 4. Periodic background sync ticker to ensure MLS commits and newer epochs settle
+        // 3. Periodic background sync ticker to ensure MLS commits and newer epochs settle
         val pollJob = if (syncIntervalMs > 0L) {
             launch(ioDispatcher) {
                 while (isActive) {
-                    delay(syncIntervalMs)
+                    delay(maxOf(syncIntervalMs, 2000L))
                     try {
-                        conversation.sync()
-                        val latest = conversation.messages()
-                        var hasNew = false
-                        latest.forEach { msg ->
-                            if (!messageMap.containsKey(msg.id)) {
-                                messageMap[msg.id] = msg
-                                hasNew = true
-                            }
-                        }
-                        if (hasNew) {
+                        val changed = syncAndReloadMessages()
+                        if (changed) {
                             trySend(messageMap.values.toList())
                         }
                     } catch (e: CancellationException) {
@@ -529,9 +592,20 @@ class ConversationRepository(
             }
         } else null
 
+        // 4. Instant reload upon local message dispatch or explicit sync
+        val refreshJob = launch(ioDispatcher) {
+            messageRefreshTrigger
+                .filter { it == conversation.id || it.isBlank() }
+                .collect {
+                    syncAndReloadMessages()
+                    trySend(messageMap.values.toList())
+                }
+        }
+
         awaitClose {
             streamJob.cancel()
             pollJob?.cancel()
+            refreshJob.cancel()
         }
     }
     .buffer(capacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
@@ -546,6 +620,7 @@ class ConversationRepository(
             try {
                 conversation.sync()
             } catch (_: Exception) {}
+            messageRefreshTrigger.emit(conversation.id)
             msgId
         }
     }

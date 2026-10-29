@@ -100,6 +100,7 @@ import com.example.thesis.updater.AppUpdateInfo
 import com.example.thesis.updater.UpdateStatus
 import java.io.File
 import com.example.thesis.ui.ChatViewModel
+import com.example.thesis.util.CryptoUtils
 import com.example.thesis.xmtp.XmtpEngineState
 import com.example.thesis.xmtp.XmtpInitError
 import kotlinx.coroutines.launch
@@ -158,6 +159,7 @@ class MainActivity : ComponentActivity() {
 fun ThesisMessagingApp(viewModel: ChatViewModel) {
     val engineState by viewModel.engineState.collectAsState()
     val walletAddress by viewModel.walletAddress.collectAsState()
+    val inboxId by viewModel.inboxId.collectAsState()
     val conversations by viewModel.conversations.collectAsState()
     val selectedConversation by viewModel.selectedConversation.collectAsState()
     val messages by viewModel.messages.collectAsState()
@@ -244,13 +246,20 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     if (showIdentityDialog) {
         IdentityDetailsDialog(
             address = walletAddress,
+            inboxId = inboxId,
             currentVersion = viewModel.appUpdateManager.getCurrentVersionName(),
             isCheckingUpdate = updateStatus is UpdateStatus.Checking,
             onCheckForUpdates = { viewModel.checkForUpdates(manual = true) },
-            onCopy = {
+            onCopyAddress = {
                 walletAddress?.let { addr ->
                     clipboardManager.setText(AnnotatedString(addr))
-                    scope.launch { snackbarHostState.showSnackbar("Η διεύθυνση αντιγράφηκε στο πρόχειρο") }
+                    scope.launch { snackbarHostState.showSnackbar("Η διεύθυνση πορτοφολιού αντιγράφηκε στο πρόχειρο") }
+                }
+            },
+            onCopyInboxId = {
+                inboxId?.let { id ->
+                    clipboardManager.setText(AnnotatedString(id))
+                    scope.launch { snackbarHostState.showSnackbar("Το XMTP Inbox ID αντιγράφηκε στο πρόχειρο") }
                 }
             },
             onTriggerShred = {
@@ -442,12 +451,24 @@ private fun MessagingTopBar(
     TopAppBar(
         title = {
             if (selectedConversation != null) {
+                val headerTitle = when (selectedConversation) {
+                    is Conversation.Dm -> {
+                        val peer = (selectedConversation as Conversation.Dm).dm.peerInboxId
+                        val masked = if (peer.length >= 14) "${peer.take(6)}...${peer.takeLast(4)}" else peer
+                        "MLS DM: $masked"
+                    }
+                    is Conversation.Group -> {
+                        val name = (selectedConversation as Conversation.Group).group.name
+                        if (name.isNotBlank()) name else "MLS Chat: ${selectedConversation.topic.take(16)}..."
+                    }
+                }
+
                 Column(
                     modifier = Modifier.clickable { onOpenProtocolInspector() }
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = "MLS Chat: ${selectedConversation.topic.take(16)}...",
+                            text = headerTitle,
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.Bold
                         )
@@ -807,6 +828,29 @@ private fun ConversationItemCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val isDm = conversation is Conversation.Dm
+    val isLoopback = conversation is Conversation.Group && (conversation as Conversation.Group).group.name == "MLS Research Loopback"
+
+    val title = when {
+        isDm -> {
+            val peer = (conversation as Conversation.Dm).dm.peerInboxId
+            val maskedPeer = if (peer.length >= 16) "${peer.take(8)}...${peer.takeLast(6)}" else peer
+            "DM: $maskedPeer"
+        }
+        isLoopback -> "Loopback MLS (1-Device Test)"
+        conversation is Conversation.Group -> {
+            val name = (conversation as Conversation.Group).group.name
+            if (name.isNotBlank()) name else "Ομάδα MLS: ${conversation.id.take(8)}..."
+        }
+        else -> "Συνομιλία $index: ${conversation.topic.take(18)}..."
+    }
+
+    val subtitle = when {
+        isDm -> "👤 Direct Message • MLS Ratchet"
+        isLoopback -> "🔄 Τοπική δοκιμή συσκευής • MLS Loopback"
+        else -> "👥 Ομαδική συνομιλία • MLS Ratchet"
+    }
+
     Card(
         onClick = onClick,
         modifier = modifier.fillMaxWidth(),
@@ -824,15 +868,21 @@ private fun ConversationItemCard(
         ) {
             Surface(
                 shape = CircleShape,
-                color = MaterialTheme.colorScheme.primaryContainer,
+                color = when {
+                    isDm -> MaterialTheme.colorScheme.primaryContainer
+                    isLoopback -> MaterialTheme.colorScheme.secondaryContainer
+                    else -> MaterialTheme.colorScheme.tertiaryContainer
+                },
                 modifier = Modifier.size(42.dp)
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Text(
-                        text = "#$index",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                        text = when {
+                            isDm -> "👤"
+                            isLoopback -> "🔄"
+                            else -> "👥"
+                        },
+                        fontSize = 18.sp
                     )
                 }
             }
@@ -841,14 +891,14 @@ private fun ConversationItemCard(
 
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "Συνομιλία $index: ${conversation.topic.take(18)}...",
+                    text = title,
                     style = MaterialTheme.typography.bodyMedium,
                     fontWeight = FontWeight.SemiBold
                 )
                 Spacer(modifier = Modifier.height(2.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        text = "🔒 MLS Ratchet",
+                        text = subtitle,
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary,
                         fontSize = 10.sp
@@ -1115,9 +1165,10 @@ private fun NewConversationDialog(
     onStartConversation: (String) -> Unit,
     onStartLoopback: () -> Unit
 ) {
-    var address by rememberSaveable { mutableStateOf("") }
-    val isValidAddress = remember(address) {
-        Regex("^0[xX][0-9a-fA-F]{40}$").matches(address.trim())
+    var peerInput by rememberSaveable { mutableStateOf("") }
+    val isValidInput = remember(peerInput) {
+        val trimmed = peerInput.trim()
+        CryptoUtils.isValidEthereumAddress(trimmed) || CryptoUtils.isValidInboxId(trimmed)
     }
     @Suppress("DEPRECATION")
     val clipboard = LocalClipboardManager.current
@@ -1138,24 +1189,26 @@ private fun NewConversationDialog(
 
                 HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp))
 
-                Text("Ή πληκτρολογήστε τη διεύθυνση Ethereum του παραλήπτη:")
+                Text("Ή εισάγετε ταυτότητα παραλήπτη:")
 
                 OutlinedTextField(
-                    value = address,
-                    onValueChange = { address = it },
+                    value = peerInput,
+                    onValueChange = { peerInput = it },
                     modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Διεύθυνση Ethereum (0x...)") },
-                    placeholder = { Text("0x…") },
+                    label = { Text("Διεύθυνση (0x...) ή XMTP Inbox ID") },
+                    placeholder = { Text("0x… ή 64-hex inbox ID") },
                     singleLine = true,
-                    isError = address.isNotBlank() && !isValidAddress,
+                    isError = peerInput.isNotBlank() && !isValidInput,
                     supportingText = {
-                        if (address.isNotBlank() && !isValidAddress) {
-                            Text("Απαιτούνται 40 δεκαεξαδικοί χαρακτήρες μετά το 0x.")
+                        if (peerInput.isNotBlank() && !isValidInput) {
+                            Text("Απαιτείται διεύθυνση Ethereum (0x...) ή XMTP Inbox ID (64 hex).")
+                        } else {
+                            Text("Υποστηρίζονται διευθύνσεις Ethereum (0x...) και XMTP Inbox IDs.", fontSize = 10.sp)
                         }
                     },
                     trailingIcon = {
                         TextButton(onClick = {
-                            clipboard.getText()?.text?.let { address = it.trim() }
+                            clipboard.getText()?.text?.let { peerInput = it.trim() }
                         }) {
                             Text("Επικόλληση", fontSize = 11.sp)
                         }
@@ -1169,8 +1222,8 @@ private fun NewConversationDialog(
         },
         confirmButton = {
             TextButton(
-                onClick = { onStartConversation(address.trim()) },
-                enabled = isValidAddress
+                onClick = { onStartConversation(peerInput.trim()) },
+                enabled = isValidInput
             ) {
                 Text("Σύνδεση")
             }
@@ -1184,10 +1237,12 @@ private fun NewConversationDialog(
 @Composable
 private fun IdentityDetailsDialog(
     address: String?,
+    inboxId: String?,
     currentVersion: String = "1.0.4",
     isCheckingUpdate: Boolean = false,
     onCheckForUpdates: () -> Unit = {},
-    onCopy: () -> Unit,
+    onCopyAddress: () -> Unit,
+    onCopyInboxId: () -> Unit,
     onTriggerShred: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -1199,16 +1254,35 @@ private fun IdentityDetailsDialog(
                 Text("Κατάσταση: Δοκιμαστική ταυτότητα SECP256K1")
                 Text("Δίκτυο: XMTP DEV Network (MLS Protocol)", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 address?.let {
-                    Text("Διεύθυνση Πορτοφολιού", style = MaterialTheme.typography.labelMedium)
+                    Text("Διεύθυνση Πορτοφολιού (Ethereum)", style = MaterialTheme.typography.labelMedium)
                     Text(
                         it,
                         style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    OutlinedButton(onClick = onCopy, modifier = Modifier.fillMaxWidth()) {
+                    OutlinedButton(onClick = onCopyAddress, modifier = Modifier.fillMaxWidth()) {
                         Text("Αντιγραφή Διεύθυνσης")
                     }
                 }
+
+                inboxId?.let {
+                    Text("XMTP Inbox ID (MLS Ledger)", style = MaterialTheme.typography.labelMedium)
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    OutlinedButton(onClick = onCopyInboxId, modifier = Modifier.fillMaxWidth()) {
+                        Text("Αντιγραφή Inbox ID")
+                    }
+                }
+
+                Text(
+                    "💡 Για επικοινωνία μεταξύ 2 συσκευών: Αντιγράψτε το Inbox ID ή τη Διεύθυνση και επικολλήστε τη στη 2η συσκευή στο '+ Νέα'.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+
                 Text(
                     "Η ταυτότητα προστατεύεται από Hardware-backed Master Key (KEK) στο Android Keystore.",
                     style = MaterialTheme.typography.bodySmall,

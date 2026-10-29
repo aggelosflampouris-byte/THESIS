@@ -23,6 +23,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -68,6 +71,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _walletAddress = MutableStateFlow<String?>(null)
     val walletAddress: StateFlow<String?> = _walletAddress.asStateFlow()
+
+    val inboxId: StateFlow<String?> = engine.state
+        .map { (it as? XmtpEngineState.Ready)?.client?.inboxId }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     private val _conversations = MutableStateFlow<List<Conversation>>(emptyList())
     val conversations: StateFlow<List<Conversation>> = _conversations.asStateFlow()
@@ -202,11 +209,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun startNewConversation(peerAddress: String) {
+    fun startNewConversation(peerIdentifier: String) {
         viewModelScope.launch {
-            logAction("MLS", "Initiating MLS handshake with ${peerAddress.take(10)}...")
+            val masked = if (peerIdentifier.length >= 14) "${peerIdentifier.take(6)}...${peerIdentifier.takeLast(4)}" else peerIdentifier
+            logAction("MLS", "Initiating MLS handshake with $masked...")
             ThesisTelemetry.measureSuspendOperation("4. MLS Conversation Handshake") {
-                repository.createConversation(peerAddress)
+                repository.createConversation(peerIdentifier)
             }
             .onSuccess { conv ->
                 _statusBanner.value = "Η συνομιλία MLS δημιουργήθηκε."
