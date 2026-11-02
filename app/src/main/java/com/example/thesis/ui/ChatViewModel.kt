@@ -304,6 +304,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         checkForUpdates(manual = false)
+        // Automatically restore hardware-wrapped identity and local SQLCipher database on app launch
+        initializeSession()
     }
 
     /**
@@ -331,14 +333,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     }
 
                     try {
-                        val signer = ThesisTelemetry.measureOperation("2. Secp256k1 Ephemeral KeyGen") {
-                            activeSigner ?: ThesisSigner.createEphemeral().also { activeSigner = it }
-                        }
-                        _walletAddress.value = signer.address
-                        val maskedAddress = if (signer.address.length >= 10) {
-                            "${signer.address.take(6)}...${signer.address.takeLast(4)}"
-                        } else signer.address
-                        logAction("IDENTITY", "Ephemeral SECP256K1 signer active: $maskedAddress")
+                        val idKeyResult = ThesisTelemetry.measureOperation("2. Keystore Hardware Identity Unwrap") {
+                        keystoreManager.getOrCreateIdentityPrivateKey()
+                    }
+                    val privKeyBytes = try {
+                        idKeyResult.getOrThrow()
+                    } catch (e: Throwable) {
+                        _statusBanner.value = "Σφάλμα Hardware Identity Keystore: ${e.message}"
+                        logAction("KEYSTORE", "Identity Keystore failure: ${e.message}", isError = true)
+                        return@withLock
+                    }
+
+                    val signer = try {
+                        activeSigner ?: ThesisSigner.fromPrivateKey(privKeyBytes).also { activeSigner = it }
+                    } finally {
+                        // Άμεσος μηδενισμός του ενδιάμεσου buffer ιδιωτικού κλειδιού στη μνήμη RAM
+                        privKeyBytes.fill(0x00)
+                    }
+                    _walletAddress.value = signer.address
+                    val maskedAddress = if (signer.address.length >= 10) {
+                        "${signer.address.take(6)}...${signer.address.takeLast(4)}"
+                    } else signer.address
+                    logAction("IDENTITY", "Hardware-backed SECP256K1 identity active: $maskedAddress")
 
                         val dbFile = databaseFactory.resolveDatabaseFile(signer.address)
                         val dbDirectory = dbFile.parentFile ?: appContext.filesDir

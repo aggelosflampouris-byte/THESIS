@@ -357,4 +357,77 @@ class ThesisSignerTest {
         assertTrue("All concurrent tasks should complete within timeout", executor.awaitTermination(5, TimeUnit.SECONDS))
         futures.forEach { it.get() }
     }
+
+    /**
+     * Deterministic Signer Restoration:
+     * Verifies that ThesisSigner.fromPrivateKey deterministically reconstructs the identical
+     * secp256k1 keypair, 0x address, uncompressed public key, and produces matching EIP-191 signatures.
+     */
+    @Test
+    fun test_fromPrivateKey_deterministicRestoration() = runTest {
+        val rawKeyBytes = Numeric.hexStringToByteArray(testPrivateKeyHex)
+        val signerA = ThesisSigner.fromPrivateKey(rawKeyBytes)
+        val signerB = ThesisSigner.fromPrivateKey(rawKeyBytes)
+
+        assertEquals("Addresses must match expected reference address", expectedAddress, signerA.address)
+        assertEquals("Reconstructed signers must have identical 0x address", signerA.address, signerB.address)
+        assertEquals("Reconstructed signers must have identical checksum address", signerA.checksumAddress, signerB.checksumAddress)
+        assertArrayEquals("Uncompressed public keys must be identical", signerA.uncompressedPublicKey, signerB.uncompressedPublicKey)
+
+        val challenge = "Deterministic Reconstitution Verification".toByteArray(StandardCharsets.UTF_8)
+        val sigA = signerA.sign(challenge)
+        val sigB = signerB.sign(challenge)
+
+        assertEquals(65, sigA.size)
+        assertArrayEquals("EIP-191 signatures from identically reconstituted signers must be identical", sigA, sigB)
+    }
+
+    /**
+     * Defensive Copy Validation:
+     * Verifies that exportPrivateKeyBytes returns a valid defensive copy, and mutating it
+     * does not corrupt internal key material.
+     */
+    @Test
+    fun test_exportPrivateKeyBytes_defensiveCopyAndClosedGuards() {
+        val rawKeyBytes = Numeric.hexStringToByteArray(testPrivateKeyHex)
+        val signer = ThesisSigner.fromPrivateKey(rawKeyBytes)
+
+        val exported1 = signer.exportPrivateKeyBytes()
+        assertArrayEquals("Exported bytes must match original private key", rawKeyBytes, exported1)
+
+        // Mutate exported array
+        exported1.fill(0xFF.toByte())
+
+        val exported2 = signer.exportPrivateKeyBytes()
+        assertArrayEquals("Internal key must remain immutable despite caller mutating exported array", rawKeyBytes, exported2)
+
+        // Verify close semantics
+        signer.close()
+        assertTrue(signer.closed)
+        assertThrows(IllegalStateException::class.java) {
+            signer.exportPrivateKeyBytes()
+        }
+    }
+
+    /**
+     * fromPrivateKey Curve Boundary Checks:
+     * Verifies length checks and curve scalar [1, N-1] validation.
+     */
+    @Test
+    fun test_fromPrivateKey_boundaryValidation() {
+        assertThrows(IllegalArgumentException::class.java) {
+            ThesisSigner.fromPrivateKey(ByteArray(31))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            ThesisSigner.fromPrivateKey(ByteArray(33))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            ThesisSigner.fromPrivateKey(ByteArray(32)) // scalar 0
+        }
+        val outOfBounds = BigInteger("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364142", 16)
+        val outOfBoundsBytes = Numeric.toBytesPadded(outOfBounds, 32)
+        assertThrows(IllegalArgumentException::class.java) {
+            ThesisSigner.fromPrivateKey(outOfBoundsBytes)
+        }
+    }
 }

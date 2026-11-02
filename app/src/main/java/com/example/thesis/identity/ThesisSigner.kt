@@ -348,6 +348,19 @@ class ThesisSigner : SigningKey, AutoCloseable {
 
     override fun toString(): String = "ThesisSigner(address=$address, closed=$isClosed)"
 
+    /**
+     * Returns a defensive copy of the 32-byte private key for initial hardware Keystore wrapping.
+     *
+     * @throws IllegalStateException If the signer is already closed or operates in external delegate mode.
+     */
+    fun exportPrivateKeyBytes(): ByteArray {
+        synchronized(lock) {
+            check(!isClosed) { "Signer is closed." }
+            val priv = privateKeyBytes ?: throw IllegalStateException("No private key available for external delegate signer.")
+            return priv.copyOf()
+        }
+    }
+
     companion object {
         private const val PRIVATE_KEY_BYTE_LENGTH = 32
         private const val SIGNATURE_RSV_LENGTH = 65
@@ -368,6 +381,34 @@ class ThesisSigner : SigningKey, AutoCloseable {
 
         private val SECP256K1_N: BigInteger = Sign.CURVE_PARAMS.n
         private val SECP256K1_HALF_N: BigInteger = SECP256K1_N.shiftRight(1)
+
+        /**
+         * Reconstructs a deterministic [ThesisSigner] from a persisted 32-byte secp256k1 private key.
+         * Derives the corresponding uncompressed public key and canonical 0x Ethereum address.
+         *
+         * @param privateKeyBytes Exactly 32-byte secp256k1 scalar in [1, N-1].
+         * @param cpuDispatcher   Dispatcher for cryptographic signing computations.
+         */
+        fun fromPrivateKey(
+            privateKeyBytes: ByteArray,
+            cpuDispatcher: CoroutineDispatcher = Dispatchers.Default
+        ): ThesisSigner {
+            require(privateKeyBytes.size == PRIVATE_KEY_BYTE_LENGTH) {
+                "Invalid secp256k1 private key length: ${privateKeyBytes.size} bytes (expected $PRIVATE_KEY_BYTE_LENGTH)."
+            }
+            val privBigInt = BigInteger(1, privateKeyBytes)
+            require(privBigInt > BigInteger.ZERO && privBigInt < SECP256K1_N) {
+                "Private key scalar is out of secp256k1 curve bounds."
+            }
+
+            val pubPoint = Sign.CURVE_PARAMS.g.multiply(privBigInt).normalize()
+            val pubUncompressed = pubPoint.getEncoded(false)
+            check(pubUncompressed.size == UNCOMPRESSED_KEY_LENGTH && pubUncompressed[0] == UNCOMPRESSED_HEADER_BYTE) {
+                "Failed to derive valid uncompressed secp256k1 public key point"
+            }
+
+            return ThesisSigner(privateKeyBytes, cpuDispatcher)
+        }
 
         /**
          * Factory method generating an ephemeral in-memory signer with a cryptographically

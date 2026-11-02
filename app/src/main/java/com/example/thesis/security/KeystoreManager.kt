@@ -59,12 +59,15 @@ class KeystoreManager(context: Context) {
 
         const val PREF_KEY_DEK_IV: String = "encrypted_dek_iv"
         const val PREF_KEY_DEK_CT: String = "encrypted_dek_ciphertext"
+        const val PREF_ENCRYPTED_IDENTITY_KEY: String = "encrypted_identity_priv_key"
+        const val PREF_IDENTITY_KEY_IV: String = "encrypted_identity_priv_iv"
 
         private const val AES_GCM_TRANSFORMATION: String = "AES/GCM/NoPadding"
         private const val AES_KEY_SIZE_BITS: Int = 256
         private const val GCM_TAG_LENGTH_BITS: Int = 128
         private const val GCM_IV_LENGTH_BYTES: Int = 12 // 96-bit IV per NIST SP 800-38D recommendation
         const val DEK_SIZE_BYTES: Int = 32      // 256-bit symmetric DEK
+        const val IDENTITY_KEY_SIZE_BYTES: Int = 32 // 256-bit secp256k1 private key
 
         private val STRONGBOX_FALLBACK_CLASSES: Set<Class<out Throwable>> = setOf(
             ProviderException::class.java,
@@ -145,6 +148,79 @@ class KeystoreManager(context: Context) {
             )
         }
     }
+
+    /**
+     * Synchronously retrieves or generates the 32-byte secp256k1 identity private key wrapped
+     * by the hardware-backed KEK inside the Android KeyStore.
+     *
+     * Execution Workflow:
+     * 1. Resolves the hardware-backed KEK from Android KeyStore (creating it if absent).
+     * 2. Inspects [SharedPreferences] for an existing encrypted identity envelope (IV + ciphertext).
+     * 3. If present: Decrypts and verifies authenticity via AES-256-GCM. Emits telemetry [IDENTITY_RESTORED].
+     * 4. If absent/corrupt: Generates a 32-byte valid secp256k1 private key via [ThesisSigner.createEphemeral],
+     *    encrypts it under the KEK, commits synchronously to disk, and emits telemetry [IDENTITY_PROVISIONED].
+     *
+     * @return [KeystoreResult.Success] containing the 32-byte secp256k1 private key, or a typed [KeystoreResult.Failure].
+     */
+    fun getOrCreateIdentityPrivateKey(): KeystoreResult<ByteArray> = synchronized(KEYSTORE_LOCK) {
+        return try {
+            val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE_PROVIDER).apply { load(null) }
+            val kek: SecretKey = (keyStore.getKey(KEK_ALIAS, null) as? SecretKey)
+                ?: generateHardwareKey(keyStore)
+
+            val prefs = openEncryptedPreferences()
+            val existingIvBase64 = prefs.getString(PREF_IDENTITY_KEY_IV, null)
+            val existingCtBase64 = prefs.getString(PREF_ENCRYPTED_IDENTITY_KEY, null)
+
+            if (existingIvBase64 != null && existingCtBase64 != null) {
+                val decryptResult = decryptEnvelope(
+                    kek = kek,
+                    ivBase64 = existingIvBase64,
+                    ctBase64 = existingCtBase64,
+                    expectedSizeBytes = IDENTITY_KEY_SIZE_BYTES,
+                    keyTypeLabel = "Identity Key"
+                )
+                if (decryptResult is KeystoreResult.Success) {
+                    ThesisTelemetry.recordMetric("KEYSTORE: IDENTITY_RESTORED", 0.0, true)
+                    decryptResult
+                } else {
+                    provisionNewIdentityKey(kek = kek, prefs = prefs)
+                }
+            } else {
+                provisionNewIdentityKey(kek = kek, prefs = prefs)
+            }
+        } catch (e: UserNotAuthenticatedException) {
+            KeystoreResult.Failure.UserNotAuthenticated(
+                message = "Device authentication is required to access hardware KeyStore.",
+                cause = e
+            )
+        } catch (e: KeyStoreException) {
+            KeystoreResult.Failure.KeystoreError(
+                message = "Android KeyStore failure during identity key access: ${e.message}",
+                cause = e
+            )
+        } catch (e: GeneralSecurityException) {
+            KeystoreResult.Failure.KeystoreError(
+                message = "Cryptographic failure during identity key access: ${e.message}",
+                cause = e
+            )
+        } catch (e: IOException) {
+            KeystoreResult.Failure.StorageError(
+                message = "I/O failure accessing encrypted preferences storage: ${e.message}",
+                cause = e
+            )
+        } catch (e: Exception) {
+            KeystoreResult.Failure.Unknown(
+                message = "Unexpected failure during identity key provisioning: ${e.message}",
+                cause = e
+            )
+        }
+    }
+
+    /**
+     * Convenience helper unwrapping the identity private key or throwing the underlying exception.
+     */
+    fun getOrCreateIdentityPrivateKeyBytes(): ByteArray = getOrCreateIdentityPrivateKey().getOrThrow()
 
     /**
      * Permanently destroys the hardware-backed KEK and purges the stored DEK envelope.
@@ -321,69 +397,120 @@ class KeystoreManager(context: Context) {
         }
     }
 
-    private fun encryptDek(kek: SecretKey, plainDek: ByteArray): Pair<ByteArray, ByteArray> {
+    private fun provisionNewIdentityKey(
+        kek: SecretKey,
+        prefs: SharedPreferences
+    ): KeystoreResult<ByteArray> {
+        val signer = com.example.thesis.identity.ThesisSigner.createEphemeral()
+        val plainKey = signer.exportPrivateKeyBytes()
+        signer.close()
+
+        var persistenceSucceeded = false
+        var ivBytes: ByteArray? = null
+        var ctBytes: ByteArray? = null
+        return try {
+            val (iv, ciphertext) = encryptPayload(kek = kek, payload = plainKey)
+            ivBytes = iv
+            ctBytes = ciphertext
+
+            val ivBase64 = Base64.encodeToString(iv, Base64.NO_WRAP)
+            val ctBase64 = Base64.encodeToString(ciphertext, Base64.NO_WRAP)
+
+            val committed = prefs.edit()
+                .putString(PREF_IDENTITY_KEY_IV, ivBase64)
+                .putString(PREF_ENCRYPTED_IDENTITY_KEY, ctBase64)
+                .commit()
+
+            if (!committed) {
+                KeystoreResult.Failure.StorageError(
+                    message = "Synchronous SharedPreferences commit failed while persisting identity key envelope.",
+                    cause = IOException("SharedPreferences.commit() returned false")
+                )
+            } else {
+                persistenceSucceeded = true
+                ThesisTelemetry.recordMetric("KEYSTORE: IDENTITY_PROVISIONED", 0.0, true)
+                KeystoreResult.Success(plainKey)
+            }
+        } catch (e: Exception) {
+            KeystoreResult.Failure.KeystoreError(
+                message = "Failed to encrypt identity key envelope: ${e.message}",
+                cause = e
+            )
+        } finally {
+            if (!persistenceSucceeded) {
+                plainKey.fill(0)
+            }
+            ivBytes?.fill(0)
+            ctBytes?.fill(0)
+        }
+    }
+
+    private fun encryptPayload(kek: SecretKey, payload: ByteArray): Pair<ByteArray, ByteArray> {
         val cipher = Cipher.getInstance(AES_GCM_TRANSFORMATION).apply {
             init(Cipher.ENCRYPT_MODE, kek)
         }
-        val ciphertext = cipher.doFinal(plainDek)
+        val ciphertext = cipher.doFinal(payload)
         val iv = cipher.iv ?: throw IllegalStateException("KeyStore Cipher did not supply an IV")
         return Pair(iv, ciphertext)
     }
 
-    private fun decryptDek(
+    private fun encryptDek(kek: SecretKey, plainDek: ByteArray): Pair<ByteArray, ByteArray> =
+        encryptPayload(kek, plainDek)
+
+    private fun decryptEnvelope(
         kek: SecretKey,
         ivBase64: String,
-        ctBase64: String
+        ctBase64: String,
+        expectedSizeBytes: Int,
+        keyTypeLabel: String
     ): KeystoreResult<ByteArray> {
         val iv = decodeBase64Safe(ivBase64).getOrElse {
             return KeystoreResult.Failure.IntegrityViolation(
-                message = "Base64 decoding failed for DEK envelope IV.",
+                message = "Base64 decoding failed for $keyTypeLabel envelope IV.",
                 cause = it
             )
         }
 
         val ciphertext = decodeBase64Safe(ctBase64).getOrElse {
             return KeystoreResult.Failure.IntegrityViolation(
-                message = "Base64 decoding failed for DEK envelope ciphertext.",
+                message = "Base64 decoding failed for $keyTypeLabel envelope ciphertext.",
                 cause = it
             )
         }
 
         if (iv.size != GCM_IV_LENGTH_BYTES) {
             return KeystoreResult.Failure.IntegrityViolation(
-                message = "Invalid IV length in stored DEK envelope. Expected $GCM_IV_LENGTH_BYTES bytes, got ${iv.size}.",
+                message = "Invalid IV length in stored $keyTypeLabel envelope. Expected $GCM_IV_LENGTH_BYTES bytes, got ${iv.size}.",
                 cause = InvalidAlgorithmParameterException("Malformed GCM IV length")
             )
         }
 
-        var activePlainDek: ByteArray? = null
+        var activePlaintext: ByteArray? = null
         return try {
             val cipher = Cipher.getInstance(AES_GCM_TRANSFORMATION).apply {
                 init(Cipher.DECRYPT_MODE, kek, GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv))
             }
-            val plainDek = cipher.doFinal(ciphertext)
-            activePlainDek = plainDek
+            val plaintext = cipher.doFinal(ciphertext)
+            activePlaintext = plaintext
 
-            if (plainDek.size != DEK_SIZE_BYTES) {
-                plainDek.fill(0)
-                activePlainDek = null
+            if (plaintext.size != expectedSizeBytes) {
+                plaintext.fill(0)
+                activePlaintext = null
                 return KeystoreResult.Failure.IntegrityViolation(
-                    message = "Decrypted DEK size mismatch. Expected $DEK_SIZE_BYTES bytes, got ${plainDek.size}.",
-                    cause = IllegalStateException("Corrupt DEK size")
+                    message = "Decrypted $keyTypeLabel size mismatch. Expected $expectedSizeBytes bytes, got ${plaintext.size}.",
+                    cause = IllegalStateException("Corrupt $keyTypeLabel size")
                 )
             }
 
-            val resultDek = plainDek
-            activePlainDek = null // Disarm scrubber on successful return
-            KeystoreResult.Success(resultDek)
+            val resultKey = plaintext
+            activePlaintext = null // Disarm scrubber on successful return
+            KeystoreResult.Success(resultKey)
         } catch (e: AEADBadTagException) {
-            // Explicitly handles GCM MAC tag authentication mismatch (ciphertext tampering or corruption)
             KeystoreResult.Failure.IntegrityViolation(
-                message = "GCM authentication tag mismatch. DEK envelope has been tampered with or corrupted.",
+                message = "GCM authentication tag mismatch. $keyTypeLabel envelope has been tampered with or corrupted.",
                 cause = e
             )
         } catch (e: BadPaddingException) {
-            // Fallback for non-AEADBadTagException padding errors across heterogeneous OEM security providers
             KeystoreResult.Failure.IntegrityViolation(
                 message = "Decryption padding failure during AEAD operation: ${e.message}",
                 cause = e
@@ -395,15 +522,22 @@ class KeystoreManager(context: Context) {
             )
         } catch (e: Exception) {
             KeystoreResult.Failure.KeystoreError(
-                message = "Failed to decrypt DEK envelope: ${e.message}",
+                message = "Failed to decrypt $keyTypeLabel envelope: ${e.message}",
                 cause = e
             )
         } finally {
-            activePlainDek?.fill(0)
+            activePlaintext?.fill(0)
             iv.fill(0)
             ciphertext.fill(0)
         }
     }
+
+    private fun decryptDek(
+        kek: SecretKey,
+        ivBase64: String,
+        ctBase64: String
+    ): KeystoreResult<ByteArray> =
+        decryptEnvelope(kek, ivBase64, ctBase64, DEK_SIZE_BYTES, "DEK")
 
     private fun decodeBase64Safe(base64: String): Result<ByteArray> = try {
         Result.success(Base64.decode(base64, Base64.NO_WRAP))

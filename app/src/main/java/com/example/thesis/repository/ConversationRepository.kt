@@ -225,9 +225,25 @@ class ConversationRepository(
     }
 
     private fun createConversationsPipeline(client: Client): Flow<List<Conversation>> = channelFlow {
-        // Initial sync with network ledger discovering both ALLOWED and UNKNOWN incoming invites
-        val currentList = fetchConversationsWithConsent(client).toMutableList()
-        send(currentList.toList())
+        // 1. Instantly emit local cached conversations from SQLCipher (0ms latency, eliminates cold-start delay)
+        val initialCached = try {
+            client.conversations.list()
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            emptyList()
+        }
+        val currentList = initialCached.toMutableList()
+        if (currentList.isNotEmpty()) {
+            send(currentList.toList())
+        }
+
+        // 2. Initial sync with network ledger discovering both ALLOWED and UNKNOWN incoming invites
+        val syncedList = fetchConversationsWithConsent(client)
+        if (currentList.isEmpty() || syncedList != currentList) {
+            currentList.clear()
+            currentList.addAll(syncedList)
+            send(currentList.toList())
+        }
 
         // Real-time network stream with resilient reconnection backoff
         val networkStream: Flow<Conversation?> = client.conversations.stream()
