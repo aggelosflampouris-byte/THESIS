@@ -614,6 +614,7 @@ class ConversationRepository(
             while (isActive) {
                 try {
                     conversation.streamMessages().collect { incoming ->
+                        Log.i(TAG, "RX COMMITTED | MsgID: ${incoming.id} | ConvID: ${conversation.id} | Topic: ${conversation.topic} | SenderInbox: ${incoming.senderInboxId} | SentNs: ${incoming.sentAtNs}")
                         messageMap[incoming.id] = incoming
                         trySend(getSortedList())
                         syncChannel.trySend(Unit)
@@ -696,6 +697,7 @@ class ConversationRepository(
 
             // Trigger flow update to transition message to PUBLISHED state with server timestamp
             messageRefreshTrigger.emit(conversation.id)
+            Log.i(TAG, "TX COMMITTED | MsgID: $msgId | ConvID: ${conversation.id} | Topic: ${conversation.topic}")
             msgId
         }
     }
@@ -809,6 +811,7 @@ class ConversationRepository(
                 id = publishedId,
                 deliveryStatus = MessageDeliveryStatus.PUBLISHED
             )
+            Log.i(TAG, "TX COMMITTED | MsgID: $publishedId | ConvID: ${conversation.id} | Topic: ${conversation.topic} | Sender: ${pendingMessage.senderAddress}")
             outgoingMessageEvents.emit(publishedMessage)
             Result.success(Unit)
         } catch (e: CancellationException) {

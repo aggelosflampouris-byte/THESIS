@@ -1569,12 +1569,31 @@ fun LogsTelemetryScreen(
                     }
                 },
                 actions = {
-                    TextButton(onClick = onExport) {
-                        Text("Export", fontSize = 12.sp)
+                    TextButton(
+                        onClick = onEmitBlockchainPoC,
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
+                    ) {
+                        Text("⛓️ PoC IDs", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                    TextButton(
+                        onClick = onRunBatchBenchmark,
+                        enabled = !isBenchmarking,
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
+                    ) {
+                        Text("⚡ Batch (10x)", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                    TextButton(
+                        onClick = onExport,
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
+                    ) {
+                        Text("Export", fontSize = 11.sp)
                     }
                     if (logs.isNotEmpty()) {
-                        TextButton(onClick = onClear) {
-                            Text("Clear", color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+                        TextButton(
+                            onClick = onClear,
+                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
+                        ) {
+                            Text("Clear", color = MaterialTheme.colorScheme.error, fontSize = 11.sp)
                         }
                     }
                 },
@@ -1593,7 +1612,15 @@ fun LogsTelemetryScreen(
             // ── Active Network Proof Card (Blockchain & MLS Chain of Custody) ──
             var isPoCCardExpanded by rememberSaveable { mutableStateOf(true) }
             val verifiedMsgCount = remember(logs) {
-                logs.count { it.message.contains("MsgID:") || it.message.contains("POC_MSG_PROOF") }
+                val regex = Regex("""(?:MsgID:\s*|\[POC_MSG_PROOF\]\s*MsgID:\s*)([a-zA-Z0-9_\-]+)""")
+                val uniqueIds = mutableSetOf<String>()
+                logs.forEach { entry ->
+                    regex.findAll(entry.message).forEach { match ->
+                        val id = match.groupValues[1]
+                        if (id.isNotBlank()) uniqueIds.add(id)
+                    }
+                }
+                if (uniqueIds.isNotEmpty()) uniqueIds.size else logs.count { it.message.contains("MsgID:") }
             }
 
             Card(
@@ -1767,7 +1794,7 @@ fun LogsTelemetryScreen(
                                 modifier = Modifier.size(14.dp)
                             )
                             Spacer(Modifier.width(4.dp))
-                            Text("PoC IDs", fontSize = 11.sp, maxLines = 1)
+                            Text("⛓️ PoC IDs", fontSize = 11.sp, maxLines = 1)
                         }
 
                         Button(
@@ -1791,7 +1818,7 @@ fun LogsTelemetryScreen(
                                     modifier = Modifier.size(14.dp)
                                 )
                                 Spacer(Modifier.width(4.dp))
-                                Text("Batch (10x)", fontSize = 11.sp, maxLines = 1)
+                                Text("⚡ Batch (10x)", fontSize = 11.sp, maxLines = 1)
                             }
                         }
                     }
