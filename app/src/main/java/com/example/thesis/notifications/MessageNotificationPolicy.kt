@@ -45,9 +45,17 @@ internal object MessageNotificationPolicy {
         }
     }
 
+    fun shouldRestoreServiceNotification(
+        isServiceRunning: Boolean,
+        hasPersistedSession: Boolean,
+        isServiceChannelEnabled: Boolean
+    ): Boolean = isServiceRunning && hasPersistedSession && isServiceChannelEnabled
+
     fun notificationIdFor(conversationId: String): Int {
         val positiveHash = conversationId.hashCode() and 0x7FFFFFFF
-        return (positiveHash % 1_000_000) + 1_000
+        val candidate = (positiveHash % 1_000_000) + 1_000
+        // Evitamos colisionar con el ID del servicio en primer plano para no sobrescribir su notificacion fija.
+        return if (candidate == MessageNotificationManager.SERVICE_NOTIFICATION_ID) candidate + 1 else candidate
     }
 
     private fun maskIdentifier(id: String): String {

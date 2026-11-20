@@ -183,4 +183,36 @@ class MessageNotificationPolicyTest {
             MessageNotificationManager.SERVICE_CHANNEL_ID
         )
     }
+
+    @Test
+    fun test_shouldRestoreServiceNotification_restoresOnlyWhileServiceActiveSessionPersistedAndChannelEnabled() {
+        assertTrue(
+            MessageNotificationPolicy.shouldRestoreServiceNotification(
+                isServiceRunning = true,
+                hasPersistedSession = true,
+                isServiceChannelEnabled = true
+            )
+        )
+        assertFalse(
+            MessageNotificationPolicy.shouldRestoreServiceNotification(
+                isServiceRunning = false,
+                hasPersistedSession = true,
+                isServiceChannelEnabled = true
+            )
+        )
+        assertFalse(
+            MessageNotificationPolicy.shouldRestoreServiceNotification(
+                isServiceRunning = true,
+                hasPersistedSession = false,
+                isServiceChannelEnabled = true
+            )
+        )
+        assertFalse(
+            MessageNotificationPolicy.shouldRestoreServiceNotification(
+                isServiceRunning = true,
+                hasPersistedSession = true,
+                isServiceChannelEnabled = false
+            )
+        )
+    }
 }

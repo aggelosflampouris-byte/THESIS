@@ -36,7 +36,9 @@ internal class MessageNotificationManager(context: Context) {
         const val CHANNEL_ID = "xmtp_mls_priority_messages_v2"
         const val SERVICE_CHANNEL_ID = "xmtp_mls_connection_service"
         const val SERVICE_NOTIFICATION_ID = 9001
+        const val ACTION_RESTORE_SERVICE_NOTIFICATION = "com.example.thesis.action.RESTORE_SERVICE_NOTIFICATION"
         private const val SERVICE_HIDE_ACTION_REQUEST_CODE = 9003
+        private const val SERVICE_RESTORE_REQUEST_CODE = 9004
         const val EXTRA_CONVERSATION_ID = "com.example.thesis.extra.CONVERSATION_ID"
         private const val ACCENT_COLOR = 0xFF315C54.toInt()
         private val VIBRATION_PATTERN = longArrayOf(0L, 250L, 120L, 250L)
@@ -162,7 +164,17 @@ internal class MessageNotificationManager(context: Context) {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // Usamos el icono neutro y canal separable para que no se confunda con un mensaje ni bloquee el deslizamiento.
+        val restoreIntent = Intent(appContext, XmtpNotificationReceiver::class.java).apply {
+            action = ACTION_RESTORE_SERVICE_NOTIFICATION
+        }
+        val restorePendingIntent = PendingIntent.getBroadcast(
+            appContext,
+            SERVICE_RESTORE_REQUEST_CODE,
+            restoreIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        // Bloqueamos Borrar todo y restauramos al instante si Android 14+ permite deslizarla, hasta pulsar «Απόκρυψη».
         return NotificationCompat.Builder(appContext, SERVICE_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_notification_sync)
             .setColor(ACCENT_COLOR)
@@ -171,13 +183,33 @@ internal class MessageNotificationManager(context: Context) {
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setVisibility(NotificationCompat.VISIBILITY_SECRET)
-            .setOngoing(false)
+            .setOngoing(true)
+            .setAutoCancel(false)
+            .setOnlyAlertOnce(true)
             .setSilent(true)
             .setShowWhen(false)
-            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_DEFERRED)
+            .setDeleteIntent(restorePendingIntent)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setContentIntent(contentIntent)
             .addAction(0, "Απόκρυψη", hideChannelPendingIntent)
             .build()
+            .apply {
+                flags = flags or Notification.FLAG_NO_CLEAR or Notification.FLAG_ONGOING_EVENT
+            }
+    }
+
+    @SuppressLint("MissingPermission")
+    fun repostForegroundServiceNotification(): Boolean {
+        if (!hasNotificationPermission() || !isBackgroundServiceChannelEnabled()) {
+            return false
+        }
+        return runCatching {
+            NotificationManagerCompat.from(appContext)
+                .notify(SERVICE_NOTIFICATION_ID, buildForegroundServiceNotification())
+            true
+        }.onFailure { err ->
+            Log.w(TAG, "Failed to restore foreground service notification: ${err::class.java.simpleName}")
+        }.getOrDefault(false)
     }
 
     @SuppressLint("MissingPermission")
