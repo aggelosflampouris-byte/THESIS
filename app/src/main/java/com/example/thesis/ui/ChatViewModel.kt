@@ -11,6 +11,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.thesis.database.DatabaseFactory
 import com.example.thesis.identity.ThesisSigner
+import com.example.thesis.notifications.MessageNotificationManager
+import com.example.thesis.notifications.MessageNotificationPolicy
 import com.example.thesis.repository.ConversationRepository
 import com.example.thesis.repository.isDisplayableUserMessage
 import com.example.thesis.updater.AppUpdateInfo
@@ -66,6 +68,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val engine = XmtpEngine(appContext, XMTPEnvironment.DEV)
     private val repository = ConversationRepository(engine, viewModelScope)
     private val appUpdateManager = AppUpdateManager(appContext)
+    private val notificationManager = MessageNotificationManager(appContext)
     val updateStatus: StateFlow<UpdateStatus> = appUpdateManager.updateStatus
 
     private val sessionStateMutex = Mutex()
@@ -88,6 +91,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _lastShredProof = MutableStateFlow<ShredAuditProof?>(null)
     val lastShredProof: StateFlow<ShredAuditProof?> = _lastShredProof.asStateFlow()
+
+    private val notifiedMessageIds = Collections.synchronizedSet(LinkedHashSet<String>())
+    @Volatile
+    private var sessionInitializedAtMs: Long = System.currentTimeMillis()
+    @Volatile
+    private var isAppInForeground: Boolean = true
+    @Volatile
+    private var isLogsScreenOpen: Boolean = false
+    private val _pendingNotificationConversationId = MutableStateFlow<String?>(null)
 
     val inboxId: StateFlow<String?> = engine.state
         .map { (it as? XmtpEngineState.Ready)?.client?.inboxId }
@@ -332,9 +344,23 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     init {
+        notificationManager.ensureChannelCreated()
         viewModelScope.launch {
             repository.observeConversations().collectLatest { list ->
                 _conversations.value = list
+                val pendingId = _pendingNotificationConversationId.value
+                if (pendingId != null) {
+                    val matched = list.firstOrNull { it.id == pendingId }
+                    if (matched != null) {
+                        _pendingNotificationConversationId.value = null
+                        selectConversation(matched)
+                    }
+                }
+            }
+        }
+        viewModelScope.launch {
+            repository.incomingMessages.collect { incoming ->
+                handleIncomingMessageNotification(incoming)
             }
         }
         viewModelScope.launch {
@@ -421,6 +447,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         }
                         when (initState) {
                             is XmtpEngineState.Ready -> {
+                                sessionInitializedAtMs = System.currentTimeMillis()
                                 _lastShredProof.value = null
                                 _statusBanner.value = "Συνδέθηκε στο δίκτυο XMTP v4 (MLS) με SQLCipher."
                                 logAction("XMTP", "Connected to XMTP v4 MLS network with SQLCipher storage")
@@ -444,8 +471,118 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private val loggedMessageIds = Collections.synchronizedSet(mutableSetOf<String>())
 
+    private fun markMessageNotified(messageId: String) {
+        synchronized(notifiedMessageIds) {
+            if (notifiedMessageIds.size >= 512) {
+                val oldest = notifiedMessageIds.firstOrNull()
+                if (oldest != null) {
+                    notifiedMessageIds.remove(oldest)
+                }
+            }
+            notifiedMessageIds.add(messageId)
+        }
+    }
+
+    private fun handleIncomingMessageNotification(msg: DecodedMessage) {
+        val localInboxId = (engine.state.value as? XmtpEngineState.Ready)?.client?.inboxId
+        val sentAtMs = msg.sentAt?.time
+            ?: if (msg.sentAtNs > 0L) msg.sentAtNs / 1_000_000L else System.currentTimeMillis()
+        // Ignoramos mensajes historicos antiguos para evitar alertas repetidas al iniciar sesion.
+        if (sentAtMs < sessionInitializedAtMs - 60_000L) {
+            return
+        }
+
+        val alreadyNotified = synchronized(notifiedMessageIds) { msg.id in notifiedMessageIds }
+        val shouldNotify = MessageNotificationPolicy.shouldNotify(
+            messageId = msg.id,
+            conversationId = msg.conversationId,
+            senderInboxId = msg.senderInboxId,
+            localInboxId = localInboxId,
+            body = msg.body,
+            isAppInForeground = isAppInForeground,
+            activeConversationId = _selectedConversation.value?.id,
+            isLogsScreenOpen = isLogsScreenOpen,
+            alreadyNotified = alreadyNotified
+        )
+        if (!shouldNotify) return
+
+        markMessageNotified(msg.id)
+        val conv = _conversations.value.firstOrNull { it.id == msg.conversationId }
+        val explicitName = when (conv) {
+            is Conversation.Group -> {
+                val name = conv.group.name
+                when {
+                    name == "MLS Research Loopback" -> "Loopback MLS"
+                    name.isNotBlank() -> name
+                    else -> null
+                }
+            }
+            else -> null
+        }
+        val title = MessageNotificationPolicy.formatSenderTitle(explicitName, msg.senderInboxId)
+        val bodyPreview = MessageNotificationPolicy.formatBodyPreview(msg.body)
+        val posted = notificationManager.showIncomingMessageNotification(
+            conversationId = msg.conversationId,
+            title = title,
+            bodyPreview = bodyPreview,
+            timestampMs = sentAtMs
+        )
+        if (posted) {
+            logAction("NOTIF", "Priority notification dispatched [conv=${msg.conversationId.take(8)}...]")
+        }
+    }
+
+    fun onAppForegroundChanged(inForeground: Boolean) {
+        isAppInForeground = inForeground
+        if (inForeground && !isLogsScreenOpen) {
+            _selectedConversation.value?.id?.let { activeId ->
+                notificationManager.cancelConversationNotification(activeId)
+            }
+        }
+    }
+
+    fun onLogsScreenVisibilityChanged(isOpen: Boolean) {
+        isLogsScreenOpen = isOpen
+        if (!isOpen && isAppInForeground) {
+            _selectedConversation.value?.id?.let { activeId ->
+                notificationManager.cancelConversationNotification(activeId)
+            }
+        }
+    }
+
+    fun openConversationById(conversationId: String) {
+        if (conversationId.isBlank()) return
+        val existing = _conversations.value.firstOrNull { it.id == conversationId }
+        if (existing != null) {
+            _pendingNotificationConversationId.value = null
+            selectConversation(existing)
+        } else {
+            _pendingNotificationConversationId.value = conversationId
+        }
+    }
+
+    fun hasNotificationPermission(): Boolean = notificationManager.hasNotificationPermission()
+
+    fun openNotificationSettings() = notificationManager.openNotificationSettings()
+
+    fun onNotificationPermissionResult(granted: Boolean) {
+        if (granted) {
+            notificationManager.ensureChannelCreated()
+            logAction("NOTIF", "System priority notifications enabled")
+        } else {
+            logAction(
+                tag = "NOTIF",
+                message = "Notification permission denied — enable in Android Settings",
+                isError = true
+            )
+        }
+    }
+
     fun selectConversation(conversation: Conversation?) {
         _selectedConversation.value = conversation
+        if (conversation != null) {
+            notificationManager.cancelConversationNotification(conversation.id)
+        }
         messagesJob?.cancel()
         _messages.value = emptyList()
 
@@ -615,9 +752,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     committedProofMap.clear()
                     _verifiedMessageCount.value = 0
                     loggedMessageIds.clear()
+                    notifiedMessageIds.clear()
+                    _pendingNotificationConversationId.value = null
                     _actionLogs.value = emptyList()
                     ThesisTelemetry.clearTelemetryData()
                     ReportExporter.purgeCachedReports(appContext.cacheDir)
+                    notificationManager.cancelAllNotifications()
 
                     logAction("GDPR", "Executing GDPR Art. 17 cryptographic wipe...")
 

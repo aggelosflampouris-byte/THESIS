@@ -104,7 +104,7 @@ internal fun LogsTelemetryScreen(
         if (latencies.isNotEmpty()) latencies.average() else null
     }
     val timeFormat = remember { SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()) }
-    val filterTags = listOf("ALL", "METRIC", "E2EE", "MLS", "KEYSTORE", "SYNC", "BENCHMARK", "GDPR", "UPDATE")
+    val filterTags = listOf("ALL", "NOTIF", "METRIC", "E2EE", "MLS", "KEYSTORE", "SYNC", "BENCHMARK", "GDPR", "UPDATE")
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },

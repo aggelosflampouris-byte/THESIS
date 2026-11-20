@@ -1,12 +1,16 @@
 package com.example.thesis
 
+import android.Manifest
 import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -47,6 +51,7 @@ import com.example.thesis.ui.screens.MessagingConnectionError
 import com.example.thesis.ui.screens.MessagingLoadingScreen
 import com.example.thesis.ui.screens.MessagingStartScreen
 import com.example.thesis.ui.theme.ThesisTheme
+import com.example.thesis.notifications.MessageNotificationManager
 import com.example.thesis.ui.util.ReportExporter
 import com.example.thesis.ui.util.copyToClipboard
 import com.example.thesis.updater.UpdateConfig
@@ -61,10 +66,35 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        handleNotificationIntent(intent)
         setContent {
             ThesisTheme {
                 ThesisMessagingApp(viewModel = viewModel)
             }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        viewModel.onAppForegroundChanged(true)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        viewModel.onAppForegroundChanged(false)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleNotificationIntent(intent)
+    }
+
+    private fun handleNotificationIntent(intent: Intent?) {
+        val conversationId = intent?.getStringExtra(MessageNotificationManager.EXTRA_CONVERSATION_ID)
+        if (!conversationId.isNullOrBlank()) {
+            viewModel.openConversationById(conversationId)
+            intent.removeExtra(MessageNotificationManager.EXTRA_CONVERSATION_ID)
         }
     }
 }
@@ -159,6 +189,28 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
         }
     }
 
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        viewModel.onNotificationPermissionResult(granted)
+    }
+
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !viewModel.hasNotificationPermission()) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    LaunchedEffect(showLogsScreen) {
+        viewModel.onLogsScreenVisibilityChanged(showLogsScreen)
+    }
+
+    LaunchedEffect(selectedConversation) {
+        if (selectedConversation != null && showLogsScreen) {
+            showLogsScreen = false
+        }
+    }
+
     LaunchedEffect(statusBanner) {
         statusBanner?.let { message ->
             snackbarHostState.showSnackbar(messagingStatusText(message))
@@ -190,7 +242,9 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
             inboxId = inboxId,
             currentVersion = viewModel.getCurrentVersionName(),
             isCheckingUpdate = updateStatus is UpdateStatus.Checking,
+            notificationsEnabled = viewModel.hasNotificationPermission(),
             onCheckForUpdates = { viewModel.checkForUpdates(manual = true) },
+            onOpenNotificationSettings = { viewModel.openNotificationSettings() },
             onCopyAddress = {
                 walletAddress?.let { addr ->
                     copyToClipboard(context, "Ethereum Address", addr)

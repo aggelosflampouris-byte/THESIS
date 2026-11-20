@@ -735,4 +735,50 @@ class ConversationRepositoryTest {
         )
         parentScope.cancel()
     }
+
+    @Test
+    fun test_incomingMessages_emitsDisplayableUserMessagesAndSkipsGroupUpdated() = runTest(testDispatcher) {
+        val allMessagesStream = MutableSharedFlow<DecodedMessage>()
+        every { mockConversations.streamAllMessages() } returns allMessagesStream
+
+        val sysMsg = mockk<DecodedMessage>(relaxed = true)
+        every { sysMsg.id } returns "sys_notif_skip"
+        every { sysMsg.conversationId } returns testConvId
+        every { sysMsg.encodedContent.type } returns ContentTypeGroupUpdated
+        every { sysMsg.body } returns testPeerAddress
+
+        val userMsg = mockk<DecodedMessage>(relaxed = true)
+        every { userMsg.id } returns "user_notif_1"
+        every { userMsg.conversationId } returns testConvId
+        every { userMsg.senderInboxId } returns testPeerAddress
+        every { userMsg.encodedContent.type } returns ContentTypeText
+        every { userMsg.content<Any>() } returns "Priority ping!"
+        every { userMsg.body } returns "Priority ping!"
+        every { userMsg.sentAt } returns Date(9000L)
+
+        val repoScope = CoroutineScope(SupervisorJob() + testDispatcher)
+        val repo = ConversationRepository(
+            engine = mockEngine,
+            repositoryScope = repoScope,
+            ioDispatcher = testDispatcher,
+            syncIntervalMs = 5_000L
+        )
+        try {
+            repo.incomingMessages.test {
+                testScheduler.runCurrent()
+
+                allMessagesStream.emit(sysMsg)
+                allMessagesStream.emit(userMsg)
+                testScheduler.runCurrent()
+
+                val emitted = awaitItem()
+                assertEquals("user_notif_1", emitted.id)
+                assertEquals("Priority ping!", emitted.body)
+                cancelAndIgnoreRemainingEvents()
+            }
+        } finally {
+            repoScope.cancel()
+            repo.close()
+        }
+    }
 }

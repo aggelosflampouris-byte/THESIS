@@ -128,7 +128,9 @@ internal fun IdentityDetailsDialog(
     inboxId: String?,
     currentVersion: String,
     isCheckingUpdate: Boolean = false,
+    notificationsEnabled: Boolean = true,
     onCheckForUpdates: () -> Unit = {},
+    onOpenNotificationSettings: () -> Unit = {},
     onCopyAddress: () -> Unit,
     onCopyInboxId: () -> Unit,
     onDismiss: () -> Unit
@@ -207,6 +209,21 @@ internal fun IdentityDetailsDialog(
                     )
                     TextButton(onClick = onCheckForUpdates, enabled = !isCheckingUpdate) {
                         Text(if (isCheckingUpdate) "Έλεγχος..." else "Έλεγχος Ενημερώσεων", fontSize = 12.sp)
+                    }
+                }
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = if (notificationsEnabled) "Ειδοποιήσεις: Ενεργές" else "Ειδοποιήσεις: Ανενεργές",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (notificationsEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                        modifier = Modifier.align(Alignment.CenterVertically)
+                    )
+                    TextButton(onClick = onOpenNotificationSettings) {
+                        Text("Ρυθμίσεις", fontSize = 12.sp)
                     }
                 }
             }

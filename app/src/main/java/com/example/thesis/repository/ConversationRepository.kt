@@ -20,6 +20,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
@@ -128,6 +129,13 @@ class ConversationRepository(
         onBufferOverflow = BufferOverflow.DROP_OLDEST
     )
 
+    // Bus compartido para despachar notificaciones de prioridad de mensajes nuevos sin acoplar UI a gRPC.
+    private val _incomingMessages = MutableSharedFlow<DecodedMessage>(
+        extraBufferCapacity = CHANNEL_BUFFER_CAPACITY,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+    val incomingMessages: SharedFlow<DecodedMessage> = _incomingMessages.asSharedFlow()
+
     /**
      * Cache of active hot message streams per conversation ID to prevent duplicate gRPC network streams.
      */
@@ -149,6 +157,7 @@ class ConversationRepository(
                         try {
                             client.conversations.streamAllMessages().collect { msg ->
                                 if (!msg.isDisplayableUserMessage()) return@collect
+                                _incomingMessages.tryEmit(msg)
                                 messageRefreshTrigger.emit(msg.conversationId)
                             }
                         } catch (e: CancellationException) {
@@ -282,6 +291,7 @@ class ConversationRepository(
                         currentList[existingIndex] = newConv
                     } else {
                         currentList.add(0, newConv)
+                        launch { emitLatestDisplayableMessage(newConv) }
                     }
                 } else {
                     val refreshed = fetchConversationsWithConsent(client)
@@ -300,9 +310,16 @@ class ConversationRepository(
                     try {
                         val refreshed = fetchConversationsWithConsent(client)
                         if (refreshed.size != currentList.size || refreshed.map { it.id } != currentList.map { it.id }) {
+                            val existingIds = currentList.map { it.id }.toSet()
                             currentList.clear()
                             currentList.addAll(refreshed)
                             send(currentList.toList())
+                            val newlyDiscovered = refreshed.filter { it.id !in existingIds }
+                            if (newlyDiscovered.isNotEmpty()) {
+                                launch {
+                                    newlyDiscovered.forEach { emitLatestDisplayableMessage(it) }
+                                }
+                            }
                         }
                     } catch (e: CancellationException) {
                         throw e
@@ -592,10 +609,14 @@ class ConversationRepository(
                 val latest = fetchMessagesSafely(conversation)
 
                 val filteredLatest = latest.filter { it.isDisplayableUserMessage() }
+                val newlySyncedMessages = mutableListOf<DecodedMessage>()
                 val updatedSnapshot = synchronized(mapLock) {
                     var hasChanges = filteredLatest.size != messageMap.size
                     filteredLatest.forEach { msg ->
                         val prev = messageMap[msg.id]
+                        if (prev == null) {
+                            newlySyncedMessages.add(msg)
+                        }
                         if (prev != msg) {
                             messageMap[msg.id] = msg
                             hasChanges = true
@@ -603,6 +624,7 @@ class ConversationRepository(
                     }
                     if (hasChanges) getSortedListLocked() else null
                 }
+                newlySyncedMessages.forEach { _incomingMessages.tryEmit(it) }
                 if (updatedSnapshot != null) {
                     trySend(updatedSnapshot)
                 }
@@ -618,6 +640,7 @@ class ConversationRepository(
                 try {
                     conversation.streamMessages().collect { incoming ->
                         if (!incoming.isDisplayableUserMessage()) return@collect
+                        _incomingMessages.tryEmit(incoming)
                         Log.i(TAG, "RX COMMITTED [conversation=REDACTED]")
                         val streamSnapshot = synchronized(mapLock) {
                             messageMap[incoming.id] = incoming
@@ -764,6 +787,15 @@ class ConversationRepository(
             conversation = client.conversations.findConversation(conversationId)
         }
         return conversation ?: throw NoSuchElementException("Conversation not found for ID: $conversationId")
+    }
+
+    private suspend fun emitLatestDisplayableMessage(conversation: Conversation) {
+        val latest = fetchMessagesSafely(conversation)
+            .filter { it.isDisplayableUserMessage() }
+            .maxByOrNull { it.sentAt?.time ?: (it.sentAtNs / 1_000_000L) }
+        if (latest != null) {
+            _incomingMessages.tryEmit(latest)
+        }
     }
 
     private suspend fun fetchMessagesSafely(conversation: Conversation): List<DecodedMessage> {
