@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -14,17 +15,19 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -33,7 +36,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -49,7 +51,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.thesis.updater.UpdateStatus
 import com.example.thesis.xmtp.XmtpEngineState
 import org.xmtp.android.library.Conversation
 import java.util.Locale
@@ -62,10 +63,8 @@ internal fun MessagingTopBar(
     engineState: XmtpEngineState,
     isSyncing: Boolean,
     isShredding: Boolean = false,
-    updateStatus: UpdateStatus = UpdateStatus.Idle,
     onBack: () -> Unit,
     onSync: () -> Unit,
-    onOpenUpdate: () -> Unit = {},
     onOpenIdentity: () -> Unit,
     onOpenShred: () -> Unit,
     onOpenLogs: () -> Unit = {},
@@ -116,32 +115,22 @@ internal fun MessagingTopBar(
                 }
             } else {
                 Column {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = "XMTP v4 (MLS)",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Surface(
-                            shape = RoundedCornerShape(4.dp),
-                            color = MaterialTheme.colorScheme.primaryContainer
-                        ) {
-                            Text(
-                                text = "SQLCipher",
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer
-                            )
-                        }
-                    }
-                    walletAddress?.let { address ->
-                        Text(
-                            text = "ID: ${address.take(8)}...${address.takeLast(6)}",
-                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+                    Text(
+                        text = "XMTP v4 (MLS)",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = walletAddress?.let { "ID: ${it.take(8)}...${it.takeLast(4)}" } ?: "SQLCipher • RFC 9420",
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = if (walletAddress != null) FontFamily.Monospace else FontFamily.Default
+                        ),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
             }
         },
@@ -176,6 +165,7 @@ internal fun MessagingTopBar(
                     Icon(Icons.AutoMirrored.Filled.List, contentDescription = "Logs & Telemetry")
                 }
             } else {
+                // Limitamos la barra superior a tres IconButtons compactos para evitar recortes del titulo en pantallas estrechas.
                 if (engineState is XmtpEngineState.Ready) {
                     val rotation by animateFloatAsState(
                         targetValue = if (isSyncing) 360f else 0f,
@@ -190,28 +180,27 @@ internal fun MessagingTopBar(
                     }
                 }
 
-                if (updateStatus is UpdateStatus.UpdateAvailable) {
-                    Button(
-                        onClick = onOpenUpdate,
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                    ) {
-                        Text("Update v${updateStatus.updateInfo.latestVersion}", fontSize = 11.sp)
-                    }
-                }
-
                 if (walletAddress != null) {
-                    TextButton(onClick = onOpenIdentity) {
-                        Text("Ταυτότητα", fontSize = 12.sp)
+                    IconButton(onClick = onOpenIdentity) {
+                        Icon(
+                            imageVector = Icons.Default.AccountCircle,
+                            contentDescription = "Ταυτότητα"
+                        )
                     }
 
-                    Button(
+                    IconButton(
                         onClick = onOpenShred,
-                        enabled = !isShredding,
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                        enabled = !isShredding
                     ) {
-                        Text("GDPR Shred", fontSize = 12.sp)
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = "GDPR Shred",
+                            tint = if (isShredding) {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            } else {
+                                MaterialTheme.colorScheme.error
+                            }
+                        )
                     }
                 }
             }
@@ -220,6 +209,57 @@ internal fun MessagingTopBar(
             containerColor = MaterialTheme.colorScheme.surface
         )
     )
+}
+
+@Composable
+internal fun UpdateAvailableBanner(
+    latestVersion: String,
+    onOpenUpdate: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier.fillMaxWidth(),
+        contentAlignment = Alignment.Center
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .widthIn(max = 640.dp)
+                .padding(horizontal = 16.dp, vertical = 4.dp),
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.primaryContainer
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Refresh,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+                Text(
+                    text = "Διαθέσιμη νέα έκδοση v$latestVersion",
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Button(
+                    onClick = onOpenUpdate,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text("Ενημέρωση", fontSize = 11.sp, maxLines = 1)
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -255,7 +295,10 @@ internal fun SecurityEngineStatusCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Box(
                         modifier = Modifier
                             .size(8.dp)
@@ -278,9 +321,13 @@ internal fun SecurityEngineStatusCard(
                             is XmtpEngineState.Idle -> "Ανενεργό"
                         },
                         style = MaterialTheme.typography.labelMedium,
-                        fontWeight = FontWeight.SemiBold
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
+
+                Spacer(modifier = Modifier.width(8.dp))
 
                 Surface(
                     shape = RoundedCornerShape(4.dp),
@@ -291,20 +338,22 @@ internal fun SecurityEngineStatusCard(
                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary,
-                        fontSize = 10.sp
+                        fontSize = 10.sp,
+                        maxLines = 1
                     )
                 }
             }
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            Row(
+            FlowRow(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                StatusBadge(icon = Icons.Default.Lock, text = "SQLCipher 4.6.1", modifier = Modifier.weight(1f))
-                StatusBadge(icon = Icons.Default.Build, text = "Keystore KEK", modifier = Modifier.weight(1f))
-                StatusBadge(icon = Icons.Default.Refresh, text = "MLS Ratchet", modifier = Modifier.weight(1f))
+                StatusBadge(icon = Icons.Default.Lock, text = "SQLCipher 4.6.1")
+                StatusBadge(icon = Icons.Default.Build, text = "Keystore KEK")
+                StatusBadge(icon = Icons.Default.Refresh, text = "MLS Ratchet")
             }
         }
     }
@@ -318,7 +367,7 @@ private fun StatusBadge(icon: ImageVector, text: String, modifier: Modifier = Mo
         color = MaterialTheme.colorScheme.surface
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center
         ) {

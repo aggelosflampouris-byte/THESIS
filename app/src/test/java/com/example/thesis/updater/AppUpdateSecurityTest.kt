@@ -122,4 +122,15 @@ class AppUpdateSecurityTest {
             manager.updateStatus.value is UpdateStatus.Error
         )
     }
+
+    @Test
+    fun test_latestApkDownloadUrl_passesHttpsAllowlistValidation() {
+        val apkUrl = AppUpdateManager.validateUpdateUrl(UpdateConfig.LATEST_APK_DOWNLOAD_URL)
+        assertEquals("https", apkUrl.protocol)
+        assertEquals("github.com", apkUrl.host)
+
+        val pageUrl = AppUpdateManager.validateUpdateUrl(UpdateConfig.LATEST_RELEASE_PAGE_URL)
+        assertEquals("https", pageUrl.protocol)
+        assertEquals("github.com", pageUrl.host)
+    }
 }

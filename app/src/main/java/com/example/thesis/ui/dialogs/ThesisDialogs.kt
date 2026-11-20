@@ -2,6 +2,7 @@ package com.example.thesis.ui.dialogs
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -12,8 +13,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.CheckCircle
@@ -69,7 +70,12 @@ internal fun NewConversationDialog(
         onDismissRequest = onDismiss,
         title = { Text("Νέα Συνομιλία MLS") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
                 Text("Εισάγετε ταυτότητα παραλήπτη:")
 
                 OutlinedTextField(
@@ -87,18 +93,19 @@ internal fun NewConversationDialog(
                             Text("Υποστηρίζονται διευθύνσεις Ethereum (0x...) και XMTP Inbox IDs.", fontSize = 10.sp)
                         }
                     },
-                    trailingIcon = {
-                        TextButton(onClick = {
-                            readClipboardText(context)?.let { peerInput = it.trim() }
-                        }) {
-                            Text("Επικόλληση", fontSize = 11.sp)
-                        }
-                    },
                     keyboardOptions = KeyboardOptions(
                         keyboardType = KeyboardType.Ascii,
                         imeAction = ImeAction.Done
                     )
                 )
+
+                // Sacamos el boton de pegado fuera del campo para aprovechar todo el ancho en direcciones hexadecimales largas.
+                OutlinedButton(
+                    onClick = { readClipboardText(context)?.let { peerInput = it.trim() } },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Επικόλληση από πρόχειρο", fontSize = 12.sp)
+                }
             }
         },
         confirmButton = {
@@ -119,7 +126,7 @@ internal fun NewConversationDialog(
 internal fun IdentityDetailsDialog(
     address: String?,
     inboxId: String?,
-    currentVersion: String = "1.0.5",
+    currentVersion: String,
     isCheckingUpdate: Boolean = false,
     onCheckForUpdates: () -> Unit = {},
     onCopyAddress: () -> Unit,
@@ -130,16 +137,28 @@ internal fun IdentityDetailsDialog(
         onDismissRequest = onDismiss,
         title = { Text("Ταυτότητα και Ασφάλεια") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
                 Text("Κατάσταση: Δοκιμαστική ταυτότητα SECP256K1")
                 Text("Δίκτυο: XMTP DEV Network (MLS Protocol)", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 address?.let {
                     Text("Διεύθυνση Πορτοφολιού (Ethereum)", style = MaterialTheme.typography.labelMedium)
-                    Text(
-                        it,
-                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                    ) {
+                        Text(
+                            text = it,
+                            modifier = Modifier.padding(10.dp),
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                     OutlinedButton(onClick = onCopyAddress, modifier = Modifier.fillMaxWidth()) {
                         Text("Αντιγραφή Διεύθυνσης")
                     }
@@ -147,11 +166,18 @@ internal fun IdentityDetailsDialog(
 
                 inboxId?.let {
                     Text("XMTP Inbox ID (MLS Ledger)", style = MaterialTheme.typography.labelMedium)
-                    Text(
-                        it,
-                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                    ) {
+                        Text(
+                            text = it,
+                            modifier = Modifier.padding(10.dp),
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                     OutlinedButton(onClick = onCopyInboxId, modifier = Modifier.fillMaxWidth()) {
                         Text("Αντιγραφή Inbox ID")
                     }
@@ -169,12 +195,16 @@ internal fun IdentityDetailsDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 HorizontalDivider()
-                Row(
+                FlowRow(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Text("Έκδοση: v$currentVersion", style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        text = "Έκδοση: v$currentVersion",
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.align(Alignment.CenterVertically)
+                    )
                     TextButton(onClick = onCheckForUpdates, enabled = !isCheckingUpdate) {
                         Text(if (isCheckingUpdate) "Έλεγχος..." else "Έλεγχος Ενημερώσεων", fontSize = 12.sp)
                     }
@@ -196,9 +226,15 @@ internal fun GDPRShredConfirmationDialog(
         onDismissRequest = onDismiss,
         title = { Text("Οριστική Διαγραφή (GDPR Art. 17)") },
         text = {
-            Text(
-                "Αυτή η ενέργεια θα καταστρέψει μόνιμα το κλειδί στο Hardware Keystore και θα διαγράψει τη βάση δεδομένων SQLCipher.\n\nΔεν υπάρχει δυνατότητα ανάκτησης."
-            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(
+                    "Αυτή η ενέργεια θα καταστρέψει μόνιμα το κλειδί στο Hardware Keystore και θα διαγράψει τη βάση δεδομένων SQLCipher.\n\nΔεν υπάρχει δυνατότητα ανάκτησης."
+                )
+            }
         },
         confirmButton = {
             TextButton(onClick = onConfirmShred) {
@@ -241,6 +277,7 @@ internal fun MLSProtocolInspectorDialog(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
                     .padding(vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -300,10 +337,9 @@ internal fun MLSProtocolInspectorDialog(
 
 @Composable
 private fun InspectorParamRow(label: String, value: String) {
-    Row(
+    Column(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
+        verticalArrangement = Arrangement.spacedBy(2.dp)
     ) {
         Text(
             text = label,
@@ -315,7 +351,7 @@ private fun InspectorParamRow(label: String, value: String) {
             text = value,
             style = MaterialTheme.typography.labelMedium,
             fontWeight = FontWeight.SemiBold,
-            fontSize = 11.sp
+            fontSize = 12.sp
         )
     }
 }
@@ -350,12 +386,14 @@ internal fun AppUpdateDialog(
                 },
                 text = {
                     Column(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Row(
+                        FlowRow(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Surface(
                                 shape = RoundedCornerShape(12.dp),
@@ -367,7 +405,13 @@ internal fun AppUpdateDialog(
                                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
                                 )
                             }
-                            Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                                contentDescription = null,
+                                modifier = Modifier
+                                    .size(14.dp)
+                                    .align(Alignment.CenterVertically)
+                            )
                             Surface(
                                 shape = RoundedCornerShape(12.dp),
                                 color = MaterialTheme.colorScheme.primaryContainer
@@ -446,7 +490,9 @@ internal fun AppUpdateDialog(
                 title = { Text("Λήψη Ενημέρωσης v${info.latestVersion}") },
                 text = {
                     Column(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         LinearProgressIndicator(
@@ -499,7 +545,12 @@ internal fun AppUpdateDialog(
                 },
                 title = { Text("Η Λήψη Ολοκληρώθηκε!") },
                 text = {
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         Text("Το πακέτο v${info.latestVersion} είναι έτοιμο για εγκατάσταση.")
                         if (!canRequestInstall) {
                             Text(
@@ -533,7 +584,15 @@ internal fun AppUpdateDialog(
             AlertDialog(
                 onDismissRequest = onDismiss,
                 title = { Text("Σφάλμα Ενημέρωσης") },
-                text = { Text(updateStatus.message) },
+                text = {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState())
+                    ) {
+                        Text(updateStatus.message)
+                    }
+                },
                 confirmButton = {
                     TextButton(onClick = onDismiss) {
                         Text("Εντάξει")

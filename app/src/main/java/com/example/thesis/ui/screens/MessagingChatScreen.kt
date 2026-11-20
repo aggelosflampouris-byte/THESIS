@@ -2,10 +2,12 @@ package com.example.thesis.ui.screens
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -38,6 +40,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.xmtp.android.library.libxmtp.DecodedMessage
@@ -66,106 +70,125 @@ internal fun MessagingChatScreen(
         }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .imePadding()
-            .padding(horizontal = 14.dp, vertical = 6.dp)
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.TopCenter
     ) {
-        if (messages.isEmpty()) {
-            Box(
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .widthIn(max = 680.dp)
+                .imePadding()
+        ) {
+            BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f),
-                contentAlignment = Alignment.Center
+                    .weight(1f)
+                    .padding(horizontal = 12.dp)
             ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        text = "Δεν υπάρχουν μηνύματα",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    OutlinedButton(
-                        onClick = onSync,
-                        enabled = !isSyncing
+                val maxBubbleWidth = minOf(maxWidth * 0.82f, 360.dp)
+
+                if (messages.isEmpty()) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Refresh,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = if (isSyncing) "Συγχρονισμός..." else "Συγχρονισμός",
-                            fontSize = 12.sp
-                        )
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = "Δεν υπάρχουν μηνύματα",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            OutlinedButton(
+                                onClick = onSync,
+                                enabled = !isSyncing
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = if (isSyncing) "Συγχρονισμός..." else "Συγχρονισμός",
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(
+                            messages,
+                            key = { it.id }
+                        ) { message ->
+                            MessagingMessageBubble(
+                                message = message,
+                                isOwnMessage = message.senderInboxId == localInboxId,
+                                maxBubbleWidth = maxBubbleWidth,
+                                retryEnabled = !isSending && !isShredding,
+                                onRetry = { onRetryMessage(message.body) }
+                            )
+                        }
                     }
                 }
             }
-        } else {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                contentPadding = PaddingValues(vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(
-                    messages,
-                    key = { it.id }
-                ) { message ->
-                    MessagingMessageBubble(
-                        message = message,
-                        isOwnMessage = message.senderInboxId == localInboxId,
-                        retryEnabled = !isSending && !isShredding,
-                        onRetry = { onRetryMessage(message.body) }
-                    )
-                }
-            }
-        }
 
-        Spacer(modifier = Modifier.height(6.dp))
-
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 2.dp),
-            verticalAlignment = Alignment.Bottom
-        ) {
-            OutlinedTextField(
-                value = draft,
-                onValueChange = onDraftChange,
-                placeholder = { Text("Γράψτε μήνυμα...", fontSize = 13.sp) },
-                modifier = Modifier.weight(1f),
-                maxLines = 4,
-                keyboardOptions = KeyboardOptions(
-                    keyboardType = KeyboardType.Text,
-                    imeAction = ImeAction.Default
-                ),
-                enabled = !isSending && !isShredding,
-                shape = RoundedCornerShape(20.dp)
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            IconButton(
-                onClick = {
-                    val content = draft.trim()
-                    if (content.isNotEmpty()) onSendMessage(content)
-                },
-                enabled = draft.isNotBlank() && !isSending && !isShredding
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                tonalElevation = 2.dp
             ) {
-                if (isSending) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.Bottom
+                ) {
+                    OutlinedTextField(
+                        value = draft,
+                        onValueChange = onDraftChange,
+                        placeholder = { Text("Γράψτε μήνυμα...", fontSize = 13.sp) },
+                        modifier = Modifier.weight(1f),
+                        maxLines = 4,
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Text,
+                            imeAction = ImeAction.Default
+                        ),
+                        enabled = !isSending && !isShredding,
+                        shape = RoundedCornerShape(20.dp)
                     )
-                } else {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.Send,
-                        contentDescription = "Αποστολή",
-                        tint = if (draft.isNotBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    IconButton(
+                        onClick = {
+                            val content = draft.trim()
+                            if (content.isNotEmpty()) onSendMessage(content)
+                        },
+                        enabled = draft.isNotBlank() && !isSending && !isShredding,
+                        modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                    ) {
+                        if (isSending) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(20.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Send,
+                                contentDescription = "Αποστολή",
+                                tint = if (draft.isNotBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -176,6 +199,7 @@ internal fun MessagingChatScreen(
 private fun MessagingMessageBubble(
     message: DecodedMessage,
     isOwnMessage: Boolean,
+    maxBubbleWidth: Dp,
     retryEnabled: Boolean = true,
     onRetry: () -> Unit
 ) {
@@ -190,13 +214,18 @@ private fun MessagingMessageBubble(
         DecodedMessage.MessageDeliveryStatus.ALL -> null
     }
     val isFailed = message.deliveryStatus == DecodedMessage.MessageDeliveryStatus.FAILED
+    val contentColor = if (isOwnMessage) {
+        MaterialTheme.colorScheme.onPrimaryContainer
+    } else {
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
 
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = if (isOwnMessage) Alignment.End else Alignment.Start
     ) {
         Surface(
-            modifier = Modifier.widthIn(min = 60.dp, max = 340.dp),
+            modifier = Modifier.widthIn(min = 60.dp, max = maxBubbleWidth),
             shape = RoundedCornerShape(
                 topStart = 16.dp,
                 topEnd = 16.dp,
@@ -209,31 +238,31 @@ private fun MessagingMessageBubble(
             Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                 Text(
                     text = message.body,
-                    style = MaterialTheme.typography.bodyLarge
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = contentColor
                 )
                 if (isOwnMessage && status != null) {
                     Spacer(Modifier.height(4.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(
-                            timeLabel,
+                            text = timeLabel,
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = contentColor.copy(alpha = 0.75f),
                             fontSize = 10.sp
                         )
                         Text(
-                            status,
+                            text = status,
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (isFailed) MaterialTheme.colorScheme.error
-                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = if (isFailed) MaterialTheme.colorScheme.error else contentColor.copy(alpha = 0.75f),
                             fontSize = 10.sp
                         )
                     }
                 } else {
                     Spacer(Modifier.height(4.dp))
                     Text(
-                        timeLabel,
+                        text = timeLabel,
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = contentColor.copy(alpha = 0.75f),
                         fontSize = 10.sp
                     )
                 }

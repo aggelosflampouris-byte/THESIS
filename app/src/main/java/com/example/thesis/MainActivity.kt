@@ -1,13 +1,21 @@
 package com.example.thesis
 
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -24,6 +32,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import com.example.thesis.ui.ChatViewModel
 import com.example.thesis.ui.components.MessagingTopBar
+import com.example.thesis.ui.components.QrDownloadFullDialog
+import com.example.thesis.ui.components.UpdateAvailableBanner
 import com.example.thesis.ui.components.messagingStatusText
 import com.example.thesis.ui.dialogs.AppUpdateDialog
 import com.example.thesis.ui.dialogs.GDPRShredConfirmationDialog
@@ -38,6 +48,7 @@ import com.example.thesis.ui.screens.MessagingLoadingScreen
 import com.example.thesis.ui.screens.MessagingStartScreen
 import com.example.thesis.ui.theme.ThesisTheme
 import com.example.thesis.ui.util.copyToClipboard
+import com.example.thesis.updater.UpdateConfig
 import com.example.thesis.updater.UpdateStatus
 import com.example.thesis.xmtp.XmtpEngineState
 import kotlinx.coroutines.launch
@@ -48,6 +59,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         setContent {
             ThesisTheme {
                 ThesisMessagingApp(viewModel = viewModel)
@@ -81,6 +93,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     var showShredConfirmationDialog by rememberSaveable { mutableStateOf(false) }
     var showLogsScreen by rememberSaveable { mutableStateOf(false) }
     var showProtocolInspectorDialog by rememberSaveable { mutableStateOf(false) }
+    var showQrDownloadDialog by rememberSaveable { mutableStateOf(false) }
 
     var draft by rememberSaveable(selectedConversation?.id) { mutableStateOf("") }
 
@@ -104,6 +117,28 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
         copyToClipboard(context, "Benchmark Report", report)
         scope.launch {
             snackbarHostState.showSnackbar("Η αναφορά Benchmark αντιγράφηκε στο πρόχειρο (Markdown & CSV)")
+        }
+    }
+
+    val onCopyDownloadUrl: () -> Unit = {
+        copyToClipboard(
+            context = context,
+            label = "Latest APK URL",
+            text = UpdateConfig.LATEST_APK_DOWNLOAD_URL,
+            sensitive = false
+        )
+        scope.launch {
+            snackbarHostState.showSnackbar("Ο σύνδεσμος λήψης αντιγράφηκε στο πρόχειρο")
+        }
+    }
+
+    val onOpenDownloadUrl: () -> Unit = {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(UpdateConfig.LATEST_APK_DOWNLOAD_URL))
+        val launched = runCatching { context.startActivity(intent) }.isSuccess
+        if (!launched) {
+            scope.launch {
+                snackbarHostState.showSnackbar("Δεν βρέθηκε πρόγραμμα περιήγησης για άνοιγμα του συνδέσμου")
+            }
         }
     }
 
@@ -169,6 +204,16 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
         )
     }
 
+    if (showQrDownloadDialog) {
+        QrDownloadFullDialog(
+            currentVersion = viewModel.getCurrentVersionName(),
+            updateStatus = updateStatus,
+            onCopyUrl = onCopyDownloadUrl,
+            onOpenDownloadUrl = onOpenDownloadUrl,
+            onDismiss = { showQrDownloadDialog = false }
+        )
+    }
+
     if (showShredConfirmationDialog) {
         GDPRShredConfirmationDialog(
             onDismiss = { showShredConfirmationDialog = false },
@@ -211,6 +256,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     } else {
         Scaffold(
             snackbarHost = { SnackbarHost(snackbarHostState) },
+            contentWindowInsets = WindowInsets.safeDrawing,
             topBar = {
                 MessagingTopBar(
                     selectedConversation = selectedConversation,
@@ -218,10 +264,8 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                     engineState = engineState,
                     isSyncing = isSyncing,
                     isShredding = isShredding,
-                    updateStatus = updateStatus,
                     onBack = { viewModel.selectConversation(null) },
                     onSync = { viewModel.syncConversations() },
-                    onOpenUpdate = { showUpdateDialog = true },
                     onOpenIdentity = { showIdentityDialog = true },
                     onOpenShred = { showShredConfirmationDialog = true },
                     onOpenLogs = { showLogsScreen = true },
@@ -229,60 +273,83 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                 )
             }
         ) { padding ->
-            Box(
+            // Consumimos los insets del Scaffold para que imePadding() en el chat no duplique el margen inferior.
+            Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding)
+                    .consumeWindowInsets(padding)
             ) {
-                when (val state = engineState) {
-                    is XmtpEngineState.Idle -> {
-                        MessagingStartScreen(onStart = { viewModel.initializeSession() })
-                    }
-                    is XmtpEngineState.Loading -> {
-                        MessagingLoadingScreen()
-                    }
-                    is XmtpEngineState.Error -> {
-                        MessagingConnectionError(
-                            state = state,
-                            onRetry = { viewModel.initializeSession() }
-                        )
-                    }
-                    is XmtpEngineState.Ready -> {
-                        if (selectedConversation != null) {
-                            MessagingChatScreen(
-                                messages = messages,
-                                localInboxId = state.client.inboxId,
-                                draft = draft,
-                                isSending = isSending,
-                                isSyncing = isSyncing,
-                                isShredding = isShredding,
-                                onSync = { viewModel.syncConversations() },
-                                onDraftChange = { draft = it },
-                                onSendMessage = { text ->
-                                    draft = ""
-                                    viewModel.sendMessage(
-                                        text = text,
-                                        onFailureRestore = {
-                                            if (draft.isBlank()) draft = text
-                                        }
-                                    )
-                                },
-                                onRetryMessage = { body ->
-                                    viewModel.sendMessage(body)
-                                }
+                val availableUpdate = updateStatus as? UpdateStatus.UpdateAvailable
+                if (selectedConversation == null && availableUpdate != null) {
+                    UpdateAvailableBanner(
+                        latestVersion = availableUpdate.updateInfo.latestVersion,
+                        onOpenUpdate = { showUpdateDialog = true }
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                ) {
+                    when (val state = engineState) {
+                        is XmtpEngineState.Idle -> {
+                            MessagingStartScreen(
+                                onStart = { viewModel.initializeSession() },
+                                onOpenQrDownload = { showQrDownloadDialog = true }
                             )
-                        } else {
-                            InboxDashboardScreen(
-                                conversations = conversations,
-                                engineState = engineState,
-                                isCreatingConversation = isCreatingConversation,
-                                isShredding = isShredding,
-                                actionLogs = actionLogs,
-                                onOpenLogs = { showLogsScreen = true },
-                                onNewConversation = { showNewConversationDialog = true },
-                                onStartLoopback = { viewModel.startSelfConversation() },
-                                onSelectConversation = { conv -> viewModel.selectConversation(conv) }
+                        }
+                        is XmtpEngineState.Loading -> {
+                            MessagingLoadingScreen()
+                        }
+                        is XmtpEngineState.Error -> {
+                            MessagingConnectionError(
+                                state = state,
+                                onRetry = { viewModel.initializeSession() }
                             )
+                        }
+                        is XmtpEngineState.Ready -> {
+                            if (selectedConversation != null) {
+                                MessagingChatScreen(
+                                    messages = messages,
+                                    localInboxId = state.client.inboxId,
+                                    draft = draft,
+                                    isSending = isSending,
+                                    isSyncing = isSyncing,
+                                    isShredding = isShredding,
+                                    onSync = { viewModel.syncConversations() },
+                                    onDraftChange = { draft = it },
+                                    onSendMessage = { text ->
+                                        draft = ""
+                                        viewModel.sendMessage(
+                                            text = text,
+                                            onFailureRestore = {
+                                                if (draft.isBlank()) draft = text
+                                            }
+                                        )
+                                    },
+                                    onRetryMessage = { body ->
+                                        viewModel.sendMessage(body)
+                                    }
+                                )
+                            } else {
+                                InboxDashboardScreen(
+                                    conversations = conversations,
+                                    engineState = engineState,
+                                    isCreatingConversation = isCreatingConversation,
+                                    isShredding = isShredding,
+                                    actionLogs = actionLogs,
+                                    currentVersion = viewModel.getCurrentVersionName(),
+                                    updateStatus = updateStatus,
+                                    onOpenLogs = { showLogsScreen = true },
+                                    onNewConversation = { showNewConversationDialog = true },
+                                    onStartLoopback = { viewModel.startSelfConversation() },
+                                    onSelectConversation = { conv -> viewModel.selectConversation(conv) },
+                                    onCopyDownloadUrl = onCopyDownloadUrl,
+                                    onOpenDownloadUrl = onOpenDownloadUrl,
+                                    onExpandQr = { showQrDownloadDialog = true }
+                                )
+                            }
                         }
                     }
                 }

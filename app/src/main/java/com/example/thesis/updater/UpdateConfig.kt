@@ -23,6 +23,18 @@ object UpdateConfig {
     const val TARGET_ASSET_NAME = "thesis-app-debug.apk"
 
     /**
+     * Canonical HTTPS web page for the latest GitHub Release.
+     */
+    const val LATEST_RELEASE_PAGE_URL =
+        "https://github.com/$GITHUB_OWNER/$GITHUB_REPO/releases/latest"
+
+    /**
+     * Permanent HTTPS endpoint redirecting to the latest published APK asset.
+     */
+    const val LATEST_APK_DOWNLOAD_URL =
+        "https://github.com/$GITHUB_OWNER/$GITHUB_REPO/releases/latest/download/$TARGET_ASSET_NAME"
+
+    /**
      * Network connect timeout in milliseconds.
      */
     const val CONNECT_TIMEOUT_MS = 15_000
