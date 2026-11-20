@@ -10,6 +10,11 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.RandomAccessFile
+import java.security.MessageDigest
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 
 /**
  * Implements GDPR Article 17 (Right to Erasure) via cryptographic shredding.
@@ -291,6 +296,35 @@ data class ShredAuditProof(
      */
     val isCompliant: Boolean
         get() = isKeystoreEntryPurged && isPrimaryDatabaseUnlinked && isDekUnwrapPrevented
+
+    // Calculamos el digest SHA-256 bajo demanda para no romper la firma del constructor en pruebas existentes.
+    val certificateSha256: String
+        get() {
+            val payload = "gdpr-art17|$timestampEpochMs|$isKeystoreEntryPurged|" +
+                "$isPrimaryDatabaseUnlinked|$isWalJournalUnlinked|" +
+                "$isAccountDirectoryExpunged|$isDekUnwrapPrevented|$deletedArtifactsCount"
+            val digest = MessageDigest.getInstance("SHA-256")
+                .digest(payload.toByteArray(Charsets.UTF_8))
+            return digest.joinToString("") { "%02x".format(it) }
+        }
+
+    fun toCertificateSummary(): String {
+        val utcTime = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
+            timeZone = TimeZone.getTimeZone("UTC")
+        }.format(Date(timestampEpochMs))
+        val status = if (isCompliant) "COMPLIANT" else "PARTIAL"
+        return buildString {
+            appendLine("GDPR Art. 17 Crypto-Shred Audit Certificate [$status]")
+            appendLine("KEK Keystore Purged: $isKeystoreEntryPurged")
+            appendLine("Primary DB Unlinked: $isPrimaryDatabaseUnlinked")
+            appendLine("WAL/Journal Unlinked: $isWalJournalUnlinked")
+            appendLine("Account Dir Expunged: $isAccountDirectoryExpunged")
+            appendLine("DEK Unwrap Prevented: $isDekUnwrapPrevented")
+            appendLine("Deleted Artifacts: $deletedArtifactsCount")
+            appendLine("Timestamp (UTC): $utcTime")
+            append("SHA-256: $certificateSha256")
+        }
+    }
 }
 
 sealed interface ShredResult {

@@ -102,4 +102,25 @@ class ShredAuditProofTest {
         assertFalse(result.auditProof!!.isCompliant)
         assertEquals(1, result.nonFatalErrors.size)
     }
+
+    @Test
+    fun test_auditProof_certificateSha256_isDeterministic64Hex() {
+        val proofA = ShredAuditProof(
+            isKeystoreEntryPurged = true,
+            isPrimaryDatabaseUnlinked = true,
+            isWalJournalUnlinked = true,
+            isAccountDirectoryExpunged = true,
+            isDekUnwrapPrevented = true,
+            deletedArtifactsCount = 5,
+            timestampEpochMs = 1_795_169_500_000L
+        )
+        val proofB = proofA.copy()
+        val proofC = proofA.copy(deletedArtifactsCount = 4)
+
+        val hexPattern = Regex("^[0-9a-f]{64}$")
+        assertTrue(hexPattern.matches(proofA.certificateSha256))
+        assertEquals(proofA.certificateSha256, proofB.certificateSha256)
+        assertTrue(proofA.certificateSha256 != proofC.certificateSha256)
+        assertTrue(proofA.toCertificateSummary().contains(proofA.certificateSha256))
+    }
 }

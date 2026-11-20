@@ -21,8 +21,10 @@ import org.xmtp.android.library.libxmtp.DecodedMessage
 import org.xmtp.android.library.libxmtp.IdentityKind
 import com.example.thesis.security.CryptoShredder
 import com.example.thesis.security.KeystoreManager
+import com.example.thesis.security.ShredAuditProof
 import com.example.thesis.security.ShredResult
 import com.example.thesis.security.ThesisTelemetry
+import com.example.thesis.ui.util.ReportExporter
 import com.example.thesis.xmtp.XmtpEngine
 import com.example.thesis.xmtp.XmtpEngineState
 import kotlinx.coroutines.Job
@@ -83,6 +85,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _walletAddress = MutableStateFlow<String?>(null)
     val walletAddress: StateFlow<String?> = _walletAddress.asStateFlow()
+
+    private val _lastShredProof = MutableStateFlow<ShredAuditProof?>(null)
+    val lastShredProof: StateFlow<ShredAuditProof?> = _lastShredProof.asStateFlow()
 
     val inboxId: StateFlow<String?> = engine.state
         .map { (it as? XmtpEngineState.Ready)?.client?.inboxId }
@@ -416,6 +421,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         }
                         when (initState) {
                             is XmtpEngineState.Ready -> {
+                                _lastShredProof.value = null
                                 _statusBanner.value = "Συνδέθηκε στο δίκτυο XMTP v4 (MLS) με SQLCipher."
                                 logAction("XMTP", "Connected to XMTP v4 MLS network with SQLCipher storage")
                             }
@@ -600,11 +606,20 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 sessionStateMutex.withLock {
-                    logAction("GDPR", "Executing GDPR Art. 17 cryptographic wipe...")
                     messagesJob?.cancel()
                     _selectedConversation.value = null
                     _messages.value = emptyList()
                     _conversations.value = emptyList()
+
+                    // Limpiamos los registros de la sesion anterior antes de medir el borrado para conservar las metricas y el certificado GDPR.
+                    committedProofMap.clear()
+                    _verifiedMessageCount.value = 0
+                    loggedMessageIds.clear()
+                    _actionLogs.value = emptyList()
+                    ThesisTelemetry.clearTelemetryData()
+                    ReportExporter.purgeCachedReports(appContext.cacheDir)
+
+                    logAction("GDPR", "Executing GDPR Art. 17 cryptographic wipe...")
 
                     engine.shutdownAndAwait()
                     activeSigner?.close()
@@ -615,48 +630,39 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     when (res) {
                         is ShredResult.Success -> {
-                            committedProofMap.clear()
-                            _verifiedMessageCount.value = 0
-                            loggedMessageIds.clear()
-                            _actionLogs.value = emptyList()
-                            ThesisTelemetry.clearTelemetryData()
+                            _lastShredProof.value = res.auditProof
                             _walletAddress.value = null
                             _statusBanner.value = "GDPR Wipe: Κλειδί Keystore & ${res.deletedFilesCount} αρχεία βάσης καταστράφηκαν οριστικά."
                             logAction("GDPR", "KEK destroyed & ${res.deletedFilesCount} database files expunged")
                             res.auditProof?.let { proof ->
                                 val certMsg = "Certificate: Keystore=" + (if (proof.isKeystoreEntryPurged) "PURGED" else "FAILED") +
                                     ", Storage=" + (if (proof.isPrimaryDatabaseUnlinked) "EXPUNGED" else "FAILED") +
-                                    ", Compliant=" + proof.isCompliant
+                                    ", Compliant=" + proof.isCompliant +
+                                    ", SHA-256=" + proof.certificateSha256.take(16) + "..."
                                 logAction("GDPR", certMsg)
                             }
                         }
                         is ShredResult.PartialSuccessCryptoShreddedOnly -> {
-                            committedProofMap.clear()
-                            _verifiedMessageCount.value = 0
-                            loggedMessageIds.clear()
-                            _actionLogs.value = emptyList()
-                            ThesisTelemetry.clearTelemetryData()
+                            _lastShredProof.value = res.auditProof
                             _walletAddress.value = null
                             _statusBanner.value = "Crypto-Shredded: ${res.message}"
                             logAction("GDPR", "Crypto-shredded: ${res.message}")
                             res.auditProof?.let { proof ->
                                 val certMsg = "Certificate: Keystore=" + (if (proof.isKeystoreEntryPurged) "PURGED" else "FAILED") +
-                                    ", Compliant=" + proof.isCompliant
+                                    ", Compliant=" + proof.isCompliant +
+                                    ", SHA-256=" + proof.certificateSha256.take(16) + "..."
                                 logAction("GDPR", certMsg)
                             }
                         }
                         is ShredResult.PartialSuccess -> {
-                            committedProofMap.clear()
-                            _verifiedMessageCount.value = 0
-                            loggedMessageIds.clear()
-                            _actionLogs.value = emptyList()
-                            ThesisTelemetry.clearTelemetryData()
+                            _lastShredProof.value = res.auditProof
                             _walletAddress.value = null
                             _statusBanner.value = "Crypto-Shredded: ${res.message}"
                             logAction("GDPR", "Crypto-shredded: ${res.message}")
                             res.auditProof?.let { proof ->
                                 val certMsg = "Certificate: Keystore=" + (if (proof.isKeystoreEntryPurged) "PURGED" else "FAILED") +
-                                    ", Storage=" + (if (proof.isPrimaryDatabaseUnlinked) "EXPUNGED" else "FAILED")
+                                    ", Storage=" + (if (proof.isPrimaryDatabaseUnlinked) "EXPUNGED" else "FAILED") +
+                                    ", SHA-256=" + proof.certificateSha256.take(16) + "..."
                                 logAction("GDPR", certMsg)
                             }
                         }
@@ -692,15 +698,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     logAction("BENCHMARK", "Starting automated batch benchmark (N=$iterations)...")
 
                 try {
-                    var activeConv = _selectedConversation.value
+                    // Aislamos el benchmark al grupo loopback para nunca enviar sondas de prueba a un DM con otro dispositivo.
+                    var activeConv: Conversation? = _conversations.value.firstOrNull { conv ->
+                        conv is Conversation.Group && conv.group.name == "MLS Research Loopback"
+                    }
                     if (activeConv == null) {
-                        logAction("BENCHMARK", "No active conversation; establishing loopback ratchet...")
+                        logAction("BENCHMARK", "Establishing dedicated MLS loopback ratchet...")
                         val loopbackResult = ThesisTelemetry.measureSuspendOperation("4. MLS Conversation Handshake") {
                             repository.createLoopbackConversation()
                         }
                         loopbackResult.onSuccess { conv ->
                             activeConv = conv
-                            selectConversation(conv)
                         }.onFailure { err ->
                             _statusBanner.value = "Αποτυχία εκκίνησης loopback: ${err.message}"
                             logAction("BENCHMARK", "Loopback failed: ${err.message}", isError = true)

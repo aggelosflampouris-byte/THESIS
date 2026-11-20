@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -41,6 +42,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -76,9 +79,11 @@ internal fun LogsTelemetryScreen(
     installationId: String? = null,
     verifiedMsgCount: Int = 0,
     isBenchmarking: Boolean = false,
+    snackbarHostState: SnackbarHostState = remember { SnackbarHostState() },
     onBack: () -> Unit,
     onClear: () -> Unit,
     onExport: () -> Unit = {},
+    onShareReport: () -> Unit = {},
     onRunBatchBenchmark: () -> Unit = {},
     onEmitBlockchainPoC: () -> Unit = {},
     modifier: Modifier = Modifier
@@ -102,6 +107,7 @@ internal fun LogsTelemetryScreen(
     val filterTags = listOf("ALL", "METRIC", "E2EE", "MLS", "KEYSTORE", "SYNC", "BENCHMARK", "GDPR", "UPDATE")
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         contentWindowInsets = WindowInsets.safeDrawing,
         topBar = {
             TopAppBar(
@@ -129,11 +135,17 @@ internal fun LogsTelemetryScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = onShareReport) {
+                        Icon(
+                            imageVector = Icons.Default.Share,
+                            contentDescription = "Κοινοποίηση (.md)"
+                        )
+                    }
                     TextButton(
                         onClick = onExport,
                         contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
                     ) {
-                        Text("Export", fontSize = 11.sp, maxLines = 1)
+                        Text("Copy", fontSize = 11.sp, maxLines = 1)
                     }
                     if (logs.isNotEmpty()) {
                         TextButton(

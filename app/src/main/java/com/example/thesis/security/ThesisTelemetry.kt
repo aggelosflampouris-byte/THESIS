@@ -94,7 +94,10 @@ object ThesisTelemetry {
      */
     fun computeSummaries(): List<BenchmarkSummary> {
         val eventsSnapshot = getAllEvents()
-        val grouped = eventsSnapshot.filter { it.isSuccess }.groupBy { it.operationName }
+        // Excluimos hitos instantaneos de estado del Keystore para mantener limpias las estadisticas de latencia.
+        val grouped = eventsSnapshot
+            .filter { it.isSuccess && !it.operationName.startsWith("KEYSTORE:") }
+            .groupBy { it.operationName }
 
         return grouped.map { (opName, events) ->
             val durations = events.map { it.durationMs }

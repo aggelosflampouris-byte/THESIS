@@ -173,4 +173,18 @@ class ThesisTelemetryTest {
         assertTrue(report.contains("```csv"))
         assertTrue(report.contains("MLS Handshake"))
     }
+
+    @Test
+    fun test_computeSummaries_excludesKeystoreStatusMilestones_whileKeepingCsvRecord() {
+        ThesisTelemetry.recordMetric("KEYSTORE: IDENTITY_RESTORED", 0.0, true)
+        ThesisTelemetry.recordMetric("1. Keystore AES-256-GCM DEK Unwrap", 25.0, true)
+
+        val summaries = ThesisTelemetry.computeSummaries()
+        assertEquals(1, summaries.size)
+        assertEquals("1. Keystore AES-256-GCM DEK Unwrap", summaries[0].operationName)
+
+        val csv = ThesisTelemetry.exportAsCsv()
+        assertTrue(csv.contains("KEYSTORE: IDENTITY_RESTORED"))
+        assertTrue(csv.contains("1. Keystore AES-256-GCM DEK Unwrap"))
+    }
 }

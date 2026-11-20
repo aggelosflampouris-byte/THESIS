@@ -60,7 +60,7 @@ internal fun InboxDashboardScreen(
     isCreatingConversation: Boolean,
     isShredding: Boolean = false,
     actionLogs: List<ActionLogEntry>,
-    currentVersion: String = "1.0.15",
+    currentVersion: String,
     updateStatus: UpdateStatus = UpdateStatus.Idle,
     onOpenLogs: () -> Unit,
     onNewConversation: () -> Unit,

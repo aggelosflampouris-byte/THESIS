@@ -47,6 +47,7 @@ import com.example.thesis.ui.screens.MessagingConnectionError
 import com.example.thesis.ui.screens.MessagingLoadingScreen
 import com.example.thesis.ui.screens.MessagingStartScreen
 import com.example.thesis.ui.theme.ThesisTheme
+import com.example.thesis.ui.util.ReportExporter
 import com.example.thesis.ui.util.copyToClipboard
 import com.example.thesis.updater.UpdateConfig
 import com.example.thesis.updater.UpdateStatus
@@ -85,6 +86,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     val isBenchmarking by viewModel.isBenchmarking.collectAsState()
     val isCreatingConversation by viewModel.isCreatingConversation.collectAsState()
     val isShredding by viewModel.isShredding.collectAsState()
+    val lastShredProof by viewModel.lastShredProof.collectAsState()
 
     val updateStatus by viewModel.updateStatus.collectAsState()
     var showUpdateDialog by rememberSaveable { mutableStateOf(false) }
@@ -114,10 +116,25 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
 
     val onExportLogs: () -> Unit = {
         val report = viewModel.exportBenchmarkReport()
-        copyToClipboard(context, "Benchmark Report", report)
+        copyToClipboard(context, "Benchmark Report", report, sensitive = false)
         scope.launch {
-            snackbarHostState.showSnackbar("Η αναφορά Benchmark αντιγράφηκε στο πρόχειρο (Markdown & CSV)")
+            snackbarHostState.showSnackbar("Η αναφορά αντιγράφηκε στο πρόχειρο (Markdown & CSV)")
         }
+    }
+
+    val onShareReport: () -> Unit = {
+        val report = viewModel.exportBenchmarkReport()
+        ReportExporter.shareMarkdownReport(context, report)
+            .onSuccess {
+                scope.launch {
+                    snackbarHostState.showSnackbar("Έτοιμη κοινοποίηση αρχείου αναφοράς (.md)")
+                }
+            }
+            .onFailure {
+                scope.launch {
+                    snackbarHostState.showSnackbar("Αποτυχία εξαγωγής αρχείου αναφοράς")
+                }
+            }
     }
 
     val onCopyDownloadUrl: () -> Unit = {
@@ -247,9 +264,11 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
             installationId = installationId,
             verifiedMsgCount = verifiedMsgCount,
             isBenchmarking = isBenchmarking,
+            snackbarHostState = snackbarHostState,
             onBack = { showLogsScreen = false },
             onClear = { viewModel.clearActionLogs() },
             onExport = onExportLogs,
+            onShareReport = onShareReport,
             onRunBatchBenchmark = { viewModel.runBatchBenchmark(10) },
             onEmitBlockchainPoC = { viewModel.emitBlockchainPoCProof() }
         )
@@ -296,7 +315,20 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                         is XmtpEngineState.Idle -> {
                             MessagingStartScreen(
                                 onStart = { viewModel.initializeSession() },
-                                onOpenQrDownload = { showQrDownloadDialog = true }
+                                onOpenQrDownload = { showQrDownloadDialog = true },
+                                lastShredProof = lastShredProof,
+                                onCopyShredProof = { proof ->
+                                    copyToClipboard(
+                                        context = context,
+                                        label = "GDPR Audit Certificate",
+                                        text = proof.toCertificateSummary(),
+                                        sensitive = false
+                                    )
+                                    scope.launch {
+                                        snackbarHostState.showSnackbar("Το πιστοποιητικό GDPR SHA-256 αντιγράφηκε στο πρόχειρο")
+                                    }
+                                },
+                                onOpenLogs = { showLogsScreen = true }
                             )
                         }
                         is XmtpEngineState.Loading -> {

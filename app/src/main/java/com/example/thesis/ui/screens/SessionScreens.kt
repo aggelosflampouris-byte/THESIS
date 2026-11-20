@@ -3,6 +3,9 @@ package com.example.thesis.ui.screens
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -13,23 +16,33 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.example.thesis.security.ShredAuditProof
 import com.example.thesis.ui.components.MessagingNotice
 import com.example.thesis.xmtp.XmtpEngineState
 import com.example.thesis.xmtp.XmtpInitError
@@ -37,7 +50,10 @@ import com.example.thesis.xmtp.XmtpInitError
 @Composable
 internal fun MessagingStartScreen(
     onStart: () -> Unit,
-    onOpenQrDownload: () -> Unit = {}
+    onOpenQrDownload: () -> Unit = {},
+    lastShredProof: ShredAuditProof? = null,
+    onCopyShredProof: (ShredAuditProof) -> Unit = {},
+    onOpenLogs: () -> Unit = {}
 ) {
     Box(
         modifier = Modifier.fillMaxSize(),
@@ -77,7 +93,17 @@ internal fun MessagingStartScreen(
                 title = "Hardware-Backed Ασφάλεια",
                 text = "Το Database Encryption Key (DEK) κρυπτογραφείται στο Android Keystore. Συμμόρφωση με GDPR Άρθρο 17 (Right to Erasure)."
             )
-            Spacer(Modifier.height(24.dp))
+
+            if (lastShredProof != null) {
+                Spacer(Modifier.height(14.dp))
+                ShredAuditCertificateCard(
+                    proof = lastShredProof,
+                    onCopyCertificate = { onCopyShredProof(lastShredProof) },
+                    onOpenLogs = onOpenLogs
+                )
+            }
+
+            Spacer(Modifier.height(22.dp))
             Button(
                 onClick = onStart,
                 modifier = Modifier
@@ -106,6 +132,102 @@ internal fun MessagingStartScreen(
                     text = "Λήψη Τελευταίας Έκδοσης (QR)",
                     textAlign = TextAlign.Center
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ShredAuditCertificateCard(
+    proof: ShredAuditProof,
+    onCopyCertificate: () -> Unit,
+    onOpenLogs: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.65f)
+        ),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.CheckCircle,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Text(
+                    text = "GDPR Art. 17 Audit Certificate",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Surface(
+                    shape = RoundedCornerShape(6.dp),
+                    color = if (proof.isCompliant) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.errorContainer
+                ) {
+                    Text(
+                        text = if (proof.isCompliant) "COMPLIANT" else "PARTIAL",
+                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (proof.isCompliant) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onErrorContainer,
+                        maxLines = 1
+                    )
+                }
+            }
+
+            Text(
+                text = "Keystore KEK Purged: ${proof.isKeystoreEntryPurged} • SQLCipher DB Unlinked: ${proof.isPrimaryDatabaseUnlinked} • Artifacts: ${proof.deletedArtifactsCount}",
+                style = MaterialTheme.typography.bodySmall,
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSecondaryContainer
+            )
+
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(8.dp),
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.75f)
+            ) {
+                Text(
+                    text = "SHA-256: ${proof.certificateSha256}",
+                    modifier = Modifier.padding(8.dp),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onCopyCertificate,
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Text("Αντιγραφή Πιστοποιητικού", fontSize = 11.sp, maxLines = 1)
+                }
+                TextButton(
+                    onClick = onOpenLogs,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
+                ) {
+                    Text("Προβολή Logs", fontSize = 11.sp, maxLines = 1)
+                }
             }
         }
     }
