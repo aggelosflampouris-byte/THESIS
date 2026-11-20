@@ -430,4 +430,41 @@ class ThesisSignerTest {
             ThesisSigner.fromPrivateKey(outOfBoundsBytes)
         }
     }
+
+    @Test
+    fun test_fromPrivateKey_restoresIdenticalAddressAndSignature(): Unit = runBlocking {
+        val initialSigner = ThesisSigner.createEphemeral()
+        val exportedKey = initialSigner.exportPrivateKeyBytes()
+        val originalAddress = initialSigner.address
+        val challenge = "XMTP MLS Persistent Installation Proof".toByteArray(StandardCharsets.UTF_8)
+        val originalSignature = initialSigner.sign(challenge)
+        initialSigner.close()
+
+        val restoredSigner = ThesisSigner.fromPrivateKey(exportedKey)
+        val restoredSignature = restoredSigner.sign(challenge)
+
+        assertEquals(
+            "Restored 0x address must match original identity",
+            originalAddress,
+            restoredSigner.address
+        )
+        assertArrayEquals(
+            "Deterministic RFC 6979 / EIP-191 signature must match across restarts",
+            originalSignature,
+            restoredSignature
+        )
+
+        exportedKey.fill(0x00)
+        restoredSigner.close()
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun test_fromPrivateKey_rejectsInvalidKeyLength() {
+        ThesisSigner.fromPrivateKey(ByteArray(16))
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun test_fromPrivateKey_rejectsZeroScalarKey() {
+        ThesisSigner.fromPrivateKey(ByteArray(32) { 0x00 })
+    }
 }

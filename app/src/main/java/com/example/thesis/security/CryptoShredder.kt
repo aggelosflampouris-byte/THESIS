@@ -115,13 +115,13 @@ class CryptoShredder(
         val dbFile = databaseFactory.resolveDatabaseFile(sanitisedAddress)
         val isDbUnlinked = !dbFile.exists()
 
+        val accountDir = databaseFactory.getAccountDatabaseDirectoryPath(sanitisedAddress)
+        val isAccountDirExpunged = !accountDir.exists()
+
         val walFile = File("${dbFile.path}-wal")
         val shmFile = File("${dbFile.path}-shm")
         val journalFile = File("${dbFile.path}-journal")
-        val isWalJournalUnlinked = !walFile.exists() && !shmFile.exists() && !journalFile.exists()
-
-        val accountDir = databaseFactory.resolveAccountDatabaseDirectory(sanitisedAddress)
-        val isAccountDirExpunged = !accountDir.exists()
+        val isWalJournalUnlinked = !walFile.exists() && !shmFile.exists() && !journalFile.exists() && isAccountDirExpunged
 
         val isDekUnwrapPrevented = isKeystorePurged
 
@@ -153,14 +153,31 @@ class CryptoShredder(
                 }
             }
 
-            val accountDir = databaseFactory.resolveAccountDatabaseDirectory(sanitisedAddress)
+            val accountDir = databaseFactory.getAccountDatabaseDirectoryPath(sanitisedAddress)
             if (accountDir.exists()) {
-                val dirDeleted = accountDir.deleteRecursively()
-                if (!dirDeleted) {
-                    Log.w(TAG, "shredAccountData: account directory deleteRecursively returned false")
-                    nonFatalErrors.add("DirectoryCleanup: deleteRecursivelyFailed")
-                } else {
-                    deletedCount++
+                var deletedNestedFiles = 0
+                accountDir.walkBottomUp().forEach { entry ->
+                    if (entry.isFile) {
+                        when (val outcome = deleteFileSafely(file = entry)) {
+                            is FileDeleteOutcome.Deleted -> {
+                                deletedCount++
+                                deletedNestedFiles++
+                            }
+                            is FileDeleteOutcome.Failed -> {
+                                nonFatalErrors.add("File[${outcome.suffix}]: ${outcome.exceptionClass}")
+                            }
+                            is FileDeleteOutcome.Skipped -> {}
+                        }
+                    }
+                }
+                if (accountDir.exists()) {
+                    val dirDeleted = accountDir.deleteRecursively()
+                    if (!dirDeleted) {
+                        Log.w(TAG, "shredAccountData: account directory deleteRecursively returned false")
+                        nonFatalErrors.add("DirectoryCleanup: deleteRecursivelyFailed")
+                    } else if (deletedNestedFiles == 0) {
+                        deletedCount++
+                    }
                 }
             }
         } catch (e: Exception) {

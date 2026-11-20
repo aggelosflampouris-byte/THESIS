@@ -190,9 +190,10 @@ class DatabaseFactory(context: Context) {
     }
 
     /**
-     * Resolves an isolated database directory for XMTP v4 (libxmtp) storage.
+     * Computes and path-traversal-validates the isolated database directory path for
+     * XMTP v4 (libxmtp) storage (`xmtp_<SHA256(address)>/`) without creating it on disk.
      */
-    fun resolveAccountDatabaseDirectory(sanitisedAddress: String): File {
+    fun getAccountDatabaseDirectoryPath(sanitisedAddress: String): File {
         val hash = sha256Hex(sanitisedAddress)
         val dirName = "xmtp_$hash"
         val expectedBase = appContext.getDatabasePath("anchor").parentFile?.canonicalFile
@@ -202,7 +203,14 @@ class DatabaseFactory(context: Context) {
         if (!dbDir.canonicalFile.startsWith(expectedBase)) {
             throw SecurityException("Path traversal attempt detected: ${dbDir.canonicalPath}")
         }
+        return dbDir
+    }
 
+    /**
+     * Resolves an isolated database directory for XMTP v4 (libxmtp) storage, creating it if absent.
+     */
+    fun resolveAccountDatabaseDirectory(sanitisedAddress: String): File {
+        val dbDir = getAccountDatabaseDirectoryPath(sanitisedAddress)
         if (!dbDir.exists()) {
             check(dbDir.mkdirs()) {
                 "Failed to create account database directory: ${dbDir.absolutePath}"

@@ -295,10 +295,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
         viewModelScope.launch {
             ThesisTelemetry.eventsFlow.collect { event ->
+                val isKeystoreStatusEvent = event.operationName.startsWith("KEYSTORE:")
                 logAction(
-                    tag = "METRIC",
+                    tag = if (isKeystoreStatusEvent) "KEYSTORE" else "METRIC",
                     message = event.operationName,
-                    durationMs = event.durationMs,
+                    durationMs = if (isKeystoreStatusEvent && event.durationMs == 0.0) null else event.durationMs,
                     isError = !event.isSuccess
                 )
             }
@@ -334,30 +335,29 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
                     try {
                         val idKeyResult = ThesisTelemetry.measureOperation("2. Keystore Hardware Identity Unwrap") {
-                        keystoreManager.getOrCreateIdentityPrivateKey()
-                    }
-                    val privKeyBytes = try {
-                        idKeyResult.getOrThrow()
-                    } catch (e: Throwable) {
-                        _statusBanner.value = "Σφάλμα Hardware Identity Keystore: ${e.message}"
-                        logAction("KEYSTORE", "Identity Keystore failure: ${e.message}", isError = true)
-                        return@withLock
-                    }
+                            keystoreManager.getOrCreateIdentityPrivateKey()
+                        }
+                        val privKeyBytes = try {
+                            idKeyResult.getOrThrow()
+                        } catch (e: Throwable) {
+                            _statusBanner.value = "Σφάλμα Hardware Identity Keystore: ${e.message}"
+                            logAction("KEYSTORE", "Identity Keystore failure: ${e.message}", isError = true)
+                            return@withLock
+                        }
 
-                    val signer = try {
-                        activeSigner ?: ThesisSigner.fromPrivateKey(privKeyBytes).also { activeSigner = it }
-                    } finally {
-                        // Άμεσος μηδενισμός του ενδιάμεσου buffer ιδιωτικού κλειδιού στη μνήμη RAM
-                        privKeyBytes.fill(0x00)
-                    }
-                    _walletAddress.value = signer.address
-                    val maskedAddress = if (signer.address.length >= 10) {
-                        "${signer.address.take(6)}...${signer.address.takeLast(4)}"
-                    } else signer.address
-                    logAction("IDENTITY", "Hardware-backed SECP256K1 identity active: $maskedAddress")
+                        val signer = try {
+                            activeSigner ?: ThesisSigner.fromPrivateKey(privKeyBytes).also { activeSigner = it }
+                        } finally {
+                            // Άμεσος μηδενισμός του ενδιάμεσου buffer ιδιωτικού κλειδιού στη μνήμη RAM
+                            privKeyBytes.fill(0x00)
+                        }
+                        _walletAddress.value = signer.address
+                        val maskedAddress = if (signer.address.length >= 10) {
+                            "${signer.address.take(6)}...${signer.address.takeLast(4)}"
+                        } else signer.address
+                        logAction("IDENTITY", "Hardware-backed SECP256K1 identity active: $maskedAddress")
 
-                        val dbFile = databaseFactory.resolveDatabaseFile(signer.address)
-                        val dbDirectory = dbFile.parentFile ?: appContext.filesDir
+                        val dbDirectory = databaseFactory.resolveAccountDatabaseDirectory(signer.address)
 
                         ThesisTelemetry.measureSuspendOperation("3. SQLCipher Sandbox & MLS Init") {
                             engine.initialise(
