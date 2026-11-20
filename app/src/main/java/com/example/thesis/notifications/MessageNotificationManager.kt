@@ -34,8 +34,8 @@ internal class MessageNotificationManager(context: Context) {
         private const val TAG = "MessageNotifManager"
         private const val LEGACY_CHANNEL_ID = "xmtp_mls_priority_messages"
         const val CHANNEL_ID = "xmtp_mls_priority_messages_v2"
-        const val SERVICE_CHANNEL_ID = "xmtp_mls_connection_service"
-        const val SERVICE_NOTIFICATION_ID = 9001
+        private const val LEGACY_SERVICE_CHANNEL_ID = "xmtp_mls_connection_service"
+        private const val LEGACY_SERVICE_NOTIFICATION_ID = 9001
         const val EXTRA_CONVERSATION_ID = "com.example.thesis.extra.CONVERSATION_ID"
         private const val ACCENT_COLOR = 0xFF315C54.toInt()
         private val VIBRATION_PATTERN = longArrayOf(0L, 250L, 120L, 250L)
@@ -72,18 +72,12 @@ internal class MessageNotificationManager(context: Context) {
             manager.createNotificationChannel(messageChannel)
         }
 
-        if (manager.getNotificationChannel(SERVICE_CHANNEL_ID) == null) {
-            val serviceChannel = NotificationChannel(
-                SERVICE_CHANNEL_ID,
-                "Σύνδεση Παρασκηνίου XMTP MLS",
-                NotificationManager.IMPORTANCE_MIN
-            ).apply {
-                description = "Διατηρεί ενεργή τη λήψη κρυπτογραφημένων μηνυμάτων εκτός εφαρμογής"
-                setShowBadge(false)
-                enableVibration(false)
-                setSound(null, null)
-            }
-            manager.createNotificationChannel(serviceChannel)
+        // Eliminamos el canal del antiguo servicio continuo para no mostrar una notificacion permanente tras actualizar.
+        if (manager.getNotificationChannel(LEGACY_SERVICE_CHANNEL_ID) != null) {
+            manager.deleteNotificationChannel(LEGACY_SERVICE_CHANNEL_ID)
+        }
+        runCatching {
+            NotificationManagerCompat.from(appContext).cancel(LEGACY_SERVICE_NOTIFICATION_ID)
         }
     }
 
@@ -116,32 +110,6 @@ internal class MessageNotificationManager(context: Context) {
                 appContext.startActivity(appIntent)
             }
         }
-    }
-
-    fun buildForegroundServiceNotification(): Notification {
-        ensureChannelCreated()
-        val tapIntent = Intent(appContext, MainActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-        }
-        val contentIntent = PendingIntent.getActivity(
-            appContext,
-            SERVICE_NOTIFICATION_ID,
-            tapIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        return NotificationCompat.Builder(appContext, SERVICE_CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_notification_message)
-            .setColor(ACCENT_COLOR)
-            .setContentTitle("XMTP MLS Ασφαλής Σύνδεση")
-            .setContentText("Ενεργή ακρόαση εισερχόμενων μηνυμάτων")
-            .setPriority(NotificationCompat.PRIORITY_MIN)
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .setOngoing(true)
-            .setSilent(true)
-            .setShowWhen(false)
-            .setContentIntent(contentIntent)
-            .build()
     }
 
     @SuppressLint("MissingPermission")

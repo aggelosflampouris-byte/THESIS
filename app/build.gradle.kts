@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.thesis"
         minSdk = 26
         targetSdk = 35
-        versionCode = 16
-        versionName = "1.0.19"
+        versionCode = 17
+        versionName = "1.0.20"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -131,6 +131,7 @@ dependencies {
     implementation(libs.androidx.compose.ui.tooling.preview)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation("androidx.work:work-runtime-ktx:2.10.0")
 
     // ------------------------------------------------------------------------
     // XMTP Android SDK v4 (libxmtp Rust MLS core via UniFFI)

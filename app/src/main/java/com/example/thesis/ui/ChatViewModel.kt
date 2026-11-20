@@ -8,7 +8,6 @@ import java.util.TimeZone
 import kotlinx.coroutines.Dispatchers
 import android.app.Application
 import com.example.thesis.ThesisApplication
-import com.example.thesis.notifications.XmtpMessagingService
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.thesis.identity.ThesisSigner
@@ -369,7 +368,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             sessionStateMutex.withLock {
                 if (engine.state.value is XmtpEngineState.Ready) {
-                    XmtpMessagingService.start(appContext)
+                    sessionContainer.scheduleBackgroundSync()
                     logAction("SESSION", "Session already active, skipping re-initialization.")
                     return@withLock
                 }
@@ -432,8 +431,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         when (initState) {
                             is XmtpEngineState.Ready -> {
                                 _lastShredProof.value = null
-                                repository.pollIncomingMessages(seedOnly = true)
-                                XmtpMessagingService.start(appContext)
+                                // Conservamos los IDs ya vistos entre reinicios para notificar mensajes llegados con la app cerrada.
+                                val shouldSeed = !sessionContainer.notificationStateStore.isBaselineEstablished()
+                                repository.pollIncomingMessages(seedOnly = shouldSeed)
+                                sessionContainer.scheduleBackgroundSync()
                                 _statusBanner.value = "Συνδέθηκε στο δίκτυο XMTP v4 (MLS) με SQLCipher."
                                 logAction("XMTP", "Connected to XMTP v4 MLS network with SQLCipher storage")
                             }
@@ -459,7 +460,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun onAppForegroundChanged(inForeground: Boolean) {
         sessionContainer.setAppInForeground(inForeground)
         if (inForeground && engine.state.value is XmtpEngineState.Ready) {
-            XmtpMessagingService.start(appContext)
+            sessionContainer.scheduleBackgroundSync()
         }
     }
 

@@ -2,6 +2,7 @@ package com.example.thesis.repository
 
 import android.util.Log
 import app.cash.turbine.test
+import com.example.thesis.notifications.InMemorySeenMessageStorage
 import com.example.thesis.xmtp.XmtpEngine
 import com.example.thesis.xmtp.XmtpEngineState
 import io.mockk.coEvery
@@ -837,6 +838,77 @@ class ConversationRepositoryTest {
         } finally {
             repoScope.cancel()
             repo.close()
+        }
+    }
+
+    @Test
+    fun test_pollIncomingMessages_persistsSeenIdsAcrossColdRestartWithoutReNotifyingOrSwallowingNew() = runTest(testDispatcher) {
+        val allMessagesStream = MutableSharedFlow<DecodedMessage>()
+        every { mockConversations.streamAllMessages() } returns allMessagesStream
+
+        val oldMsg = mockk<DecodedMessage>(relaxed = true)
+        every { oldMsg.id } returns "old_msg_1"
+        every { oldMsg.conversationId } returns testConvId
+        every { oldMsg.senderInboxId } returns testPeerAddress
+        every { oldMsg.encodedContent.type } returns ContentTypeText
+        every { oldMsg.content<Any>() } returns "Already seen"
+        every { oldMsg.body } returns "Already seen"
+        every { oldMsg.sentAt } returns Date(1000L)
+
+        val missedMsg = mockk<DecodedMessage>(relaxed = true)
+        every { missedMsg.id } returns "missed_bg_msg_2"
+        every { missedMsg.conversationId } returns testConvId
+        every { missedMsg.senderInboxId } returns testPeerAddress
+        every { missedMsg.encodedContent.type } returns ContentTypeText
+        every { missedMsg.content<Any>() } returns "Missed while process killed"
+        every { missedMsg.body } returns "Missed while process killed"
+        every { missedMsg.sentAt } returns Date(2000L)
+
+        val sharedStorage = InMemorySeenMessageStorage()
+        coEvery { mockConversations.list(any(), any(), any(), any()) } returns listOf(mockConversation)
+        coEvery { mockConversation.messages() } returns listOf(oldMsg)
+
+        val scope1 = CoroutineScope(SupervisorJob() + testDispatcher)
+        val repo1 = ConversationRepository(
+            engine = mockEngine,
+            repositoryScope = scope1,
+            ioDispatcher = testDispatcher,
+            syncIntervalMs = 5_000L,
+            seenMessageStorage = sharedStorage
+        )
+        repo1.pollIncomingMessagesAndCollect(seedOnly = true).getOrThrow()
+        repo1.close()
+        scope1.cancel()
+
+        assertTrue(sharedStorage.isBaselineEstablished())
+        assertEquals(listOf("old_msg_1"), sharedStorage.loadSeenIds())
+
+        coEvery { mockConversation.messages() } returns listOf(oldMsg, missedMsg)
+        val scope2 = CoroutineScope(SupervisorJob() + testDispatcher)
+        val repo2 = ConversationRepository(
+            engine = mockEngine,
+            repositoryScope = scope2,
+            ioDispatcher = testDispatcher,
+            syncIntervalMs = 5_000L,
+            seenMessageStorage = sharedStorage
+        )
+        try {
+            repo2.incomingMessages.test {
+                val batch = repo2.pollIncomingMessagesAndCollect(seedOnly = false).getOrThrow()
+                assertEquals(listOf("missed_bg_msg_2"), batch.newMessages.map { it.id })
+
+                val emitted = awaitItem()
+                assertEquals("missed_bg_msg_2", emitted.id)
+                expectNoEvents()
+
+                repo2.resetNotificationBaseline()
+                assertFalse(sharedStorage.isBaselineEstablished())
+                assertTrue(sharedStorage.loadSeenIds().isEmpty())
+                cancelAndIgnoreRemainingEvents()
+            }
+        } finally {
+            scope2.cancel()
+            repo2.close()
         }
     }
 }

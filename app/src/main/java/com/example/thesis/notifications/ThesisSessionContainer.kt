@@ -9,12 +9,17 @@ import com.example.thesis.security.KeystoreManager
 import com.example.thesis.updater.AppUpdateManager
 import com.example.thesis.xmtp.XmtpEngine
 import com.example.thesis.xmtp.XmtpEngineState
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -34,10 +39,16 @@ internal class ThesisSessionContainer(context: Context) {
 
     // El alcance de aplicacion mantiene viva la escucha gRPC y las notificaciones aunque se cierre la UI.
     val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    val repository = ConversationRepository(engine, appScope)
+    val notificationStateStore = SharedPrefsNotificationStateStore(appContext)
+    val repository = ConversationRepository(engine, appScope, seenMessageStorage = notificationStateStore)
     val appUpdateManager = AppUpdateManager(appContext)
     val notificationManager = MessageNotificationManager(appContext)
     val sessionMutex = Mutex()
+    private var softBackgroundPollJob: Job? = null
+
+    companion object {
+        private const val SOFT_BACKGROUND_POLL_INTERVAL_MS = 15_000L
+    }
 
     @Volatile
     var activeSigner: ThesisSigner? = null
@@ -82,8 +93,36 @@ internal class ThesisSessionContainer(context: Context) {
 
     fun setAppInForeground(inForeground: Boolean) {
         isAppInForeground = inForeground
-        if (inForeground && !isLogsScreenOpen) {
-            activeConversationId?.let { clearUnread(it) }
+        if (inForeground) {
+            softBackgroundPollJob?.cancel()
+            softBackgroundPollJob = null
+            if (!isLogsScreenOpen) {
+                activeConversationId?.let { clearUnread(it) }
+            }
+        } else if (keystoreManager.hasPersistedSession() || engine.state.value is XmtpEngineState.Ready) {
+            scheduleBackgroundSync()
+            startSoftBackgroundPolling()
+        }
+    }
+
+    fun scheduleBackgroundSync() {
+        BackgroundSyncScheduler.scheduleAll(appContext)
+    }
+
+    private fun startSoftBackgroundPolling() {
+        if (softBackgroundPollJob?.isActive == true) return
+        softBackgroundPollJob = appScope.launch {
+            while (isActive && !isAppInForeground) {
+                delay(SOFT_BACKGROUND_POLL_INTERVAL_MS)
+                if (isAppInForeground) break
+                try {
+                    syncMessagesInBackground()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Throwable) {
+                    // Ignoramos errores puntuales del sondeo en memoria; WorkManager reintentara fuera del proceso.
+                }
+            }
         }
     }
 
@@ -107,19 +146,23 @@ internal class ThesisSessionContainer(context: Context) {
 
     fun clearUnread(conversationId: String) {
         if (conversationId.isBlank()) return
-        if (_unreadCounts.value.containsKey(conversationId)) {
-            _unreadCounts.value = _unreadCounts.value - conversationId
+        _unreadCounts.update { current ->
+            if (current.containsKey(conversationId)) current - conversationId else current
         }
         notificationManager.cancelConversationNotification(conversationId)
     }
 
     fun resetOnGdprShred() {
-        notifiedMessageIds.clear()
+        softBackgroundPollJob?.cancel()
+        softBackgroundPollJob = null
+        synchronized(notifiedMessageIds) {
+            notifiedMessageIds.clear()
+        }
         _unreadCounts.value = emptyMap()
         conversationsSnapshot = emptyList()
         activeConversationId = null
         repository.resetNotificationBaseline()
-        XmtpMessagingService.stop(appContext)
+        BackgroundSyncScheduler.cancelAll(appContext)
         notificationManager.cancelAllNotifications()
         _walletAddress.value = null
         activeSigner?.close()
@@ -157,7 +200,8 @@ internal class ThesisSessionContainer(context: Context) {
                     dbDirectory = dbDirectory,
                     dbEncryptionKey = dekBytes
                 )
-                if (state is XmtpEngineState.Ready) {
+                // Solo fijamos linea base si nunca existio antes para no ocultar mensajes recibidos con el proceso cerrado.
+                if (state is XmtpEngineState.Ready && !notificationStateStore.isBaselineEstablished()) {
                     repository.pollIncomingMessages(seedOnly = true)
                 }
             } finally {
@@ -166,26 +210,48 @@ internal class ThesisSessionContainer(context: Context) {
         }
     }
 
+    suspend fun syncMessagesInBackground() {
+        ensureSessionConnectedForBackground()
+        if (engine.state.value !is XmtpEngineState.Ready) return
+
+        val shouldSeed = !notificationStateStore.isBaselineEstablished()
+        val batch = repository.pollIncomingMessagesAndCollect(seedOnly = shouldSeed).getOrNull() ?: return
+        updateConversationsSnapshot(batch.conversations)
+        // Despachamos cada notificacion antes de salir del worker para que el sistema no suspenda el aviso a medias.
+        batch.newMessages.forEach { msg ->
+            handleIncomingMessage(msg)
+        }
+    }
+
     private fun handleIncomingMessage(msg: DecodedMessage) {
         val localInboxId = (engine.state.value as? XmtpEngineState.Ready)?.client?.inboxId
-        val alreadyNotified = synchronized(notifiedMessageIds) { msg.id in notifiedMessageIds }
-        val shouldNotify = MessageNotificationPolicy.shouldNotify(
-            messageId = msg.id,
-            conversationId = msg.conversationId,
-            senderInboxId = msg.senderInboxId,
-            localInboxId = localInboxId,
-            body = msg.body,
-            isAppInForeground = isAppInForeground,
-            activeConversationId = activeConversationId,
-            isLogsScreenOpen = isLogsScreenOpen,
-            alreadyNotified = alreadyNotified
-        )
-        if (!shouldNotify) return
+        val reservedForDispatch = synchronized(notifiedMessageIds) {
+            val alreadyNotified = msg.id in notifiedMessageIds
+            val shouldNotify = MessageNotificationPolicy.shouldNotify(
+                messageId = msg.id,
+                conversationId = msg.conversationId,
+                senderInboxId = msg.senderInboxId,
+                localInboxId = localInboxId,
+                body = msg.body,
+                isAppInForeground = isAppInForeground,
+                activeConversationId = activeConversationId,
+                isLogsScreenOpen = isLogsScreenOpen,
+                alreadyNotified = alreadyNotified
+            )
+            if (!shouldNotify) {
+                false
+            } else {
+                // Reservamos el ID bajo el mismo bloqueo para evitar alertas dobles entre el flujo reactivo y el worker.
+                markMessageNotifiedLocked(msg.id)
+                true
+            }
+        }
+        if (!reservedForDispatch) return
 
-        markMessageNotified(msg.id)
-        val currentMap = _unreadCounts.value
-        val nextCount = (currentMap[msg.conversationId] ?: 0) + 1
-        _unreadCounts.value = currentMap + (msg.conversationId to nextCount)
+        _unreadCounts.update { currentMap ->
+            val nextCount = (currentMap[msg.conversationId] ?: 0) + 1
+            currentMap + (msg.conversationId to nextCount)
+        }
 
         val conv = conversationsSnapshot.firstOrNull { it.id == msg.conversationId }
         val explicitName = when (conv) {
@@ -215,15 +281,13 @@ internal class ThesisSessionContainer(context: Context) {
         }
     }
 
-    private fun markMessageNotified(messageId: String) {
-        synchronized(notifiedMessageIds) {
-            if (notifiedMessageIds.size >= 512) {
-                val oldest = notifiedMessageIds.firstOrNull()
-                if (oldest != null) {
-                    notifiedMessageIds.remove(oldest)
-                }
+    private fun markMessageNotifiedLocked(messageId: String) {
+        if (notifiedMessageIds.size >= 512) {
+            val oldest = notifiedMessageIds.firstOrNull()
+            if (oldest != null) {
+                notifiedMessageIds.remove(oldest)
             }
-            notifiedMessageIds.add(messageId)
         }
+        notifiedMessageIds.add(messageId)
     }
 }
