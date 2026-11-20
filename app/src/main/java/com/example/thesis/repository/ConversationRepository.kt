@@ -136,6 +136,12 @@ class ConversationRepository(
     )
     val incomingMessages: SharedFlow<DecodedMessage> = _incomingMessages.asSharedFlow()
 
+    // Registro global acotado para evitar duplicados o alertas historicos al sondear en segundo plano.
+    private val seenMessageIds = BoundedIdDeduplicator(maxSize = MAX_DEDUPLICATOR_CAPACITY)
+
+    @Volatile
+    private var hasSeededMessageBaseline: Boolean = false
+
     /**
      * Cache of active hot message streams per conversation ID to prevent duplicate gRPC network streams.
      */
@@ -157,7 +163,9 @@ class ConversationRepository(
                         try {
                             client.conversations.streamAllMessages().collect { msg ->
                                 if (!msg.isDisplayableUserMessage()) return@collect
-                                _incomingMessages.tryEmit(msg)
+                                if (msg.id.isNotBlank() && seenMessageIds.add(msg.id)) {
+                                    _incomingMessages.tryEmit(msg)
+                                }
                                 messageRefreshTrigger.emit(msg.conversationId)
                             }
                         } catch (e: CancellationException) {
@@ -547,6 +555,58 @@ class ConversationRepository(
         }
     }
 
+    suspend fun pollIncomingMessages(seedOnly: Boolean = false): Result<Int> = withContext(ioDispatcher) {
+        val client = xmtpEngine.client
+            ?: return@withContext Result.failure(
+                IllegalStateException("XMTP engine is not ready (current state: ${xmtpEngine.state.value})")
+            )
+        runCatching {
+            val conversations = fetchConversationsWithConsent(client)
+            var newMessageCount = 0
+            var hasConversationUpdates = false
+            val shouldSeed = seedOnly || !hasSeededMessageBaseline
+
+            for (conv in conversations) {
+                val msgs = fetchMessagesSafely(conv)
+                    .filter { it.isDisplayableUserMessage() }
+                    .sortedBy { it.sentAt?.time ?: (it.sentAtNs / 1_000_000L) }
+
+                if (shouldSeed) {
+                    msgs.forEach { msg ->
+                        if (msg.id.isNotBlank()) {
+                            seenMessageIds.add(msg.id)
+                        }
+                    }
+                } else {
+                    var convHasNew = false
+                    msgs.forEach { msg ->
+                        if (msg.id.isNotBlank() && seenMessageIds.add(msg.id)) {
+                            _incomingMessages.tryEmit(msg)
+                            newMessageCount++
+                            convHasNew = true
+                        }
+                    }
+                    if (convHasNew) {
+                        messageRefreshTrigger.tryEmit(conv.id)
+                        hasConversationUpdates = true
+                    }
+                }
+            }
+
+            if (shouldSeed) {
+                hasSeededMessageBaseline = true
+            } else if (hasConversationUpdates) {
+                conversationRefreshTrigger.tryEmit(Unit)
+            }
+            newMessageCount
+        }
+    }
+
+    fun resetNotificationBaseline() {
+        hasSeededMessageBaseline = false
+        seenMessageIds.clear()
+    }
+
     suspend fun syncConversation(conversation: Conversation): Result<Unit> = withContext(ioDispatcher) {
         runCatching {
             conversation.sync()
@@ -590,7 +650,12 @@ class ConversationRepository(
         // 1. Instantly load local cached messages from SQLite to eliminate initial UI latency (0ms wait)
         val initialCached = fetchMessagesSafely(conversation)
         val initialSnapshot = synchronized(mapLock) {
-            initialCached.filter { it.isDisplayableUserMessage() }.forEach { msg -> messageMap[msg.id] = msg }
+            initialCached.filter { it.isDisplayableUserMessage() }.forEach { msg ->
+                if (msg.id.isNotBlank()) {
+                    seenMessageIds.add(msg.id)
+                }
+                messageMap[msg.id] = msg
+            }
             getSortedListLocked()
         }
         trySend(initialSnapshot)
@@ -624,7 +689,11 @@ class ConversationRepository(
                     }
                     if (hasChanges) getSortedListLocked() else null
                 }
-                newlySyncedMessages.forEach { _incomingMessages.tryEmit(it) }
+                newlySyncedMessages.forEach { msg ->
+                    if (msg.id.isNotBlank() && seenMessageIds.add(msg.id)) {
+                        _incomingMessages.tryEmit(msg)
+                    }
+                }
                 if (updatedSnapshot != null) {
                     trySend(updatedSnapshot)
                 }
@@ -640,7 +709,9 @@ class ConversationRepository(
                 try {
                     conversation.streamMessages().collect { incoming ->
                         if (!incoming.isDisplayableUserMessage()) return@collect
-                        _incomingMessages.tryEmit(incoming)
+                        if (incoming.id.isNotBlank() && seenMessageIds.add(incoming.id)) {
+                            _incomingMessages.tryEmit(incoming)
+                        }
                         Log.i(TAG, "RX COMMITTED [conversation=REDACTED]")
                         val streamSnapshot = synchronized(mapLock) {
                             messageMap[incoming.id] = incoming
@@ -793,7 +864,7 @@ class ConversationRepository(
         val latest = fetchMessagesSafely(conversation)
             .filter { it.isDisplayableUserMessage() }
             .maxByOrNull { it.sentAt?.time ?: (it.sentAtNs / 1_000_000L) }
-        if (latest != null) {
+        if (latest != null && latest.id.isNotBlank() && seenMessageIds.add(latest.id)) {
             _incomingMessages.tryEmit(latest)
         }
     }
@@ -897,6 +968,7 @@ class ConversationRepository(
      * Cancels underlying repository coroutine scope and clears cached reactive flows.
      */
     override fun close() {
+        resetNotificationBaseline()
         repositoryJob.cancel()
         messageFlows.clear()
     }
@@ -932,6 +1004,8 @@ private class BoundedIdDeduplicator(private val maxSize: Int) {
     )
 
     fun add(id: String): Boolean = set.add(id)
+
+    fun clear() = set.clear()
 }
 
 // ────────────────────────────────────────────────────────────────────────────

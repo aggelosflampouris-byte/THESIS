@@ -117,6 +117,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     val isCreatingConversation by viewModel.isCreatingConversation.collectAsState()
     val isShredding by viewModel.isShredding.collectAsState()
     val lastShredProof by viewModel.lastShredProof.collectAsState()
+    val unreadCounts by viewModel.unreadCounts.collectAsState()
 
     val updateStatus by viewModel.updateStatus.collectAsState()
     var showUpdateDialog by rememberSaveable { mutableStateOf(false) }
@@ -421,6 +422,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                             } else {
                                 InboxDashboardScreen(
                                     conversations = conversations,
+                                    unreadCounts = unreadCounts,
                                     engineState = engineState,
                                     isCreatingConversation = isCreatingConversation,
                                     isShredding = isShredding,

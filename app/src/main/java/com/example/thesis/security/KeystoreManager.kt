@@ -548,6 +548,17 @@ class KeystoreManager(context: Context) {
     //  Storage Provider
     // ────────────────────────────────────────────────────────────────────────
 
+    fun hasPersistedSession(): Boolean {
+        return runCatching {
+            val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE_PROVIDER).apply { load(null) }
+            if (!keyStore.containsAlias(KEK_ALIAS)) return false
+            val prefs = openEncryptedPreferences()
+            val dekCt = prefs.getString(PREF_KEY_DEK_CT, null)
+            val idCt = prefs.getString(PREF_ENCRYPTED_IDENTITY_KEY, null)
+            !dekCt.isNullOrBlank() && !idCt.isNullOrBlank()
+        }.getOrDefault(false)
+    }
+
     private fun openEncryptedPreferences(): SharedPreferences {
         cachedPreferences?.let { return it }
         return synchronized(KEYSTORE_LOCK) {

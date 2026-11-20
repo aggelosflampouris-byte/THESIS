@@ -7,27 +7,21 @@ import java.util.Locale
 import java.util.TimeZone
 import kotlinx.coroutines.Dispatchers
 import android.app.Application
+import com.example.thesis.ThesisApplication
+import com.example.thesis.notifications.XmtpMessagingService
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.thesis.database.DatabaseFactory
 import com.example.thesis.identity.ThesisSigner
-import com.example.thesis.notifications.MessageNotificationManager
-import com.example.thesis.notifications.MessageNotificationPolicy
-import com.example.thesis.repository.ConversationRepository
 import com.example.thesis.repository.isDisplayableUserMessage
 import com.example.thesis.updater.AppUpdateInfo
-import com.example.thesis.updater.AppUpdateManager
 import com.example.thesis.updater.UpdateStatus
 import java.io.File
 import org.xmtp.android.library.libxmtp.DecodedMessage
 import org.xmtp.android.library.libxmtp.IdentityKind
-import com.example.thesis.security.CryptoShredder
-import com.example.thesis.security.KeystoreManager
 import com.example.thesis.security.ShredAuditProof
 import com.example.thesis.security.ShredResult
 import com.example.thesis.security.ThesisTelemetry
 import com.example.thesis.ui.util.ReportExporter
-import com.example.thesis.xmtp.XmtpEngine
 import com.example.thesis.xmtp.XmtpEngineState
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -40,11 +34,9 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.UUID
 import org.xmtp.android.library.Conversation
-import org.xmtp.android.library.XMTPEnvironment
 
 
 /**
@@ -62,17 +54,18 @@ data class ActionLogEntry(
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private val appContext = application.applicationContext
-    private val keystoreManager = KeystoreManager(appContext)
-    private val databaseFactory = DatabaseFactory(appContext)
-    private val cryptoShredder = CryptoShredder(appContext, keystoreManager, databaseFactory)
-    private val engine = XmtpEngine(appContext, XMTPEnvironment.DEV)
-    private val repository = ConversationRepository(engine, viewModelScope)
-    private val appUpdateManager = AppUpdateManager(appContext)
-    private val notificationManager = MessageNotificationManager(appContext)
+    private val sessionContainer = (application as ThesisApplication).sessionContainer
+    private val keystoreManager = sessionContainer.keystoreManager
+    private val databaseFactory = sessionContainer.databaseFactory
+    private val cryptoShredder = sessionContainer.cryptoShredder
+    private val engine = sessionContainer.engine
+    private val repository = sessionContainer.repository
+    private val appUpdateManager = sessionContainer.appUpdateManager
+    private val notificationManager = sessionContainer.notificationManager
+    private val sessionStateMutex = sessionContainer.sessionMutex
     val updateStatus: StateFlow<UpdateStatus> = appUpdateManager.updateStatus
+    val unreadCounts: StateFlow<Map<String, Int>> = sessionContainer.unreadCounts
 
-    private val sessionStateMutex = Mutex()
-    private var activeSigner: ThesisSigner? = null
     private var messagesJob: Job? = null
 
     private val _isInitializing = MutableStateFlow(false)
@@ -86,19 +79,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     val engineState: StateFlow<XmtpEngineState> = engine.state
 
-    private val _walletAddress = MutableStateFlow<String?>(null)
-    val walletAddress: StateFlow<String?> = _walletAddress.asStateFlow()
+    val walletAddress: StateFlow<String?> = sessionContainer.walletAddress
 
     private val _lastShredProof = MutableStateFlow<ShredAuditProof?>(null)
     val lastShredProof: StateFlow<ShredAuditProof?> = _lastShredProof.asStateFlow()
 
-    private val notifiedMessageIds = Collections.synchronizedSet(LinkedHashSet<String>())
-    @Volatile
-    private var sessionInitializedAtMs: Long = System.currentTimeMillis()
-    @Volatile
-    private var isAppInForeground: Boolean = true
-    @Volatile
-    private var isLogsScreenOpen: Boolean = false
     private val _pendingNotificationConversationId = MutableStateFlow<String?>(null)
 
     val inboxId: StateFlow<String?> = engine.state
@@ -186,7 +171,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             val client = currentState.client
-            val ethAddress = _walletAddress.value?.takeIf { it.startsWith("0x") }
+            val ethAddress = walletAddress.value?.takeIf { it.startsWith("0x") }
                 ?: runCatching { client.publicIdentity.identifier }.getOrNull()
                 ?: "0x..."
             val activeConvs = runCatching { client.conversations.list() }.getOrDefault(emptyList())
@@ -274,7 +259,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun exportBenchmarkReport(): String {
         val client = (engine.state.value as? XmtpEngineState.Ready)?.client
-        val ethAddress = _walletAddress.value ?: "N/A"
+        val ethAddress = walletAddress.value ?: "N/A"
         val activeInboxId = client?.inboxId ?: inboxId.value ?: "N/A"
         val activeInstallationId = client?.installationId ?: installationId.value ?: "N/A"
         val convList = _conversations.value
@@ -344,10 +329,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     init {
-        notificationManager.ensureChannelCreated()
+        sessionContainer.onNotificationDispatched = { convId ->
+            logAction("NOTIF", "Priority notification dispatched [conv=${convId.take(8)}...]")
+        }
         viewModelScope.launch {
             repository.observeConversations().collectLatest { list ->
                 _conversations.value = list
+                sessionContainer.updateConversationsSnapshot(list)
                 val pendingId = _pendingNotificationConversationId.value
                 if (pendingId != null) {
                     val matched = list.firstOrNull { it.id == pendingId }
@@ -356,11 +344,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         selectConversation(matched)
                     }
                 }
-            }
-        }
-        viewModelScope.launch {
-            repository.incomingMessages.collect { incoming ->
-                handleIncomingMessageNotification(incoming)
             }
         }
         viewModelScope.launch {
@@ -386,6 +369,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             sessionStateMutex.withLock {
                 if (engine.state.value is XmtpEngineState.Ready) {
+                    XmtpMessagingService.start(appContext)
                     logAction("SESSION", "Session already active, skipping re-initialization.")
                     return@withLock
                 }
@@ -420,14 +404,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         }
 
                         val signer = try {
-                            activeSigner ?: withContext(Dispatchers.Default) {
+                            sessionContainer.activeSigner ?: withContext(Dispatchers.Default) {
                                 ThesisSigner.fromPrivateKey(privKeyBytes)
-                            }.also { activeSigner = it }
+                            }.also { sessionContainer.activeSigner = it }
                         } finally {
                             // Άμεσος μηδενισμός του ενδιάμεσου buffer ιδιωτικού κλειδιού στη μνήμη RAM
                             privKeyBytes.fill(0x00)
                         }
-                        _walletAddress.value = signer.address
+                        sessionContainer.setWalletAddress(signer.address)
                         val maskedAddress = if (signer.address.length >= 10) {
                             "${signer.address.take(6)}...${signer.address.takeLast(4)}"
                         } else signer.address
@@ -447,8 +431,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         }
                         when (initState) {
                             is XmtpEngineState.Ready -> {
-                                sessionInitializedAtMs = System.currentTimeMillis()
                                 _lastShredProof.value = null
+                                repository.pollIncomingMessages(seedOnly = true)
+                                XmtpMessagingService.start(appContext)
                                 _statusBanner.value = "Συνδέθηκε στο δίκτυο XMTP v4 (MLS) με SQLCipher."
                                 logAction("XMTP", "Connected to XMTP v4 MLS network with SQLCipher storage")
                             }
@@ -471,83 +456,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private val loggedMessageIds = Collections.synchronizedSet(mutableSetOf<String>())
 
-    private fun markMessageNotified(messageId: String) {
-        synchronized(notifiedMessageIds) {
-            if (notifiedMessageIds.size >= 512) {
-                val oldest = notifiedMessageIds.firstOrNull()
-                if (oldest != null) {
-                    notifiedMessageIds.remove(oldest)
-                }
-            }
-            notifiedMessageIds.add(messageId)
-        }
-    }
-
-    private fun handleIncomingMessageNotification(msg: DecodedMessage) {
-        val localInboxId = (engine.state.value as? XmtpEngineState.Ready)?.client?.inboxId
-        val sentAtMs = msg.sentAt?.time
-            ?: if (msg.sentAtNs > 0L) msg.sentAtNs / 1_000_000L else System.currentTimeMillis()
-        // Ignoramos mensajes historicos antiguos para evitar alertas repetidas al iniciar sesion.
-        if (sentAtMs < sessionInitializedAtMs - 60_000L) {
-            return
-        }
-
-        val alreadyNotified = synchronized(notifiedMessageIds) { msg.id in notifiedMessageIds }
-        val shouldNotify = MessageNotificationPolicy.shouldNotify(
-            messageId = msg.id,
-            conversationId = msg.conversationId,
-            senderInboxId = msg.senderInboxId,
-            localInboxId = localInboxId,
-            body = msg.body,
-            isAppInForeground = isAppInForeground,
-            activeConversationId = _selectedConversation.value?.id,
-            isLogsScreenOpen = isLogsScreenOpen,
-            alreadyNotified = alreadyNotified
-        )
-        if (!shouldNotify) return
-
-        markMessageNotified(msg.id)
-        val conv = _conversations.value.firstOrNull { it.id == msg.conversationId }
-        val explicitName = when (conv) {
-            is Conversation.Group -> {
-                val name = conv.group.name
-                when {
-                    name == "MLS Research Loopback" -> "Loopback MLS"
-                    name.isNotBlank() -> name
-                    else -> null
-                }
-            }
-            else -> null
-        }
-        val title = MessageNotificationPolicy.formatSenderTitle(explicitName, msg.senderInboxId)
-        val bodyPreview = MessageNotificationPolicy.formatBodyPreview(msg.body)
-        val posted = notificationManager.showIncomingMessageNotification(
-            conversationId = msg.conversationId,
-            title = title,
-            bodyPreview = bodyPreview,
-            timestampMs = sentAtMs
-        )
-        if (posted) {
-            logAction("NOTIF", "Priority notification dispatched [conv=${msg.conversationId.take(8)}...]")
-        }
-    }
-
     fun onAppForegroundChanged(inForeground: Boolean) {
-        isAppInForeground = inForeground
-        if (inForeground && !isLogsScreenOpen) {
-            _selectedConversation.value?.id?.let { activeId ->
-                notificationManager.cancelConversationNotification(activeId)
-            }
+        sessionContainer.setAppInForeground(inForeground)
+        if (inForeground && engine.state.value is XmtpEngineState.Ready) {
+            XmtpMessagingService.start(appContext)
         }
     }
 
     fun onLogsScreenVisibilityChanged(isOpen: Boolean) {
-        isLogsScreenOpen = isOpen
-        if (!isOpen && isAppInForeground) {
-            _selectedConversation.value?.id?.let { activeId ->
-                notificationManager.cancelConversationNotification(activeId)
-            }
-        }
+        sessionContainer.setLogsScreenOpen(isOpen)
     }
 
     fun openConversationById(conversationId: String) {
@@ -580,9 +497,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectConversation(conversation: Conversation?) {
         _selectedConversation.value = conversation
-        if (conversation != null) {
-            notificationManager.cancelConversationNotification(conversation.id)
-        }
+        sessionContainer.setActiveConversationId(conversation?.id)
         messagesJob?.cancel()
         _messages.value = emptyList()
 
@@ -707,7 +622,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     repository.sendMessage(conv, text)
                 }
                 .onSuccess { msgId ->
-                    val sender0x = _walletAddress.value ?: "0x..."
+                    val sender0x = walletAddress.value ?: "0x..."
                     val clientInbox = (engine.state.value as? XmtpEngineState.Ready)?.client?.inboxId ?: "N/A"
                     recordCommittedMessage(
                         msgId = msgId,
@@ -738,7 +653,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun performCryptoShredding() {
         if (_isShredding.value) return
-        val address = _walletAddress.value ?: return
+        val address = walletAddress.value ?: return
         _isShredding.value = true
         viewModelScope.launch {
             try {
@@ -752,18 +667,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     committedProofMap.clear()
                     _verifiedMessageCount.value = 0
                     loggedMessageIds.clear()
-                    notifiedMessageIds.clear()
                     _pendingNotificationConversationId.value = null
                     _actionLogs.value = emptyList()
                     ThesisTelemetry.clearTelemetryData()
                     ReportExporter.purgeCachedReports(appContext.cacheDir)
-                    notificationManager.cancelAllNotifications()
 
                     logAction("GDPR", "Executing GDPR Art. 17 cryptographic wipe...")
 
                     engine.shutdownAndAwait()
-                    activeSigner?.close()
-                    activeSigner = null
+                    sessionContainer.resetOnGdprShred()
 
                     val res = ThesisTelemetry.measureSuspendOperation("6. GDPR Art.17 Crypto-Shredding") {
                         cryptoShredder.shredAccountData(address)
@@ -771,7 +683,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     when (res) {
                         is ShredResult.Success -> {
                             _lastShredProof.value = res.auditProof
-                            _walletAddress.value = null
                             _statusBanner.value = "GDPR Wipe: Κλειδί Keystore & ${res.deletedFilesCount} αρχεία βάσης καταστράφηκαν οριστικά."
                             logAction("GDPR", "KEK destroyed & ${res.deletedFilesCount} database files expunged")
                             res.auditProof?.let { proof ->
@@ -784,7 +695,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         }
                         is ShredResult.PartialSuccessCryptoShreddedOnly -> {
                             _lastShredProof.value = res.auditProof
-                            _walletAddress.value = null
                             _statusBanner.value = "Crypto-Shredded: ${res.message}"
                             logAction("GDPR", "Crypto-shredded: ${res.message}")
                             res.auditProof?.let { proof ->
@@ -796,7 +706,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         }
                         is ShredResult.PartialSuccess -> {
                             _lastShredProof.value = res.auditProof
-                            _walletAddress.value = null
                             _statusBanner.value = "Crypto-Shredded: ${res.message}"
                             logAction("GDPR", "Crypto-shredded: ${res.message}")
                             res.auditProof?.let { proof ->
@@ -867,7 +776,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
                         if (sendResult.isSuccess) {
                             val probeMsgId = sendResult.getOrNull() ?: "PROBE_COMMITTED"
-                            val sender0x = _walletAddress.value ?: "0x..."
+                            val sender0x = walletAddress.value ?: "0x..."
                             val clientInbox = readyClient.inboxId
                             successfulSamples++
                             recordCommittedMessage(
@@ -957,8 +866,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun openInstallPermissionSettings() = appUpdateManager.openInstallPermissionSettings()
 
     override fun onCleared() {
-        engine.shutdown()
-        repository.close()
-        activeSigner?.close()
+        // Desvinculamos el callback de UI pero mantenemos el motor vivo para notificaciones fuera de la app.
+        sessionContainer.onNotificationDispatched = null
     }
 }

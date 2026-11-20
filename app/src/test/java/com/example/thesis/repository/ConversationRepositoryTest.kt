@@ -781,4 +781,62 @@ class ConversationRepositoryTest {
             repo.close()
         }
     }
+
+    @Test
+    fun test_pollIncomingMessages_emitsNewMessagesInExistingConversationAfterBaseline() = runTest(testDispatcher) {
+        val allMessagesStream = MutableSharedFlow<DecodedMessage>()
+        every { mockConversations.streamAllMessages() } returns allMessagesStream
+
+        val oldMsg = mockk<DecodedMessage>(relaxed = true)
+        every { oldMsg.id } returns "hist_msg_1"
+        every { oldMsg.conversationId } returns testConvId
+        every { oldMsg.senderInboxId } returns testPeerAddress
+        every { oldMsg.encodedContent.type } returns ContentTypeText
+        every { oldMsg.content<Any>() } returns "Old message"
+        every { oldMsg.body } returns "Old message"
+        every { oldMsg.sentAt } returns Date(1000L)
+
+        val newMsg = mockk<DecodedMessage>(relaxed = true)
+        every { newMsg.id } returns "live_bg_msg_2"
+        every { newMsg.conversationId } returns testConvId
+        every { newMsg.senderInboxId } returns testPeerAddress
+        every { newMsg.encodedContent.type } returns ContentTypeText
+        every { newMsg.content<Any>() } returns "Background message"
+        every { newMsg.body } returns "Background message"
+        every { newMsg.sentAt } returns Date(2000L)
+
+        coEvery { mockConversations.list(any(), any(), any(), any()) } returns listOf(mockConversation)
+        coEvery { mockConversation.messages() } returns listOf(oldMsg)
+
+        val repoScope = CoroutineScope(SupervisorJob() + testDispatcher)
+        val repo = ConversationRepository(
+            engine = mockEngine,
+            repositoryScope = repoScope,
+            ioDispatcher = testDispatcher,
+            syncIntervalMs = 5_000L
+        )
+        try {
+            repo.incomingMessages.test {
+                val seedCount = repo.pollIncomingMessages(seedOnly = true).getOrThrow()
+                assertEquals(0, seedCount)
+                expectNoEvents()
+
+                coEvery { mockConversation.messages() } returns listOf(oldMsg, newMsg)
+                val pulledCount = repo.pollIncomingMessages(seedOnly = false).getOrThrow()
+                assertEquals(1, pulledCount)
+
+                val emitted = awaitItem()
+                assertEquals("live_bg_msg_2", emitted.id)
+                assertEquals("Background message", emitted.body)
+
+                val dupCount = repo.pollIncomingMessages(seedOnly = false).getOrThrow()
+                assertEquals(0, dupCount)
+                expectNoEvents()
+                cancelAndIgnoreRemainingEvents()
+            }
+        } finally {
+            repoScope.cancel()
+            repo.close()
+        }
+    }
 }

@@ -156,4 +156,21 @@ class MessageNotificationPolicyTest {
         assertTrue(idA1 >= 1_000)
         assertNotEquals(idA1, idB)
     }
+
+    @Test
+    fun test_shouldNotify_allowsOutsideAppEvenWhenConversationWasPreviouslySelected() {
+        assertTrue(
+            MessageNotificationPolicy.shouldNotify(
+                messageId = "msg_bg_selected",
+                conversationId = "conv_a",
+                senderInboxId = "peer_inbox",
+                localInboxId = "local_inbox",
+                body = "Arrived while user was outside the app",
+                isAppInForeground = false,
+                activeConversationId = "conv_a",
+                isLogsScreenOpen = false,
+                alreadyNotified = false
+            )
+        )
+    }
 }

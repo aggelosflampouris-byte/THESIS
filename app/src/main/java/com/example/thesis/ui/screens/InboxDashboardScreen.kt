@@ -1,5 +1,6 @@
 package com.example.thesis.ui.screens
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -40,6 +41,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.painterResource
+import com.example.thesis.R
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -56,6 +59,7 @@ import org.xmtp.android.library.Conversation
 @Composable
 internal fun InboxDashboardScreen(
     conversations: List<Conversation>,
+    unreadCounts: Map<String, Int> = emptyMap(),
     engineState: XmtpEngineState,
     isCreatingConversation: Boolean,
     isShredding: Boolean = false,
@@ -210,6 +214,7 @@ internal fun InboxDashboardScreen(
                     ConversationItemCard(
                         index = index + 1,
                         conversation = conv,
+                        unreadCount = unreadCounts[conv.id] ?: 0,
                         onClick = { onSelectConversation(conv) }
                     )
                 }
@@ -301,6 +306,7 @@ internal fun InboxDashboardScreen(
 private fun ConversationItemCard(
     index: Int,
     conversation: Conversation,
+    unreadCount: Int = 0,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -399,6 +405,33 @@ private fun ConversationItemCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
+                }
+            }
+
+            if (unreadCount > 0) {
+                Spacer(modifier = Modifier.width(8.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Image(
+                        painter = painterResource(id = R.drawable.ic_notification_message_badge),
+                        contentDescription = "Νέο μήνυμα",
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.primary
+                    ) {
+                        Text(
+                            text = if (unreadCount > 99) "99+" else unreadCount.toString(),
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimary,
+                            fontSize = 10.sp
+                        )
+                    }
                 }
             }
 
