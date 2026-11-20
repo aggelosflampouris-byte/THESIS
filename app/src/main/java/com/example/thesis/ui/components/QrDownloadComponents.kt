@@ -43,6 +43,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.thesis.security.ScreenSecurityManager
 import com.example.thesis.ui.util.QrCodeGenerator
 import com.example.thesis.updater.UpdateConfig
 import com.example.thesis.updater.UpdateStatus
@@ -292,6 +293,7 @@ internal fun QrDownloadFullDialog(
     currentVersion: String,
     updateStatus: UpdateStatus,
     downloadUrl: String = UpdateConfig.LATEST_APK_DOWNLOAD_URL,
+    isScreenProtectionEnabled: Boolean = true,
     onCopyUrl: () -> Unit,
     onOpenDownloadUrl: () -> Unit,
     onDismiss: () -> Unit
@@ -304,6 +306,7 @@ internal fun QrDownloadFullDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        properties = ScreenSecurityManager.dialogProperties(isScreenProtectionEnabled),
         title = { Text("Λήψη Τελευταίας Έκδοσης (QR)") },
         text = {
             Column(

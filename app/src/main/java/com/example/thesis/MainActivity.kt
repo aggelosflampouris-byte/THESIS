@@ -1,6 +1,7 @@
 package com.example.thesis
 
 import android.Manifest
+import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -37,9 +38,13 @@ import androidx.compose.ui.platform.LocalContext
 import com.example.thesis.ui.ChatViewModel
 import com.example.thesis.ui.components.MessagingTopBar
 import com.example.thesis.ui.components.QrDownloadFullDialog
+import com.example.thesis.ui.components.ScreenRecordingShieldOverlay
+import com.example.thesis.ui.components.ScreenRecordingWarningBanner
 import com.example.thesis.ui.components.UpdateAvailableBanner
 import com.example.thesis.ui.components.messagingStatusText
 import com.example.thesis.identity.NicknamePolicy
+import com.example.thesis.security.ScreenSecurityManager
+import com.example.thesis.security.ScreenSecurityPolicy
 import com.example.thesis.ui.dialogs.AppUpdateDialog
 import com.example.thesis.ui.dialogs.EditContactNicknameDialog
 import com.example.thesis.ui.dialogs.GDPRShredConfirmationDialog
@@ -61,13 +66,18 @@ import com.example.thesis.updater.UpdateConfig
 import com.example.thesis.updater.UpdateStatus
 import com.example.thesis.xmtp.XmtpEngineState
 import kotlinx.coroutines.launch
+import java.util.function.Consumer
 
 class MainActivity : ComponentActivity() {
 
     private val viewModel: ChatViewModel by viewModels()
+    // Almacenamos como Any? para evitar verificacion de clases de API 34+ al cargar la actividad en Android antiguo.
+    private var screenCaptureHandle: Any? = null
+    private var screenRecordingHandle: Consumer<Int>? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        ScreenSecurityManager.applyWindowProtection(this, viewModel.isScreenProtectionEnabled.value)
         enableEdgeToEdge()
         handleNotificationIntent(intent)
         setContent {
@@ -79,11 +89,31 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        ScreenSecurityManager.applyWindowProtection(this, viewModel.isScreenProtectionEnabled.value)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            screenCaptureHandle = ScreenSecurityManager.registerScreenCaptureObserver(this) {
+                viewModel.onScreenCaptureAttemptDetected()
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+            screenRecordingHandle = ScreenSecurityManager.registerScreenRecordingObserver(this) { isActive ->
+                viewModel.onScreenRecordingStateChanged(isActive)
+            }
+        }
         viewModel.onAppForegroundChanged(true)
     }
 
     override fun onStop() {
         super.onStop()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            ScreenSecurityManager.unregisterScreenCaptureObserver(this, screenCaptureHandle)
+            screenCaptureHandle = null
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+            ScreenSecurityManager.unregisterScreenRecordingObserver(this, screenRecordingHandle)
+            screenRecordingHandle = null
+        }
+        viewModel.onScreenRecordingStateChanged(false)
         viewModel.onAppForegroundChanged(false)
     }
 
@@ -123,6 +153,8 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     val unreadCounts by viewModel.unreadCounts.collectAsState()
     val nicknameSnapshot by viewModel.nicknameSnapshot.collectAsState()
     val peerReadTimestamps by viewModel.peerReadTimestamps.collectAsState()
+    val isScreenProtectionEnabled by viewModel.isScreenProtectionEnabled.collectAsState()
+    val isScreenRecordingActive by viewModel.isScreenRecordingActive.collectAsState()
 
     val updateStatus by viewModel.updateStatus.collectAsState()
     var showUpdateDialog by rememberSaveable { mutableStateOf(false) }
@@ -202,6 +234,12 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
         viewModel.onNotificationPermissionResult(granted)
     }
 
+    LaunchedEffect(isScreenProtectionEnabled) {
+        (context as? Activity)?.let { activity ->
+            ScreenSecurityManager.applyWindowProtection(activity, isScreenProtectionEnabled)
+        }
+    }
+
     LaunchedEffect(Unit) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !viewModel.hasNotificationPermission()) {
             notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -235,6 +273,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
 
     if (showNewConversationDialog) {
         NewConversationDialog(
+            isScreenProtectionEnabled = isScreenProtectionEnabled,
             onDismiss = { showNewConversationDialog = false },
             onStartConversation = { target, contactNick ->
                 showNewConversationDialog = false
@@ -256,6 +295,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
             targetLabel = targetLabel,
             currentLocalNickname = nicknameSnapshot.localNicknames[normalizedKey],
             sharedPeerNickname = if (targetConv is Conversation.Dm) nicknameSnapshot.sharedNicknames[normalizedKey] else null,
+            isScreenProtectionEnabled = isScreenProtectionEnabled,
             onDismiss = { nicknameEditTarget = null },
             onSave = { nick ->
                 nicknameEditTarget = null
@@ -273,6 +313,8 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
             isCheckingUpdate = updateStatus is UpdateStatus.Checking,
             notificationsEnabled = viewModel.hasNotificationPermission(),
             isServiceNotificationVisible = viewModel.isBackgroundServiceChannelVisible(),
+            isScreenProtectionEnabled = isScreenProtectionEnabled,
+            onToggleScreenProtection = { enabled -> viewModel.setScreenProtectionEnabled(enabled) },
             onSaveMyNickname = { nick -> viewModel.updateMyNickname(nick) },
             onCheckForUpdates = { viewModel.checkForUpdates(manual = true) },
             onOpenNotificationSettings = { viewModel.openNotificationSettings() },
@@ -297,6 +339,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
         AppUpdateDialog(
             updateStatus = updateStatus,
             canRequestInstall = viewModel.canRequestPackageInstalls(),
+            isScreenProtectionEnabled = isScreenProtectionEnabled,
             onDownload = { viewModel.downloadUpdate(it) },
             onInstall = { viewModel.installUpdate(it) },
             onOpenSettings = { viewModel.openInstallPermissionSettings() },
@@ -311,6 +354,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
         QrDownloadFullDialog(
             currentVersion = viewModel.getCurrentVersionName(),
             updateStatus = updateStatus,
+            isScreenProtectionEnabled = isScreenProtectionEnabled,
             onCopyUrl = onCopyDownloadUrl,
             onOpenDownloadUrl = onOpenDownloadUrl,
             onDismiss = { showQrDownloadDialog = false }
@@ -319,6 +363,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
 
     if (showShredConfirmationDialog) {
         GDPRShredConfirmationDialog(
+            isScreenProtectionEnabled = isScreenProtectionEnabled,
             onDismiss = { showShredConfirmationDialog = false },
             onConfirmShred = {
                 showShredConfirmationDialog = false
@@ -338,6 +383,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
             localInboxId = inspectorReadyState.client.inboxId,
             messageCount = messages.size,
             contactNickname = NicknamePolicy.resolveContactNickname(inspectorKey, nicknameSnapshot),
+            isScreenProtectionEnabled = isScreenProtectionEnabled,
             onEditContactNickname = if (isLoopbackConv) null else {
                 {
                     showProtocolInspectorDialog = false
@@ -352,57 +398,61 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
         )
     }
 
-    if (showLogsScreen) {
-        LogsTelemetryScreen(
-            logs = actionLogs,
-            walletAddress = walletAddress,
-            inboxId = inboxId,
-            installationId = installationId,
-            verifiedMsgCount = verifiedMsgCount,
-            isBenchmarking = isBenchmarking,
-            snackbarHostState = snackbarHostState,
-            onBack = { showLogsScreen = false },
-            onClear = { viewModel.clearActionLogs() },
-            onExport = onExportLogs,
-            onShareReport = onShareReport,
-            onRunBatchBenchmark = { viewModel.runBatchBenchmark(10) },
-            onEmitBlockchainPoC = { viewModel.emitBlockchainPoCProof() }
-        )
-    } else {
-        Scaffold(
-            snackbarHost = { SnackbarHost(snackbarHostState) },
-            contentWindowInsets = WindowInsets.safeDrawing,
-            topBar = {
-                MessagingTopBar(
-                    selectedConversation = selectedConversation,
-                    walletAddress = walletAddress,
-                    nicknameSnapshot = nicknameSnapshot,
-                    engineState = engineState,
-                    isSyncing = isSyncing,
-                    isShredding = isShredding,
-                    onBack = { viewModel.selectConversation(null) },
-                    onSync = { viewModel.syncConversations() },
-                    onOpenIdentity = { showIdentityDialog = true },
-                    onOpenShred = { showShredConfirmationDialog = true },
-                    onOpenLogs = { showLogsScreen = true },
-                    onOpenProtocolInspector = { showProtocolInspectorDialog = true }
-                )
-            }
-        ) { padding ->
-            // Consumimos los insets del Scaffold para que imePadding() en el chat no duplique el margen inferior.
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding)
-                    .consumeWindowInsets(padding)
-            ) {
-                val availableUpdate = updateStatus as? UpdateStatus.UpdateAvailable
-                if (selectedConversation == null && availableUpdate != null) {
-                    UpdateAvailableBanner(
-                        latestVersion = availableUpdate.updateInfo.latestVersion,
-                        onOpenUpdate = { showUpdateDialog = true }
+    Box(modifier = Modifier.fillMaxSize()) {
+        if (showLogsScreen) {
+            LogsTelemetryScreen(
+                logs = actionLogs,
+                walletAddress = walletAddress,
+                inboxId = inboxId,
+                installationId = installationId,
+                verifiedMsgCount = verifiedMsgCount,
+                isBenchmarking = isBenchmarking,
+                snackbarHostState = snackbarHostState,
+                onBack = { showLogsScreen = false },
+                onClear = { viewModel.clearActionLogs() },
+                onExport = onExportLogs,
+                onShareReport = onShareReport,
+                onRunBatchBenchmark = { viewModel.runBatchBenchmark(10) },
+                onEmitBlockchainPoC = { viewModel.emitBlockchainPoCProof() }
+            )
+        } else {
+            Scaffold(
+                snackbarHost = { SnackbarHost(snackbarHostState) },
+                contentWindowInsets = WindowInsets.safeDrawing,
+                topBar = {
+                    MessagingTopBar(
+                        selectedConversation = selectedConversation,
+                        walletAddress = walletAddress,
+                        nicknameSnapshot = nicknameSnapshot,
+                        engineState = engineState,
+                        isSyncing = isSyncing,
+                        isShredding = isShredding,
+                        onBack = { viewModel.selectConversation(null) },
+                        onSync = { viewModel.syncConversations() },
+                        onOpenIdentity = { showIdentityDialog = true },
+                        onOpenShred = { showShredConfirmationDialog = true },
+                        onOpenLogs = { showLogsScreen = true },
+                        onOpenProtocolInspector = { showProtocolInspectorDialog = true }
                     )
                 }
+            ) { padding ->
+                // Consumimos los insets del Scaffold para que imePadding() en el chat no duplique el margen inferior.
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(padding)
+                        .consumeWindowInsets(padding)
+                ) {
+                    if (ScreenSecurityPolicy.shouldShowRecordingWarningBanner(isScreenProtectionEnabled, isScreenRecordingActive)) {
+                        ScreenRecordingWarningBanner()
+                    }
+                    val availableUpdate = updateStatus as? UpdateStatus.UpdateAvailable
+                    if (selectedConversation == null && availableUpdate != null) {
+                        UpdateAvailableBanner(
+                            latestVersion = availableUpdate.updateInfo.latestVersion,
+                            onOpenUpdate = { showUpdateDialog = true }
+                        )
+                    }
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -468,6 +518,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                                     conversations = conversations,
                                     unreadCounts = unreadCounts,
                                     nicknameSnapshot = nicknameSnapshot,
+                                    isScreenProtectionEnabled = isScreenProtectionEnabled,
                                     engineState = engineState,
                                     isCreatingConversation = isCreatingConversation,
                                     isShredding = isShredding,
@@ -488,6 +539,10 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                     }
                 }
             }
+        }
+        }
+        if (ScreenSecurityPolicy.shouldShowPrivacyShield(isScreenProtectionEnabled, isScreenRecordingActive)) {
+            ScreenRecordingShieldOverlay()
         }
     }
 }

@@ -9,6 +9,7 @@ import com.example.thesis.identity.ThesisSigner
 import com.example.thesis.repository.ConversationRepository
 import com.example.thesis.security.CryptoShredder
 import com.example.thesis.security.KeystoreManager
+import com.example.thesis.security.SharedPrefsScreenSecurityStore
 import com.example.thesis.updater.AppUpdateManager
 import com.example.thesis.xmtp.XmtpEngine
 import com.example.thesis.xmtp.XmtpEngineState
@@ -41,6 +42,8 @@ internal class ThesisSessionContainer(context: Context) {
     val notificationStateStore = SharedPrefsNotificationStateStore(appContext)
     val nicknameStore = SharedPrefsNicknameStore(appContext)
     val nicknameSnapshot: StateFlow<NicknameSnapshot> = nicknameStore.snapshot
+    val screenSecurityStore = SharedPrefsScreenSecurityStore(appContext)
+    val isScreenProtectionEnabled: StateFlow<Boolean> = screenSecurityStore.isScreenProtectionEnabled
     val repository = ConversationRepository(
         engine = engine,
         repositoryScope = appScope,
@@ -147,6 +150,7 @@ internal class ThesisSessionContainer(context: Context) {
         activeConversationId = null
         repository.resetNotificationBaseline()
         nicknameStore.clear()
+        screenSecurityStore.resetToDefault()
         XmtpMessagingService.stop(appContext)
         BackgroundSyncScheduler.cancelAll(appContext)
         notificationManager.cancelAllNotifications()
