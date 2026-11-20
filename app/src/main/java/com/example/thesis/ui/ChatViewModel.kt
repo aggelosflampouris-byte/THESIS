@@ -10,8 +10,12 @@ import android.app.Application
 import com.example.thesis.ThesisApplication
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.thesis.identity.NicknamePolicy
+import com.example.thesis.identity.NicknameSnapshot
 import com.example.thesis.identity.ThesisSigner
+import com.example.thesis.repository.ReadReceiptPolicy
 import com.example.thesis.repository.isDisplayableUserMessage
+import java.util.concurrent.ConcurrentHashMap
 import com.example.thesis.updater.AppUpdateInfo
 import com.example.thesis.updater.UpdateStatus
 import java.io.File
@@ -64,6 +68,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val sessionStateMutex = sessionContainer.sessionMutex
     val updateStatus: StateFlow<UpdateStatus> = appUpdateManager.updateStatus
     val unreadCounts: StateFlow<Map<String, Int>> = sessionContainer.unreadCounts
+    val nicknameSnapshot: StateFlow<NicknameSnapshot> = sessionContainer.nicknameSnapshot
+    val peerReadTimestamps: StateFlow<Map<String, Long>> = repository.peerReadTimestamps
 
     private var messagesJob: Job? = null
 
@@ -456,16 +462,32 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private val loggedMessageIds = Collections.synchronizedSet(mutableSetOf<String>())
+    private val lastSentReceiptPeerMsgId = ConcurrentHashMap<String, String>()
+    private val lastAnnouncedNicknameByConv = ConcurrentHashMap<String, String>()
 
     fun onAppForegroundChanged(inForeground: Boolean) {
         sessionContainer.setAppInForeground(inForeground)
-        if (inForeground && engine.state.value is XmtpEngineState.Ready) {
-            sessionContainer.scheduleBackgroundSync()
+        if (inForeground) {
+            if (engine.state.value is XmtpEngineState.Ready) {
+                sessionContainer.scheduleBackgroundSync()
+            }
+            val currentConv = _selectedConversation.value
+            val currentMsgs = _messages.value
+            if (currentConv != null && currentMsgs.isNotEmpty()) {
+                maybeSendReadReceipt(currentConv, currentMsgs)
+            }
         }
     }
 
     fun onLogsScreenVisibilityChanged(isOpen: Boolean) {
         sessionContainer.setLogsScreenOpen(isOpen)
+        if (!isOpen) {
+            val currentConv = _selectedConversation.value
+            val currentMsgs = _messages.value
+            if (currentConv != null && currentMsgs.isNotEmpty()) {
+                maybeSendReadReceipt(currentConv, currentMsgs)
+            }
+        }
     }
 
     fun openConversationById(conversationId: String) {
@@ -482,6 +504,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun hasNotificationPermission(): Boolean = notificationManager.hasNotificationPermission()
 
     fun openNotificationSettings() = notificationManager.openNotificationSettings()
+
+    fun openBackgroundServiceChannelSettings() = notificationManager.openBackgroundServiceChannelSettings()
+
+    fun isBackgroundServiceChannelVisible(): Boolean = notificationManager.isBackgroundServiceChannelEnabled()
 
     fun onNotificationPermissionResult(granted: Boolean) {
         if (granted) {
@@ -503,10 +529,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _messages.value = emptyList()
 
         if (conversation != null) {
+            announceNicknameIfNeeded(conversation)
             messagesJob = viewModelScope.launch {
                 val currentInboxId = (engine.state.value as? XmtpEngineState.Ready)?.client?.inboxId
                 repository.observeMessages(conversation).collectLatest { msgList ->
                     _messages.value = msgList
+                    maybeSendReadReceipt(conversation, msgList)
                     msgList.forEach { msg ->
                         recordCommittedMessage(
                             msgId = msg.id,
@@ -529,7 +557,76 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun startNewConversation(peerIdentifier: String) {
+    private fun isLoopbackConversation(conversation: Conversation): Boolean =
+        conversation is Conversation.Group && conversation.group.name == "MLS Research Loopback"
+
+    private fun maybeSendReadReceipt(conversation: Conversation, messages: List<DecodedMessage>) {
+        val localInboxId = (engine.state.value as? XmtpEngineState.Ready)?.client?.inboxId ?: return
+        val latestPeerMsg = messages.lastOrNull { !it.senderInboxId.equals(localInboxId, ignoreCase = true) }
+        val shouldSend = ReadReceiptPolicy.shouldSendReadReceipt(
+            latestPeerMessage = latestPeerMsg,
+            localLastReadTimestampMs = repository.localReadTimestamps.value[conversation.id],
+            lastSentForPeerMsgId = lastSentReceiptPeerMsgId[conversation.id],
+            isAppInForeground = sessionContainer.isInForeground(),
+            isLogsScreenOpen = sessionContainer.isLogsScreenOpen()
+        )
+        if (!shouldSend || latestPeerMsg == null) return
+
+        // Marcamos optimista antes de enviar para evitar rafagas duplicadas durante recomposiciones o syncs rapidos.
+        lastSentReceiptPeerMsgId[conversation.id] = latestPeerMsg.id
+        viewModelScope.launch {
+            repository.sendReadReceipt(conversation)
+                .onSuccess {
+                    logAction("READ_RECEIPT", "Sent encrypted read receipt [conv=${conversation.id.take(8)}...]")
+                }
+                .onFailure {
+                    lastSentReceiptPeerMsgId.remove(conversation.id, latestPeerMsg.id)
+                }
+        }
+    }
+
+    private fun announceNicknameIfNeeded(conversation: Conversation) {
+        if (isLoopbackConversation(conversation)) return
+        val nickname = nicknameSnapshot.value.myNickname ?: return
+        if (lastAnnouncedNicknameByConv[conversation.id] == nickname) return
+        lastAnnouncedNicknameByConv[conversation.id] = nickname
+        viewModelScope.launch {
+            repository.sendProfileNickname(conversation, nickname)
+                .onFailure {
+                    lastAnnouncedNicknameByConv.remove(conversation.id, nickname)
+                }
+        }
+    }
+
+    fun updateMyNickname(rawNickname: String) {
+        val saved = sessionContainer.nicknameStore.setMyNickname(rawNickname)
+        if (saved != null) {
+            _statusBanner.value = "Το ψευδώνυμο ενημερώθηκε: $saved"
+            logAction("IDENTITY", "Custom profile nickname updated: $saved")
+            _conversations.value.forEach { conv ->
+                if (!isLoopbackConversation(conv)) {
+                    announceNicknameIfNeeded(conv)
+                }
+            }
+        } else {
+            lastAnnouncedNicknameByConv.clear()
+            _statusBanner.value = "Το ψευδώνυμο αφαιρέθηκε."
+            logAction("IDENTITY", "Custom profile nickname cleared")
+        }
+    }
+
+    fun updateContactNickname(contactKey: String, rawNickname: String) {
+        val saved = sessionContainer.nicknameStore.setLocalContactNickname(contactKey, rawNickname)
+        if (saved != null) {
+            _statusBanner.value = "Το ψευδώνυμο επαφής αποθηκεύτηκε: $saved"
+            logAction("IDENTITY", "Local contact nickname set [$saved]")
+        } else {
+            _statusBanner.value = "Το ψευδώνυμο επαφής επαναφέρθηκε."
+            logAction("IDENTITY", "Local contact nickname reset")
+        }
+    }
+
+    fun startNewConversation(peerIdentifier: String, contactNickname: String? = null) {
         if (_isCreatingConversation.value || _isShredding.value || _isBenchmarking.value) return
         _isCreatingConversation.value = true
         viewModelScope.launch {
@@ -540,6 +637,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     repository.createConversation(peerIdentifier)
                 }
                 .onSuccess { conv ->
+                    val sanitizedNick = NicknamePolicy.sanitize(contactNickname)
+                    if (sanitizedNick != null) {
+                        val contactKey = if (conv is Conversation.Dm) conv.dm.peerInboxId else conv.id
+                        sessionContainer.nicknameStore.setLocalContactNickname(contactKey, sanitizedNick)
+                    }
                     _statusBanner.value = "Η συνομιλία MLS δημιουργήθηκε."
                     logAction("MLS", "MLS conversation established. Topic: ${conv.topic.take(24)}...")
                     selectConversation(conv)
@@ -668,6 +770,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     committedProofMap.clear()
                     _verifiedMessageCount.value = 0
                     loggedMessageIds.clear()
+                    lastSentReceiptPeerMsgId.clear()
+                    lastAnnouncedNicknameByConv.clear()
                     _pendingNotificationConversationId.value = null
                     _actionLogs.value = emptyList()
                     ThesisTelemetry.clearTelemetryData()

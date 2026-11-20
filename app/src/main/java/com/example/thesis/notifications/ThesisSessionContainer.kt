@@ -2,6 +2,9 @@ package com.example.thesis.notifications
 
 import android.content.Context
 import com.example.thesis.database.DatabaseFactory
+import com.example.thesis.identity.NicknamePolicy
+import com.example.thesis.identity.NicknameSnapshot
+import com.example.thesis.identity.SharedPrefsNicknameStore
 import com.example.thesis.identity.ThesisSigner
 import com.example.thesis.repository.ConversationRepository
 import com.example.thesis.security.CryptoShredder
@@ -9,17 +12,13 @@ import com.example.thesis.security.KeystoreManager
 import com.example.thesis.updater.AppUpdateManager
 import com.example.thesis.xmtp.XmtpEngine
 import com.example.thesis.xmtp.XmtpEngineState
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -40,15 +39,17 @@ internal class ThesisSessionContainer(context: Context) {
     // El alcance de aplicacion mantiene viva la escucha gRPC y las notificaciones aunque se cierre la UI.
     val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val notificationStateStore = SharedPrefsNotificationStateStore(appContext)
-    val repository = ConversationRepository(engine, appScope, seenMessageStorage = notificationStateStore)
+    val nicknameStore = SharedPrefsNicknameStore(appContext)
+    val nicknameSnapshot: StateFlow<NicknameSnapshot> = nicknameStore.snapshot
+    val repository = ConversationRepository(
+        engine = engine,
+        repositoryScope = appScope,
+        seenMessageStorage = notificationStateStore,
+        nicknameStorage = nicknameStore
+    )
     val appUpdateManager = AppUpdateManager(appContext)
     val notificationManager = MessageNotificationManager(appContext)
     val sessionMutex = Mutex()
-    private var softBackgroundPollJob: Job? = null
-
-    companion object {
-        private const val SOFT_BACKGROUND_POLL_INTERVAL_MS = 15_000L
-    }
 
     @Volatile
     var activeSigner: ThesisSigner? = null
@@ -91,39 +92,24 @@ internal class ThesisSessionContainer(context: Context) {
 
     fun isInForeground(): Boolean = isAppInForeground
 
+    fun isLogsScreenOpen(): Boolean = isLogsScreenOpen
+
     fun setAppInForeground(inForeground: Boolean) {
         isAppInForeground = inForeground
         if (inForeground) {
-            softBackgroundPollJob?.cancel()
-            softBackgroundPollJob = null
             if (!isLogsScreenOpen) {
                 activeConversationId?.let { clearUnread(it) }
             }
         } else if (keystoreManager.hasPersistedSession() || engine.state.value is XmtpEngineState.Ready) {
-            scheduleBackgroundSync()
-            startSoftBackgroundPolling()
+            // Reprogramamos el respaldo en segundo plano al salir por si el sistema cierra el servicio mas tarde.
+            BackgroundSyncScheduler.scheduleAll(appContext)
         }
     }
 
     fun scheduleBackgroundSync() {
+        // Solo invocamos startForegroundService desde primer plano para cumplir las restricciones de Android 12+.
+        XmtpMessagingService.start(appContext)
         BackgroundSyncScheduler.scheduleAll(appContext)
-    }
-
-    private fun startSoftBackgroundPolling() {
-        if (softBackgroundPollJob?.isActive == true) return
-        softBackgroundPollJob = appScope.launch {
-            while (isActive && !isAppInForeground) {
-                delay(SOFT_BACKGROUND_POLL_INTERVAL_MS)
-                if (isAppInForeground) break
-                try {
-                    syncMessagesInBackground()
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Throwable) {
-                    // Ignoramos errores puntuales del sondeo en memoria; WorkManager reintentara fuera del proceso.
-                }
-            }
-        }
     }
 
     fun setLogsScreenOpen(isOpen: Boolean) {
@@ -153,8 +139,6 @@ internal class ThesisSessionContainer(context: Context) {
     }
 
     fun resetOnGdprShred() {
-        softBackgroundPollJob?.cancel()
-        softBackgroundPollJob = null
         synchronized(notifiedMessageIds) {
             notifiedMessageIds.clear()
         }
@@ -162,6 +146,8 @@ internal class ThesisSessionContainer(context: Context) {
         conversationsSnapshot = emptyList()
         activeConversationId = null
         repository.resetNotificationBaseline()
+        nicknameStore.clear()
+        XmtpMessagingService.stop(appContext)
         BackgroundSyncScheduler.cancelAll(appContext)
         notificationManager.cancelAllNotifications()
         _walletAddress.value = null
@@ -265,7 +251,14 @@ internal class ThesisSessionContainer(context: Context) {
             }
             else -> null
         }
-        val title = MessageNotificationPolicy.formatSenderTitle(explicitName, msg.senderInboxId)
+        val currentNicknames = nicknameStore.snapshot.value
+        val resolvedExplicitName = NicknamePolicy.resolveNotificationSenderTitle(
+            senderInboxId = msg.senderInboxId,
+            conversationId = msg.conversationId,
+            groupName = explicitName,
+            snapshot = currentNicknames
+        )
+        val title = MessageNotificationPolicy.formatSenderTitle(resolvedExplicitName, msg.senderInboxId)
         val bodyPreview = MessageNotificationPolicy.formatBodyPreview(msg.body)
         val sentAtMs = msg.sentAt?.time
             ?: if (msg.sentAtNs > 0L) msg.sentAtNs / 1_000_000L else System.currentTimeMillis()
@@ -274,7 +267,8 @@ internal class ThesisSessionContainer(context: Context) {
             conversationId = msg.conversationId,
             title = title,
             bodyPreview = bodyPreview,
-            timestampMs = sentAtMs
+            timestampMs = sentAtMs,
+            localUserName = currentNicknames.myNickname ?: "Εσείς"
         )
         if (posted) {
             onNotificationDispatched?.invoke(msg.conversationId)

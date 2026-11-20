@@ -1,9 +1,14 @@
 package com.example.thesis.repository
 
 import android.util.Log
+import com.example.thesis.identity.InMemoryNicknameStorage
+import com.example.thesis.identity.NicknamePolicy
+import com.example.thesis.identity.NicknameStorage
 import com.example.thesis.notifications.InMemorySeenMessageStorage
 import com.example.thesis.notifications.SeenMessageStorage
 import com.example.thesis.util.CryptoUtils
+import com.example.thesis.xmtp.ContentTypeProfileNickname
+import com.example.thesis.xmtp.ProfileNickname
 import com.example.thesis.xmtp.XmtpEngine
 import com.example.thesis.xmtp.XmtpEngineState
 import kotlinx.coroutines.CancellationException
@@ -21,8 +26,12 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
@@ -42,7 +51,10 @@ import org.xmtp.android.library.Client
 import org.xmtp.android.library.ConsentState
 import org.xmtp.android.library.Conversation
 import org.xmtp.android.library.Dm
+import org.xmtp.android.library.SendOptions
+import org.xmtp.android.library.codecs.ContentTypeReadReceipt
 import org.xmtp.android.library.codecs.ContentTypeText
+import org.xmtp.android.library.codecs.ReadReceipt
 import org.xmtp.android.library.libxmtp.DecodedMessage
 import org.xmtp.proto.mls.message.contents.TranscriptMessages.GroupUpdated
 import org.xmtp.android.library.libxmtp.PublicIdentity
@@ -83,7 +95,8 @@ class ConversationRepository(
     private val repositoryScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val syncIntervalMs: Long = 5_000L,
-    private val seenMessageStorage: SeenMessageStorage = InMemorySeenMessageStorage()
+    private val seenMessageStorage: SeenMessageStorage = InMemorySeenMessageStorage(),
+    private val nicknameStorage: NicknameStorage = InMemoryNicknameStorage()
 ) : AutoCloseable {
 
     val xmtpEngine: XmtpEngine get() = engine
@@ -149,6 +162,12 @@ class ConversationRepository(
         addAll(seenMessageStorage.loadSeenIds())
     }
 
+    private val _peerReadTimestamps = MutableStateFlow<Map<String, Long>>(emptyMap())
+    val peerReadTimestamps: StateFlow<Map<String, Long>> = _peerReadTimestamps.asStateFlow()
+
+    private val _localReadTimestamps = MutableStateFlow<Map<String, Long>>(emptyMap())
+    val localReadTimestamps: StateFlow<Map<String, Long>> = _localReadTimestamps.asStateFlow()
+
     @Volatile
     private var hasSeededMessageBaseline: Boolean = seenMessageStorage.isBaselineEstablished()
 
@@ -172,6 +191,8 @@ class ConversationRepository(
                     while (isActive) {
                         try {
                             client.conversations.streamAllMessages().collect { msg ->
+                                // Extraemos acuses de lectura y apodos antes de descartar tramas no textuales.
+                                processControlMessages(msg.conversationId, listOf(msg))
                                 if (!msg.isDisplayableUserMessage()) return@collect
                                 if (recordSeenId(msg.id)) {
                                     _incomingMessages.tryEmit(msg)
@@ -230,10 +251,12 @@ class ConversationRepository(
             if (e is CancellationException) throw e
             Log.w(TAG, "Conversations sync (welcomes) failed: ${e.message}")
         }
+        var syncAllSucceeded = true
         try {
             client.conversations.syncAllConversations(consentStates = allowedConsentStates)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
+            syncAllSucceeded = false
             Log.w(TAG, "Conversations syncAllConversations failed: ${e.message}")
         }
         val list = try {
@@ -243,6 +266,15 @@ class ConversationRepository(
             client.conversations.list()
         }
         list.forEach { conv ->
+            if (!syncAllSucceeded) {
+                // Si la sincronizacion global falla, sincronizamos cada conversacion individualmente para no perder mensajes nuevos.
+                try {
+                    conv.sync()
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    Log.w(TAG, "Fallback per-conversation sync failed: ${e::class.java.simpleName}")
+                }
+            }
             try {
                 if (conv.consentState() == ConsentState.UNKNOWN) {
                     conv.updateConsentState(ConsentState.ALLOWED)
@@ -582,9 +614,11 @@ class ConversationRepository(
                 val shouldSeed = seedOnly || !hasSeededMessageBaseline
 
                 for (conv in conversations) {
-                    val msgs = fetchMessagesSafely(conv)
+                    val rawMsgs = fetchMessagesSafely(conv)
+                    processControlMessages(conv.id, rawMsgs)
+                    val msgs = rawMsgs
                         .filter { it.isDisplayableUserMessage() }
-                        .sortedBy { it.sentAt?.time ?: (it.sentAtNs / 1_000_000L) }
+                        .sortedBy { it.resolvedTimestampMs() }
 
                     if (shouldSeed) {
                         val seedIds = msgs.mapNotNull { it.id.takeIf(String::isNotBlank) }
@@ -630,6 +664,8 @@ class ConversationRepository(
         hasSeededMessageBaseline = false
         seenMessageIds.clear()
         seenMessageStorage.clear()
+        _peerReadTimestamps.value = emptyMap()
+        _localReadTimestamps.value = emptyMap()
     }
 
     suspend fun syncConversation(conversation: Conversation): Result<Unit> = withContext(ioDispatcher) {
@@ -674,6 +710,7 @@ class ConversationRepository(
 
         // 1. Instantly load local cached messages from SQLite to eliminate initial UI latency (0ms wait)
         val initialCached = fetchMessagesSafely(conversation)
+        processControlMessages(conversation.id, initialCached)
         val initialCachedIds = mutableListOf<String>()
         val initialSnapshot = synchronized(mapLock) {
             initialCached.filter { it.isDisplayableUserMessage() }.forEach { msg ->
@@ -699,6 +736,7 @@ class ConversationRepository(
                 }
 
                 val latest = fetchMessagesSafely(conversation)
+                processControlMessages(conversation.id, latest)
 
                 val filteredLatest = latest.filter { it.isDisplayableUserMessage() }
                 val newlySyncedMessages = mutableListOf<DecodedMessage>()
@@ -735,6 +773,7 @@ class ConversationRepository(
             while (isActive) {
                 try {
                     conversation.streamMessages().collect { incoming ->
+                        processControlMessages(conversation.id, listOf(incoming))
                         if (!incoming.isDisplayableUserMessage()) return@collect
                         if (recordSeenId(incoming.id)) {
                             _incomingMessages.tryEmit(incoming)
@@ -832,6 +871,44 @@ class ConversationRepository(
             msgId
         }
     }
+
+    suspend fun sendReadReceipt(conversation: Conversation): Result<String> = withContext(ioDispatcher) {
+        runCatching {
+            val msgId = conversation.send(
+                ReadReceipt,
+                SendOptions(contentType = ContentTypeReadReceipt)
+            )
+            val nowMs = System.currentTimeMillis()
+            _localReadTimestamps.update { current ->
+                val prev = current[conversation.id] ?: 0L
+                if (nowMs > prev) current + (conversation.id to nowMs) else current
+            }
+            try {
+                conversation.sync()
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+            }
+            msgId
+        }
+    }
+
+    suspend fun sendProfileNickname(conversation: Conversation, nickname: String): Result<String> =
+        withContext(ioDispatcher) {
+            val clean = NicknamePolicy.sanitize(nickname)
+                ?: return@withContext Result.failure(IllegalArgumentException("Nickname cannot be blank"))
+            runCatching {
+                val msgId = conversation.send(
+                    ProfileNickname(clean),
+                    SendOptions(contentType = ContentTypeProfileNickname)
+                )
+                try {
+                    conversation.sync()
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                }
+                msgId
+            }
+        }
 
     suspend fun sendMessage(conversationId: String, content: String): Result<Unit> = withContext(ioDispatcher) {
         if (content.isBlank()) {
@@ -1003,6 +1080,44 @@ class ConversationRepository(
         return added
     }
 
+    private fun processControlMessages(conversationId: String, rawMessages: List<DecodedMessage>) {
+        if (conversationId.isBlank() || rawMessages.isEmpty()) return
+        val localInboxId = xmtpEngine.client?.inboxId.orEmpty()
+
+        val peerReadTs = ReadReceiptPolicy.computePeerLastReadTimestampMs(rawMessages, localInboxId)
+        if (peerReadTs != null) {
+            _peerReadTimestamps.update { current ->
+                val prev = current[conversationId] ?: 0L
+                if (peerReadTs > prev) current + (conversationId to peerReadTs) else current
+            }
+        }
+
+        val localReadTs = ReadReceiptPolicy.computeLocalLastReadTimestampMs(rawMessages, localInboxId)
+        if (localReadTs != null) {
+            _localReadTimestamps.update { current ->
+                val prev = current[conversationId] ?: 0L
+                if (localReadTs > prev) current + (conversationId to localReadTs) else current
+            }
+        }
+
+        val peerNicknameUpdates = rawMessages
+            .asSequence()
+            .filter { msg ->
+                val sender = msg.senderInboxId
+                sender.isNotBlank() &&
+                    (localInboxId.isBlank() || !sender.equals(localInboxId, ignoreCase = true)) &&
+                    msg.isProfileNicknameMessage()
+            }
+            .sortedBy { it.resolvedTimestampMs() }
+
+        for (msg in peerNicknameUpdates) {
+            val nickname = msg.extractProfileNickname()
+            if (nickname != null) {
+                nicknameStorage.setSharedPeerNickname(msg.senderInboxId, nickname)
+            }
+        }
+    }
+
     private fun recordSeenIdsBatch(ids: Collection<String>) {
         if (seenMessageIds.addAll(ids)) {
             seenMessageStorage.saveSeenIds(seenMessageIds.snapshot())
@@ -1137,11 +1252,48 @@ internal fun DecodedMessage.isDisplayableUserMessage(): Boolean {
         }
     }
     val decoded = runCatching { content<Any>() }.getOrNull()
-    if (decoded is GroupUpdated) {
+    if (decoded is GroupUpdated || decoded is ReadReceipt || decoded is ProfileNickname) {
         return false
     }
     val text = runCatching { body }.getOrNull()
     return !text.isNullOrBlank()
+}
+
+internal fun DecodedMessage.resolvedTimestampMs(): Long {
+    val dateMs = runCatching { sentAt?.time }.getOrNull()
+    if (dateMs != null && dateMs > 0L) return dateMs
+    val ns = runCatching { sentAtNs }.getOrDefault(0L)
+    return if (ns > 0L) ns / 1_000_000L else 0L
+}
+
+internal fun DecodedMessage.isReadReceiptMessage(): Boolean {
+    val ct = runCatching { encodedContent.type }.getOrNull()
+    val authority = ct?.let { runCatching { it.authorityId }.getOrNull() }.orEmpty()
+    val typeId = ct?.let { runCatching { it.typeId }.getOrNull() }.orEmpty()
+    if (authority == ContentTypeReadReceipt.authorityId && typeId == ContentTypeReadReceipt.typeId) {
+        return true
+    }
+    return runCatching { content<Any>() }.getOrNull() is ReadReceipt
+}
+
+internal fun DecodedMessage.isProfileNicknameMessage(): Boolean {
+    val ct = runCatching { encodedContent.type }.getOrNull()
+    val authority = ct?.let { runCatching { it.authorityId }.getOrNull() }.orEmpty()
+    val typeId = ct?.let { runCatching { it.typeId }.getOrNull() }.orEmpty()
+    if (authority == ContentTypeProfileNickname.authorityId && typeId == ContentTypeProfileNickname.typeId) {
+        return true
+    }
+    return runCatching { content<Any>() }.getOrNull() is ProfileNickname
+}
+
+internal fun DecodedMessage.extractProfileNickname(): String? {
+    if (!isProfileNicknameMessage()) return null
+    val decoded = runCatching { content<Any>() }.getOrNull() as? ProfileNickname
+    if (decoded != null) {
+        return NicknamePolicy.sanitize(decoded.nickname)
+    }
+    val rawUtf8 = runCatching { encodedContent.content.toStringUtf8() }.getOrNull()
+    return NicknamePolicy.sanitize(rawUtf8)
 }
 
 val DecodedMessage.senderAddress: String

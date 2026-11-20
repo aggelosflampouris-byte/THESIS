@@ -23,6 +23,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -38,12 +39,16 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.thesis.R
+import com.example.thesis.repository.ReadReceiptPolicy
 import org.xmtp.android.library.libxmtp.DecodedMessage
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -53,6 +58,7 @@ import java.util.Locale
 internal fun MessagingChatScreen(
     messages: List<DecodedMessage>,
     localInboxId: String,
+    peerLastReadTimestampMs: Long? = null,
     draft: String,
     isSending: Boolean,
     isSyncing: Boolean = false,
@@ -63,6 +69,15 @@ internal fun MessagingChatScreen(
     onRetryMessage: (String) -> Unit = onSendMessage
 ) {
     val listState = rememberLazyListState()
+    val lastSeenOwnMessageId = remember(messages, localInboxId, peerLastReadTimestampMs) {
+        messages.lastOrNull { msg ->
+            ReadReceiptPolicy.isMessageSeenByPeer(
+                message = msg,
+                localInboxId = localInboxId,
+                peerLastReadTimestampMs = peerLastReadTimestampMs
+            )
+        }?.id
+    }
 
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) {
@@ -132,9 +147,18 @@ internal fun MessagingChatScreen(
                             messages,
                             key = { it.id }
                         ) { message ->
+                            val isOwn = message.senderInboxId == localInboxId
+                            val isSeen = isOwn && ReadReceiptPolicy.isMessageSeenByPeer(
+                                message = message,
+                                localInboxId = localInboxId,
+                                peerLastReadTimestampMs = peerLastReadTimestampMs
+                            )
                             MessagingMessageBubble(
                                 message = message,
-                                isOwnMessage = message.senderInboxId == localInboxId,
+                                isOwnMessage = isOwn,
+                                isSeen = isSeen,
+                                isLastSeenOwnMessage = isSeen && message.id == lastSeenOwnMessageId,
+                                seenAtMs = peerLastReadTimestampMs,
                                 maxBubbleWidth = maxBubbleWidth,
                                 retryEnabled = !isSending && !isShredding,
                                 onRetry = { onRetryMessage(message.body) }
@@ -199,6 +223,9 @@ internal fun MessagingChatScreen(
 private fun MessagingMessageBubble(
     message: DecodedMessage,
     isOwnMessage: Boolean,
+    isSeen: Boolean = false,
+    isLastSeenOwnMessage: Boolean = false,
+    seenAtMs: Long? = null,
     maxBubbleWidth: Dp,
     retryEnabled: Boolean = true,
     onRetry: () -> Unit
@@ -207,10 +234,19 @@ private fun MessagingMessageBubble(
         val date = message.sentAt ?: if (message.sentAtNs > 0L) Date(message.sentAtNs / 1_000_000L) else Date()
         SimpleDateFormat("HH:mm", Locale.getDefault()).format(date)
     }
+    val seenTimeLabel = remember(seenAtMs) {
+        seenAtMs?.takeIf { it > 0L }?.let {
+            SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(it))
+        }
+    }
     val status = when (message.deliveryStatus) {
         DecodedMessage.MessageDeliveryStatus.FAILED -> "Δεν στάλθηκε"
         DecodedMessage.MessageDeliveryStatus.UNPUBLISHED -> "Αποστολή…"
-        DecodedMessage.MessageDeliveryStatus.PUBLISHED -> "Στάλθηκε"
+        DecodedMessage.MessageDeliveryStatus.PUBLISHED -> when {
+            isSeen && isLastSeenOwnMessage && seenTimeLabel != null -> "Διαβάστηκε $seenTimeLabel"
+            isSeen -> "Διαβάστηκε"
+            else -> "Στάλθηκε"
+        }
         DecodedMessage.MessageDeliveryStatus.ALL -> null
     }
     val isFailed = message.deliveryStatus == DecodedMessage.MessageDeliveryStatus.FAILED
@@ -242,18 +278,43 @@ private fun MessagingMessageBubble(
                     color = contentColor
                 )
                 if (isOwnMessage && status != null) {
+                    val isPublished = message.deliveryStatus == DecodedMessage.MessageDeliveryStatus.PUBLISHED
+                    val statusTint = when {
+                        isFailed -> MaterialTheme.colorScheme.error
+                        isSeen -> MaterialTheme.colorScheme.primary
+                        else -> contentColor.copy(alpha = 0.75f)
+                    }
                     Spacer(Modifier.height(4.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
                         Text(
                             text = timeLabel,
                             style = MaterialTheme.typography.labelSmall,
                             color = contentColor.copy(alpha = 0.75f),
                             fontSize = 10.sp
                         )
+                        if (isPublished && isSeen) {
+                            Icon(
+                                painter = painterResource(id = R.drawable.ic_check_double),
+                                contentDescription = "Διαβάστηκε",
+                                modifier = Modifier.size(14.dp),
+                                tint = statusTint
+                            )
+                        } else if (isPublished) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "Στάλθηκε",
+                                modifier = Modifier.size(13.dp),
+                                tint = statusTint
+                            )
+                        }
                         Text(
                             text = status,
                             style = MaterialTheme.typography.labelSmall,
-                            color = if (isFailed) MaterialTheme.colorScheme.error else contentColor.copy(alpha = 0.75f),
+                            fontWeight = if (isSeen) FontWeight.SemiBold else FontWeight.Normal,
+                            color = statusTint,
                             fontSize = 10.sp
                         )
                     }

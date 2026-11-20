@@ -46,6 +46,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.thesis.identity.NicknamePolicy
 import com.example.thesis.ui.util.readClipboardText
 import com.example.thesis.updater.AppUpdateInfo
 import com.example.thesis.updater.UpdateStatus
@@ -57,9 +58,10 @@ import java.util.Locale
 @Composable
 internal fun NewConversationDialog(
     onDismiss: () -> Unit,
-    onStartConversation: (String) -> Unit
+    onStartConversation: (String, String?) -> Unit
 ) {
     var peerInput by rememberSaveable { mutableStateOf("") }
+    var nicknameInput by rememberSaveable { mutableStateOf("") }
     val isValidInput = remember(peerInput) {
         val trimmed = peerInput.trim()
         CryptoUtils.isValidEthereumAddress(trimmed) || CryptoUtils.isValidInboxId(trimmed)
@@ -106,11 +108,29 @@ internal fun NewConversationDialog(
                 ) {
                     Text("Επικόλληση από πρόχειρο", fontSize = 12.sp)
                 }
+
+                OutlinedTextField(
+                    value = nicknameInput,
+                    onValueChange = { nicknameInput = it.take(NicknamePolicy.MAX_NICKNAME_LENGTH) },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Ψευδώνυμο επαφής (προαιρετικό)") },
+                    placeholder = { Text("π.χ. Μαρία") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Text,
+                        imeAction = ImeAction.Done
+                    )
+                )
             }
         },
         confirmButton = {
             TextButton(
-                onClick = { onStartConversation(peerInput.trim()) },
+                onClick = {
+                    onStartConversation(
+                        peerInput.trim(),
+                        NicknamePolicy.sanitize(nicknameInput)
+                    )
+                },
                 enabled = isValidInput
             ) {
                 Text("Σύνδεση")
@@ -126,15 +146,20 @@ internal fun NewConversationDialog(
 internal fun IdentityDetailsDialog(
     address: String?,
     inboxId: String?,
+    myNickname: String? = null,
     currentVersion: String,
     isCheckingUpdate: Boolean = false,
     notificationsEnabled: Boolean = true,
+    isServiceNotificationVisible: Boolean = true,
+    onSaveMyNickname: (String) -> Unit = {},
     onCheckForUpdates: () -> Unit = {},
     onOpenNotificationSettings: () -> Unit = {},
+    onOpenServiceNotificationSettings: () -> Unit = {},
     onCopyAddress: () -> Unit,
     onCopyInboxId: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    var nicknameDraft by rememberSaveable(myNickname) { mutableStateOf(myNickname.orEmpty()) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Ταυτότητα και Ασφάλεια") },
@@ -197,6 +222,40 @@ internal fun IdentityDetailsDialog(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 HorizontalDivider()
+                Text("Το ψευδώνυμό σας (μοιράζεται κρυπτογραφημένα)", style = MaterialTheme.typography.labelMedium)
+                OutlinedTextField(
+                    value = nicknameDraft,
+                    onValueChange = { nicknameDraft = it.take(NicknamePolicy.MAX_NICKNAME_LENGTH) },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("Εισάγετε ψευδώνυμο...") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Text,
+                        imeAction = ImeAction.Done
+                    )
+                )
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = { onSaveMyNickname(nicknameDraft) }
+                    ) {
+                        Text("Αποθήκευση", fontSize = 12.sp)
+                    }
+                    if (!myNickname.isNullOrBlank()) {
+                        TextButton(
+                            onClick = {
+                                nicknameDraft = ""
+                                onSaveMyNickname("")
+                            }
+                        ) {
+                            Text("Εκκαθάριση", fontSize = 12.sp)
+                        }
+                    }
+                }
+                HorizontalDivider()
                 FlowRow(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -224,6 +283,25 @@ internal fun IdentityDetailsDialog(
                     )
                     TextButton(onClick = onOpenNotificationSettings) {
                         Text("Ρυθμίσεις", fontSize = 12.sp)
+                    }
+                }
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = if (isServiceNotificationVisible) {
+                            "Ειδοποίηση παρασκηνίου: Ορατή"
+                        } else {
+                            "Ειδοποίηση παρασκηνίου: Κρυφή (ενεργή λήψη)"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.align(Alignment.CenterVertically)
+                    )
+                    TextButton(onClick = onOpenServiceNotificationSettings) {
+                        Text(if (isServiceNotificationVisible) "Απόκρυψη" else "Κανάλι", fontSize = 12.sp)
                     }
                 }
             }
@@ -269,6 +347,8 @@ internal fun MLSProtocolInspectorDialog(
     conversation: Conversation,
     localInboxId: String,
     messageCount: Int,
+    contactNickname: String? = null,
+    onEditContactNickname: (() -> Unit)? = null,
     onDismiss: () -> Unit,
     onCopyTopic: () -> Unit
 ) {
@@ -311,6 +391,31 @@ internal fun MLSProtocolInspectorDialog(
                     label = "Local Client Inbox",
                     value = if (localInboxId.length >= 12) "${localInboxId.take(6)}...${localInboxId.takeLast(6)}" else localInboxId
                 )
+                if (onEditContactNickname != null) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Ψευδώνυμο Επαφής",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 11.sp
+                            )
+                            Text(
+                                text = contactNickname ?: "Χωρίς ψευδώνυμο",
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 12.sp
+                            )
+                        }
+                        TextButton(onClick = onEditContactNickname) {
+                            Text("Αλλαγή", fontSize = 12.sp)
+                        }
+                    }
+                }
                 InspectorParamRow(
                     label = "Commit Counter",
                     value = "$messageCount message commit(s)"
@@ -347,6 +452,73 @@ internal fun MLSProtocolInspectorDialog(
         dismissButton = {
             TextButton(onClick = onDismiss) {
                 Text("Κλείσιμο", fontSize = 12.sp)
+            }
+        }
+    )
+}
+
+@Composable
+internal fun EditContactNicknameDialog(
+    targetLabel: String,
+    currentLocalNickname: String?,
+    sharedPeerNickname: String?,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit
+) {
+    var input by rememberSaveable(currentLocalNickname, sharedPeerNickname) {
+        mutableStateOf(currentLocalNickname.orEmpty())
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Ψευδώνυμο Επαφής") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "Ταυτότητα: $targetLabel",
+                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (!sharedPeerNickname.isNullOrBlank()) {
+                    Text(
+                        text = "Προτεινόμενο από τον συνομιλητή: $sharedPeerNickname",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                OutlinedTextField(
+                    value = input,
+                    onValueChange = { input = it.take(NicknamePolicy.MAX_NICKNAME_LENGTH) },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Τοπικό ψευδώνυμο") },
+                    placeholder = { Text(sharedPeerNickname ?: "π.χ. Κώστας") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(
+                        keyboardType = KeyboardType.Text,
+                        imeAction = ImeAction.Done
+                    )
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(input) }) {
+                Text("Αποθήκευση")
+            }
+        },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (!currentLocalNickname.isNullOrBlank()) {
+                    TextButton(onClick = { onSave("") }) {
+                        Text("Επαναφορά")
+                    }
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("Ακύρωση")
+                }
             }
         }
     )

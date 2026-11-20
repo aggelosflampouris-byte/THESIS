@@ -18,7 +18,8 @@ internal class XmtpNotificationReceiver : BroadcastReceiver() {
 
         // Reprogramamos la siguiente alarma de inmediato para mantener el sondeo periodico en espera.
         BackgroundSyncScheduler.scheduleNextAlarm(context)
-        if (!container.isInForeground()) {
+        // Actuamos solo como respaldo cuando el servicio activo no esta en ejecucion para evitar ciclos duplicados.
+        if (!container.isInForeground() && !XmtpMessagingService.isRunning) {
             BackgroundSyncScheduler.enqueueImmediateSync(context)
         }
     }

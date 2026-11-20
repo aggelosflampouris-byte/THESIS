@@ -28,6 +28,7 @@ import org.xmtp.android.library.DelicateApi
 import org.xmtp.android.library.SigningKey
 import org.xmtp.android.library.XMTPEnvironment
 import org.xmtp.android.library.codecs.GroupUpdatedCodec
+import org.xmtp.android.library.codecs.ReadReceiptCodec
 import uniffi.xmtpv3.InternalException
 import java.io.File
 import com.example.thesis.util.CryptoUtils
@@ -325,6 +326,8 @@ class XmtpEngine(
 
             Log.i(TAG, "Initializing XMTP client for env=$environment")
             runCatching { Client.register(GroupUpdatedCodec()) }
+            runCatching { Client.register(ReadReceiptCodec()) }
+            runCatching { Client.register(ProfileNicknameCodec()) }
             val xmtpClient = Client.create(account = signer, options = options)
             Log.i(TAG, "XMTP client ready [env=$environment]")
 

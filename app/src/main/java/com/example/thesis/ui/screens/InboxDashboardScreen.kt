@@ -27,6 +27,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Button
@@ -34,6 +35,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -49,6 +51,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.thesis.identity.NicknamePolicy
+import com.example.thesis.identity.NicknameSnapshot
 import com.example.thesis.ui.ActionLogEntry
 import com.example.thesis.ui.components.LatestVersionQrCard
 import com.example.thesis.ui.components.SecurityEngineStatusCard
@@ -60,6 +64,7 @@ import org.xmtp.android.library.Conversation
 internal fun InboxDashboardScreen(
     conversations: List<Conversation>,
     unreadCounts: Map<String, Int> = emptyMap(),
+    nicknameSnapshot: NicknameSnapshot = NicknameSnapshot(),
     engineState: XmtpEngineState,
     isCreatingConversation: Boolean,
     isShredding: Boolean = false,
@@ -70,6 +75,7 @@ internal fun InboxDashboardScreen(
     onNewConversation: () -> Unit,
     onStartLoopback: () -> Unit,
     onSelectConversation: (Conversation) -> Unit,
+    onEditContactNickname: (Conversation) -> Unit = {},
     onCopyDownloadUrl: () -> Unit = {},
     onOpenDownloadUrl: () -> Unit = {},
     onExpandQr: () -> Unit = {}
@@ -215,6 +221,8 @@ internal fun InboxDashboardScreen(
                         index = index + 1,
                         conversation = conv,
                         unreadCount = unreadCounts[conv.id] ?: 0,
+                        nicknameSnapshot = nicknameSnapshot,
+                        onEditNickname = { onEditContactNickname(conv) },
                         onClick = { onSelectConversation(conv) }
                     )
                 }
@@ -307,27 +315,35 @@ private fun ConversationItemCard(
     index: Int,
     conversation: Conversation,
     unreadCount: Int = 0,
+    nicknameSnapshot: NicknameSnapshot = NicknameSnapshot(),
+    onEditNickname: () -> Unit = {},
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val isDm = conversation is Conversation.Dm
     val isLoopback = conversation is Conversation.Group && conversation.group.name == "MLS Research Loopback"
-
-    val title = when {
+    val contactKey = if (isDm) conversation.dm.peerInboxId else conversation.id
+    val maskedPeer = when {
         isDm -> {
             val peer = conversation.dm.peerInboxId
-            val maskedPeer = if (peer.length >= 16) "${peer.take(8)}...${peer.takeLast(6)}" else peer
-            "DM: $maskedPeer"
+            if (peer.length >= 16) "${peer.take(8)}...${peer.takeLast(6)}" else peer
         }
-        isLoopback -> "Loopback MLS (1-Device Test)"
-        conversation is Conversation.Group -> {
-            val name = conversation.group.name
-            if (name.isNotBlank()) name else "Ομάδα MLS: ${conversation.id.take(8)}..."
-        }
+        conversation is Conversation.Group -> "Ομάδα MLS: ${conversation.id.take(8)}..."
         else -> "Συνομιλία $index: ${conversation.topic.take(18)}..."
     }
+    val groupName = (conversation as? Conversation.Group)?.group?.name
+    val title = NicknamePolicy.resolveConversationTitle(
+        conversationKey = contactKey,
+        isDm = isDm,
+        isLoopback = isLoopback,
+        groupName = groupName,
+        fallbackMaskedPeer = maskedPeer,
+        snapshot = nicknameSnapshot
+    )
+    val hasNickname = NicknamePolicy.resolveContactNickname(contactKey, nicknameSnapshot) != null
 
     val subtitle = when {
+        isDm && hasNickname -> "DM • $maskedPeer"
         isDm -> "Direct Message"
         isLoopback -> "Τοπική δοκιμή συσκευής"
         else -> "Ομαδική συνομιλία"
@@ -435,7 +451,21 @@ private fun ConversationItemCard(
                 }
             }
 
-            Spacer(modifier = Modifier.width(8.dp))
+            if (!isLoopback) {
+                IconButton(
+                    onClick = onEditNickname,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Edit,
+                        contentDescription = "Επεξεργασία ψευδωνύμου",
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.width(4.dp))
 
             Icon(
                 imageVector = Icons.AutoMirrored.Filled.ArrowForward,

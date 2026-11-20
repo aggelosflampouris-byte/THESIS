@@ -27,6 +27,10 @@ internal class XmtpBackgroundSyncWorker(
             return Result.success()
         }
 
+        if (XmtpMessagingService.isRunning) {
+            return Result.success()
+        }
+
         if (container.isInForeground() && container.engine.state.value is XmtpEngineState.Ready) {
             return Result.success()
         }

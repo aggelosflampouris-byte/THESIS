@@ -51,6 +51,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.thesis.identity.NicknamePolicy
+import com.example.thesis.identity.NicknameSnapshot
 import com.example.thesis.xmtp.XmtpEngineState
 import org.xmtp.android.library.Conversation
 import java.util.Locale
@@ -60,6 +62,7 @@ import java.util.Locale
 internal fun MessagingTopBar(
     selectedConversation: Conversation?,
     walletAddress: String?,
+    nicknameSnapshot: NicknameSnapshot = NicknameSnapshot(),
     engineState: XmtpEngineState,
     isSyncing: Boolean,
     isShredding: Boolean = false,
@@ -73,16 +76,24 @@ internal fun MessagingTopBar(
     TopAppBar(
         title = {
             if (selectedConversation != null) {
-                val headerTitle = when (selectedConversation) {
-                    is Conversation.Dm -> {
-                        val peer = selectedConversation.dm.peerInboxId
-                        val masked = if (peer.length >= 14) "${peer.take(6)}...${peer.takeLast(4)}" else peer
-                        "MLS DM: $masked"
-                    }
-                    is Conversation.Group -> {
-                        val name = selectedConversation.group.name
-                        if (name.isNotBlank()) name else "MLS Chat: ${selectedConversation.topic.take(16)}..."
-                    }
+                val isDm = selectedConversation is Conversation.Dm
+                val isLoopback = selectedConversation is Conversation.Group &&
+                    selectedConversation.group.name == "MLS Research Loopback"
+                val contactKey = if (isDm) selectedConversation.dm.peerInboxId else selectedConversation.id
+                val maskedPeer = if (isDm) {
+                    val peer = selectedConversation.dm.peerInboxId
+                    if (peer.length >= 14) "${peer.take(6)}...${peer.takeLast(4)}" else peer
+                } else {
+                    selectedConversation.topic.take(16)
+                }
+                val groupName = (selectedConversation as? Conversation.Group)?.group?.name
+                val resolvedNick = NicknamePolicy.resolveContactNickname(contactKey, nicknameSnapshot)
+                val headerTitle = when {
+                    resolvedNick != null -> resolvedNick
+                    isDm -> "MLS DM: $maskedPeer"
+                    isLoopback -> "MLS Research Loopback"
+                    !groupName.isNullOrBlank() -> groupName
+                    else -> "MLS Chat: ${selectedConversation.topic.take(16)}..."
                 }
 
                 Column(
@@ -122,10 +133,18 @@ internal fun MessagingTopBar(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
+                    val myNick = nicknameSnapshot.myNickname
+                    val subtitleText = when {
+                        !myNick.isNullOrBlank() && walletAddress != null ->
+                            "$myNick • ${walletAddress.take(6)}...${walletAddress.takeLast(4)}"
+                        !myNick.isNullOrBlank() -> myNick
+                        walletAddress != null -> "ID: ${walletAddress.take(8)}...${walletAddress.takeLast(4)}"
+                        else -> "SQLCipher • RFC 9420"
+                    }
                     Text(
-                        text = walletAddress?.let { "ID: ${it.take(8)}...${it.takeLast(4)}" } ?: "SQLCipher • RFC 9420",
+                        text = subtitleText,
                         style = MaterialTheme.typography.bodySmall.copy(
-                            fontFamily = if (walletAddress != null) FontFamily.Monospace else FontFamily.Default
+                            fontFamily = if (walletAddress != null && myNick.isNullOrBlank()) FontFamily.Monospace else FontFamily.Default
                         ),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,

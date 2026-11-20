@@ -2,7 +2,10 @@ package com.example.thesis.repository
 
 import android.util.Log
 import app.cash.turbine.test
+import com.example.thesis.identity.InMemoryNicknameStorage
 import com.example.thesis.notifications.InMemorySeenMessageStorage
+import com.example.thesis.xmtp.ContentTypeProfileNickname
+import com.example.thesis.xmtp.ProfileNickname
 import com.example.thesis.xmtp.XmtpEngine
 import com.example.thesis.xmtp.XmtpEngineState
 import io.mockk.coEvery
@@ -42,8 +45,11 @@ import org.xmtp.android.library.Conversation
 import org.xmtp.android.library.Conversations
 import org.xmtp.android.library.Dm
 import org.xmtp.android.library.Group
+import org.xmtp.android.library.SendOptions
 import org.xmtp.android.library.codecs.ContentTypeGroupUpdated
+import org.xmtp.android.library.codecs.ContentTypeReadReceipt
 import org.xmtp.android.library.codecs.ContentTypeText
+import org.xmtp.android.library.codecs.ReadReceipt
 import org.xmtp.android.library.libxmtp.DecodedMessage
 import org.xmtp.android.library.libxmtp.PublicIdentity
 import org.xmtp.proto.mls.message.contents.TranscriptMessages.GroupUpdated
@@ -909,6 +915,96 @@ class ConversationRepositoryTest {
         } finally {
             scope2.cancel()
             repo2.close()
+        }
+    }
+
+    @Test
+    fun test_readReceiptAndNicknameControlFrames_updateStateWithoutPollutingChatOrNotifications() = runTest(testDispatcher) {
+        every { mockClient.inboxId } returns testSenderAddress
+        val streamFlow = MutableSharedFlow<DecodedMessage>()
+        every { mockConversation.streamMessages() } returns streamFlow
+        coEvery { mockConversation.messages() } returns emptyList()
+
+        val peerReceiptMsg = mockk<DecodedMessage>(relaxed = true)
+        every { peerReceiptMsg.id } returns "ctrl_rcpt_1"
+        every { peerReceiptMsg.conversationId } returns testConvId
+        every { peerReceiptMsg.senderInboxId } returns testPeerAddress
+        every { peerReceiptMsg.encodedContent.type } returns ContentTypeReadReceipt
+        every { peerReceiptMsg.content<Any>() } returns ReadReceipt
+        every { peerReceiptMsg.sentAt } returns Date(4_500L)
+        every { peerReceiptMsg.body } returns ""
+
+        val peerNickMsg = mockk<DecodedMessage>(relaxed = true)
+        every { peerNickMsg.id } returns "ctrl_nick_1"
+        every { peerNickMsg.conversationId } returns testConvId
+        every { peerNickMsg.senderInboxId } returns testPeerAddress
+        every { peerNickMsg.encodedContent.type } returns ContentTypeProfileNickname
+        every { peerNickMsg.content<Any>() } returns ProfileNickname("Alice MLS")
+        every { peerNickMsg.sentAt } returns Date(4_600L)
+        every { peerNickMsg.body } returns ""
+
+        val nicknameStore = InMemoryNicknameStorage()
+        val repoScope = CoroutineScope(SupervisorJob() + testDispatcher)
+        val repo = ConversationRepository(
+            engine = mockEngine,
+            repositoryScope = repoScope,
+            ioDispatcher = testDispatcher,
+            syncIntervalMs = 0L,
+            nicknameStorage = nicknameStore
+        )
+
+        try {
+            repo.incomingMessages.test {
+                repo.observeMessages(mockConversation).test {
+                    val initial = awaitItem()
+                    assertTrue(initial.isEmpty())
+
+                    streamFlow.emit(peerReceiptMsg)
+                    streamFlow.emit(peerNickMsg)
+                    testScheduler.runCurrent()
+
+                    expectNoEvents()
+                    cancelAndIgnoreRemainingEvents()
+                }
+                expectNoEvents()
+                cancelAndIgnoreRemainingEvents()
+            }
+
+            assertEquals(4_500L, repo.peerReadTimestamps.value[testConvId])
+            assertEquals("Alice MLS", nicknameStore.snapshot.value.sharedNicknames[testPeerAddress])
+        } finally {
+            repoScope.cancel()
+            repo.close()
+        }
+    }
+
+    @Test
+    fun test_sendReadReceiptAndSendProfileNickname_dispatchEncryptedPayloads() = runTest(testDispatcher) {
+        coEvery { mockConversation.send(any<Any>(), any<SendOptions>()) } returns "ctrl_sent_id"
+
+        val receiptResult = repository.sendReadReceipt(mockConversation)
+        assertTrue(receiptResult.isSuccess)
+        assertEquals("ctrl_sent_id", receiptResult.getOrNull())
+        assertTrue((repository.localReadTimestamps.value[testConvId] ?: 0L) > 0L)
+
+        val nickResult = repository.sendProfileNickname(mockConversation, "  Μαρία  ")
+        assertTrue(nickResult.isSuccess)
+        assertEquals("ctrl_sent_id", nickResult.getOrNull())
+
+        val blankResult = repository.sendProfileNickname(mockConversation, "   ")
+        assertTrue(blankResult.isFailure)
+
+        coVerify(exactly = 1) {
+            mockConversation.send(
+                match<Any> { it is ReadReceipt },
+                match<SendOptions> { it.contentType == ContentTypeReadReceipt }
+            )
+        }
+        coVerify(exactly = 1) {
+            mockConversation.send(
+                match<Any> { it is ProfileNickname && it.nickname == "Μαρία" },
+                match<SendOptions> { it.contentType == ContentTypeProfileNickname }
+            )
         }
     }
 }

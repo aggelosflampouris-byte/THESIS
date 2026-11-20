@@ -34,8 +34,9 @@ internal class MessageNotificationManager(context: Context) {
         private const val TAG = "MessageNotifManager"
         private const val LEGACY_CHANNEL_ID = "xmtp_mls_priority_messages"
         const val CHANNEL_ID = "xmtp_mls_priority_messages_v2"
-        private const val LEGACY_SERVICE_CHANNEL_ID = "xmtp_mls_connection_service"
-        private const val LEGACY_SERVICE_NOTIFICATION_ID = 9001
+        const val SERVICE_CHANNEL_ID = "xmtp_mls_connection_service"
+        const val SERVICE_NOTIFICATION_ID = 9001
+        private const val SERVICE_HIDE_ACTION_REQUEST_CODE = 9003
         const val EXTRA_CONVERSATION_ID = "com.example.thesis.extra.CONVERSATION_ID"
         private const val ACCENT_COLOR = 0xFF315C54.toInt()
         private val VIBRATION_PATTERN = longArrayOf(0L, 250L, 120L, 250L)
@@ -72,12 +73,21 @@ internal class MessageNotificationManager(context: Context) {
             manager.createNotificationChannel(messageChannel)
         }
 
-        // Eliminamos el canal del antiguo servicio continuo para no mostrar una notificacion permanente tras actualizar.
-        if (manager.getNotificationChannel(LEGACY_SERVICE_CHANNEL_ID) != null) {
-            manager.deleteNotificationChannel(LEGACY_SERVICE_CHANNEL_ID)
-        }
-        runCatching {
-            NotificationManagerCompat.from(appContext).cancel(LEGACY_SERVICE_NOTIFICATION_ID)
+        // Canal aislado de importancia minima para poder ocultarlo sin silenciar las alertas de mensajes.
+        if (manager.getNotificationChannel(SERVICE_CHANNEL_ID) == null) {
+            val serviceChannel = NotificationChannel(
+                SERVICE_CHANNEL_ID,
+                "Σύνδεση Παρασκηνίου XMTP MLS",
+                NotificationManager.IMPORTANCE_MIN
+            ).apply {
+                description = "Σιωπηλή σύνδεση για άμεση λήψη μηνυμάτων εκτός εφαρμογής (μπορεί να απενεργοποιηθεί χωρίς να σταματήσουν οι ειδοποιήσεις μηνυμάτων)"
+                setShowBadge(false)
+                enableVibration(false)
+                enableLights(false)
+                setSound(null, null)
+                lockscreenVisibility = Notification.VISIBILITY_SECRET
+            }
+            manager.createNotificationChannel(serviceChannel)
         }
     }
 
@@ -92,12 +102,24 @@ internal class MessageNotificationManager(context: Context) {
         }
     }
 
-    fun openNotificationSettings() {
+    fun isBackgroundServiceChannelEnabled(): Boolean {
+        ensureChannelCreated()
+        if (!NotificationManagerCompat.from(appContext).areNotificationsEnabled()) {
+            return false
+        }
+        val manager = appContext.getSystemService(NotificationManager::class.java) ?: return true
+        val channel = manager.getNotificationChannel(SERVICE_CHANNEL_ID) ?: return true
+        return channel.importance != NotificationManager.IMPORTANCE_NONE
+    }
+
+    fun openNotificationSettings() = openChannelSettings(CHANNEL_ID)
+
+    fun openBackgroundServiceChannelSettings() = openChannelSettings(SERVICE_CHANNEL_ID)
+
+    private fun openChannelSettings(channelId: String) {
         ensureChannelCreated()
         runCatching {
-            val channelIntent = Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).apply {
-                putExtra(Settings.EXTRA_APP_PACKAGE, appContext.packageName)
-                putExtra(Settings.EXTRA_CHANNEL_ID, CHANNEL_ID)
+            val channelIntent = createChannelSettingsIntent(channelId).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             appContext.startActivity(channelIntent)
@@ -112,12 +134,59 @@ internal class MessageNotificationManager(context: Context) {
         }
     }
 
+    private fun createChannelSettingsIntent(channelId: String): Intent {
+        return Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).apply {
+            putExtra(Settings.EXTRA_APP_PACKAGE, appContext.packageName)
+            putExtra(Settings.EXTRA_CHANNEL_ID, channelId)
+        }
+    }
+
+    fun buildForegroundServiceNotification(): Notification {
+        ensureChannelCreated()
+        val tapIntent = Intent(appContext, MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        }
+        val contentIntent = PendingIntent.getActivity(
+            appContext,
+            SERVICE_NOTIFICATION_ID,
+            tapIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val hideChannelIntent = createChannelSettingsIntent(SERVICE_CHANNEL_ID).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        val hideChannelPendingIntent = PendingIntent.getActivity(
+            appContext,
+            SERVICE_HIDE_ACTION_REQUEST_CODE,
+            hideChannelIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        // Usamos el icono neutro y canal separable para que no se confunda con un mensaje ni bloquee el deslizamiento.
+        return NotificationCompat.Builder(appContext, SERVICE_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_notification_sync)
+            .setColor(ACCENT_COLOR)
+            .setContentTitle("XMTP MLS Ενεργή Λήψη")
+            .setContentText("Πατήστε «Απόκρυψη» για να κρύψετε αυτό το εικονίδιο")
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setVisibility(NotificationCompat.VISIBILITY_SECRET)
+            .setOngoing(false)
+            .setSilent(true)
+            .setShowWhen(false)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_DEFERRED)
+            .setContentIntent(contentIntent)
+            .addAction(0, "Απόκρυψη", hideChannelPendingIntent)
+            .build()
+    }
+
     @SuppressLint("MissingPermission")
     fun showIncomingMessageNotification(
         conversationId: String,
         title: String,
         bodyPreview: String,
-        timestampMs: Long
+        timestampMs: Long,
+        localUserName: String = "Εσείς"
     ): Boolean {
         if (!hasNotificationPermission()) {
             return false
@@ -150,7 +219,7 @@ internal class MessageNotificationManager(context: Context) {
             .build()
 
         val localUser = Person.Builder()
-            .setName("Εσείς")
+            .setName(localUserName.ifBlank { "Εσείς" })
             .build()
         val sender = Person.Builder()
             .setName(title)

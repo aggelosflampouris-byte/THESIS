@@ -39,8 +39,11 @@ import com.example.thesis.ui.components.MessagingTopBar
 import com.example.thesis.ui.components.QrDownloadFullDialog
 import com.example.thesis.ui.components.UpdateAvailableBanner
 import com.example.thesis.ui.components.messagingStatusText
+import com.example.thesis.identity.NicknamePolicy
 import com.example.thesis.ui.dialogs.AppUpdateDialog
+import com.example.thesis.ui.dialogs.EditContactNicknameDialog
 import com.example.thesis.ui.dialogs.GDPRShredConfirmationDialog
+import org.xmtp.android.library.Conversation
 import com.example.thesis.ui.dialogs.IdentityDetailsDialog
 import com.example.thesis.ui.dialogs.MLSProtocolInspectorDialog
 import com.example.thesis.ui.dialogs.NewConversationDialog
@@ -118,6 +121,8 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     val isShredding by viewModel.isShredding.collectAsState()
     val lastShredProof by viewModel.lastShredProof.collectAsState()
     val unreadCounts by viewModel.unreadCounts.collectAsState()
+    val nicknameSnapshot by viewModel.nicknameSnapshot.collectAsState()
+    val peerReadTimestamps by viewModel.peerReadTimestamps.collectAsState()
 
     val updateStatus by viewModel.updateStatus.collectAsState()
     var showUpdateDialog by rememberSaveable { mutableStateOf(false) }
@@ -127,6 +132,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     var showLogsScreen by rememberSaveable { mutableStateOf(false) }
     var showProtocolInspectorDialog by rememberSaveable { mutableStateOf(false) }
     var showQrDownloadDialog by rememberSaveable { mutableStateOf(false) }
+    var nicknameEditTarget by remember { mutableStateOf<Conversation?>(null) }
 
     var draft by rememberSaveable(selectedConversation?.id) { mutableStateOf("") }
 
@@ -230,9 +236,30 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     if (showNewConversationDialog) {
         NewConversationDialog(
             onDismiss = { showNewConversationDialog = false },
-            onStartConversation = { target ->
+            onStartConversation = { target, contactNick ->
                 showNewConversationDialog = false
-                viewModel.startNewConversation(target)
+                viewModel.startNewConversation(target, contactNick)
+            }
+        )
+    }
+
+    nicknameEditTarget?.let { targetConv ->
+        val contactKey = if (targetConv is Conversation.Dm) targetConv.dm.peerInboxId else targetConv.id
+        val normalizedKey = NicknamePolicy.normalizeKey(contactKey)
+        val targetLabel = if (targetConv is Conversation.Dm) {
+            val peer = targetConv.dm.peerInboxId
+            if (peer.length >= 16) "${peer.take(8)}...${peer.takeLast(6)}" else peer
+        } else {
+            "Group ${targetConv.id.take(8)}..."
+        }
+        EditContactNicknameDialog(
+            targetLabel = targetLabel,
+            currentLocalNickname = nicknameSnapshot.localNicknames[normalizedKey],
+            sharedPeerNickname = if (targetConv is Conversation.Dm) nicknameSnapshot.sharedNicknames[normalizedKey] else null,
+            onDismiss = { nicknameEditTarget = null },
+            onSave = { nick ->
+                nicknameEditTarget = null
+                viewModel.updateContactNickname(contactKey, nick)
             }
         )
     }
@@ -241,11 +268,15 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
         IdentityDetailsDialog(
             address = walletAddress,
             inboxId = inboxId,
+            myNickname = nicknameSnapshot.myNickname,
             currentVersion = viewModel.getCurrentVersionName(),
             isCheckingUpdate = updateStatus is UpdateStatus.Checking,
             notificationsEnabled = viewModel.hasNotificationPermission(),
+            isServiceNotificationVisible = viewModel.isBackgroundServiceChannelVisible(),
+            onSaveMyNickname = { nick -> viewModel.updateMyNickname(nick) },
             onCheckForUpdates = { viewModel.checkForUpdates(manual = true) },
             onOpenNotificationSettings = { viewModel.openNotificationSettings() },
+            onOpenServiceNotificationSettings = { viewModel.openBackgroundServiceChannelSettings() },
             onCopyAddress = {
                 walletAddress?.let { addr ->
                     copyToClipboard(context, "Ethereum Address", addr)
@@ -291,6 +322,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
             onDismiss = { showShredConfirmationDialog = false },
             onConfirmShred = {
                 showShredConfirmationDialog = false
+                nicknameEditTarget = null
                 viewModel.performCryptoShredding()
             }
         )
@@ -299,10 +331,19 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     val inspectorConv = selectedConversation
     val inspectorReadyState = engineState as? XmtpEngineState.Ready
     if (showProtocolInspectorDialog && inspectorConv != null && inspectorReadyState != null) {
+        val inspectorKey = if (inspectorConv is Conversation.Dm) inspectorConv.dm.peerInboxId else inspectorConv.id
+        val isLoopbackConv = inspectorConv is Conversation.Group && inspectorConv.group.name == "MLS Research Loopback"
         MLSProtocolInspectorDialog(
             conversation = inspectorConv,
             localInboxId = inspectorReadyState.client.inboxId,
             messageCount = messages.size,
+            contactNickname = NicknamePolicy.resolveContactNickname(inspectorKey, nicknameSnapshot),
+            onEditContactNickname = if (isLoopbackConv) null else {
+                {
+                    showProtocolInspectorDialog = false
+                    nicknameEditTarget = inspectorConv
+                }
+            },
             onDismiss = { showProtocolInspectorDialog = false },
             onCopyTopic = {
                 copyToClipboard(context, "MLS Topic Hash", inspectorConv.topic)
@@ -335,6 +376,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                 MessagingTopBar(
                     selectedConversation = selectedConversation,
                     walletAddress = walletAddress,
+                    nicknameSnapshot = nicknameSnapshot,
                     engineState = engineState,
                     isSyncing = isSyncing,
                     isShredding = isShredding,
@@ -396,10 +438,12 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                             )
                         }
                         is XmtpEngineState.Ready -> {
-                            if (selectedConversation != null) {
+                            val activeConv = selectedConversation
+                            if (activeConv != null) {
                                 MessagingChatScreen(
                                     messages = messages,
                                     localInboxId = state.client.inboxId,
+                                    peerLastReadTimestampMs = peerReadTimestamps[activeConv.id],
                                     draft = draft,
                                     isSending = isSending,
                                     isSyncing = isSyncing,
@@ -423,6 +467,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                                 InboxDashboardScreen(
                                     conversations = conversations,
                                     unreadCounts = unreadCounts,
+                                    nicknameSnapshot = nicknameSnapshot,
                                     engineState = engineState,
                                     isCreatingConversation = isCreatingConversation,
                                     isShredding = isShredding,
@@ -433,6 +478,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                                     onNewConversation = { showNewConversationDialog = true },
                                     onStartLoopback = { viewModel.startSelfConversation() },
                                     onSelectConversation = { conv -> viewModel.selectConversation(conv) },
+                                    onEditContactNickname = { conv -> nicknameEditTarget = conv },
                                     onCopyDownloadUrl = onCopyDownloadUrl,
                                     onOpenDownloadUrl = onOpenDownloadUrl,
                                     onExpandQr = { showQrDownloadDialog = true }

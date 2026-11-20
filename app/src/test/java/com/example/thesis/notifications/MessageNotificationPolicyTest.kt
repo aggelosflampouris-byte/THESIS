@@ -173,4 +173,14 @@ class MessageNotificationPolicyTest {
             )
         )
     }
+
+    @Test
+    fun test_notificationChannels_keepPriorityMessagesIsolatedFromBackgroundServiceChannel() {
+        assertTrue(MessageNotificationManager.CHANNEL_ID.isNotBlank())
+        assertTrue(MessageNotificationManager.SERVICE_CHANNEL_ID.isNotBlank())
+        assertNotEquals(
+            MessageNotificationManager.CHANNEL_ID,
+            MessageNotificationManager.SERVICE_CHANNEL_ID
+        )
+    }
 }
