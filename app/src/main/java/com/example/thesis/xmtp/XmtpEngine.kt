@@ -27,6 +27,7 @@ import org.xmtp.android.library.ClientOptions
 import org.xmtp.android.library.DelicateApi
 import org.xmtp.android.library.SigningKey
 import org.xmtp.android.library.XMTPEnvironment
+import org.xmtp.android.library.codecs.GroupUpdatedCodec
 import uniffi.xmtpv3.InternalException
 import java.io.File
 import com.example.thesis.util.CryptoUtils
@@ -135,22 +136,49 @@ class XmtpEngine(
         dbDirectory: File? = null,
         dbEncryptionKey: ByteArray? = null
     ) {
+        startInitialization(signer, dbDirectory, dbEncryptionKey)
+    }
+
+    /**
+     * Starts initialization (or attaches to an in-flight initialization) and suspends until
+     * [XmtpEngineState] reaches a terminal state ([XmtpEngineState.Ready] or [XmtpEngineState.Error]).
+     */
+    suspend fun initialiseAndAwait(
+        signer: SigningKey,
+        dbDirectory: File? = null,
+        dbEncryptionKey: ByteArray? = null
+    ): XmtpEngineState {
+        val jobToJoin = startInitialization(signer, dbDirectory, dbEncryptionKey)
+        jobToJoin?.join()
+        return _state.value
+    }
+
+    private fun startInitialization(
+        signer: SigningKey,
+        dbDirectory: File? = null,
+        dbEncryptionKey: ByteArray? = null
+    ): Job? {
+        val ownedKey = dbEncryptionKey?.copyOf()
         synchronized(lock) {
             val current = _state.value
             if (current is XmtpEngineState.Loading || current is XmtpEngineState.Ready) {
+                ownedKey?.fill(0x00)
                 Log.i(TAG, "initialise() ignored: engine already in state ${current::class.simpleName}")
-                return
+                return activeInitJob
             }
 
             _state.value = XmtpEngineState.Loading
 
-            activeInitJob = engineScope.launch {
+            val job = engineScope.launch {
                 try {
                     initMutex.withLock {
                         // Double check after acquiring mutex
-                        if (_state.value is XmtpEngineState.Ready) return@withLock
+                        if (_state.value is XmtpEngineState.Ready) {
+                            ownedKey?.fill(0x00)
+                            return@withLock
+                        }
 
-                        val resultState = executeInitialization(signer, dbDirectory, dbEncryptionKey)
+                        val resultState = executeInitialization(signer, dbDirectory, ownedKey)
 
                         if (coroutineContext.isActive && _state.value is XmtpEngineState.Loading) {
                             if (resultState is XmtpEngineState.Ready) {
@@ -168,12 +196,16 @@ class XmtpEngine(
                         }
                     }
                 } catch (e: CancellationException) {
-                    // Do not swallow cancellation; propagate up the coroutine tree cleanly
+                    ownedKey?.fill(0x00)
                     throw e
                 } catch (e: Exception) {
+                    ownedKey?.fill(0x00)
                     _state.value = mapExceptionToState(e)
                 }
             }
+            job.invokeOnCompletion { ownedKey?.fill(0x00) }
+            activeInitJob = job
+            return job
         }
     }
 
@@ -197,6 +229,34 @@ class XmtpEngine(
                     engineJob.cancelChildren()
                 }
             }
+        }
+    }
+
+    /**
+     * Deterministically cancels in-flight initialization, closes the native XMTP SQLite/MLS
+     * connection, and awaits full handle release prior to GDPR storage unlinking.
+     */
+    suspend fun shutdownAndAwait() {
+        val clientToClose: Client?
+        val jobToCancel: Job?
+        synchronized(lock) {
+            _state.value = XmtpEngineState.Idle
+            clientToClose = activeClient
+            activeClient = null
+            jobToCancel = activeInitJob
+            activeInitJob = null
+        }
+
+        jobToCancel?.cancel()
+        try {
+            jobToCancel?.join()
+        } catch (_: CancellationException) {
+            // Expected cancellation of in-flight initialization job
+        }
+
+        withContext(NonCancellable + ioDispatcher) {
+            cleanupNativeClient(clientToClose)
+            engineJob.cancelChildren()
         }
     }
 
@@ -228,13 +288,13 @@ class XmtpEngine(
         customDbDirectory: File?,
         customDbEncryptionKey: ByteArray?
     ): XmtpEngineState = withContext(ioDispatcher) {
-        var dekToZero: ByteArray? = null
+        var dekToZero: ByteArray? = customDbEncryptionKey
         try {
             val address = signer.publicIdentity.identifier
             val sanitisedAddress = CryptoUtils.sanitiseEthereumAddress(address)
                 ?: return@withContext XmtpEngineState.Error(
                     XmtpInitError.IdentityError(
-                        message = "Invalid Ethereum address format for identity: $address",
+                        message = "Invalid Ethereum address format for identity",
                         cause = IllegalArgumentException("Address does not match 0x[0-9a-fA-F]{40}")
                     )
                 )
@@ -263,9 +323,10 @@ class XmtpEngine(
                 dbEncryptionKey = dekBytes
             )
 
-            Log.i(TAG, "Initializing XMTP client for env=$environment dbDirectory=${dbDirectory.name}")
+            Log.i(TAG, "Initializing XMTP client for env=$environment")
+            runCatching { Client.register(GroupUpdatedCodec()) }
             val xmtpClient = Client.create(account = signer, options = options)
-            Log.i(TAG, "XMTP client ready. inboxId=${xmtpClient.inboxId}")
+            Log.i(TAG, "XMTP client ready [env=$environment]")
 
             XmtpEngineState.Ready(xmtpClient)
 
@@ -295,7 +356,7 @@ class XmtpEngine(
 
     private fun mapExceptionToState(e: Exception): XmtpEngineState.Error {
         val message = e.message?.lowercase(Locale.ROOT) ?: ""
-        Log.e(TAG, "XMTP client initialisation failed [${e.javaClass.simpleName}]: ${e.message}", e)
+        Log.e(TAG, "XMTP client initialisation failed [${e.javaClass.simpleName}]")
 
         val error = when {
             isSignatureError(message) -> XmtpInitError.SignatureRejected(
@@ -342,7 +403,7 @@ class XmtpEngine(
 
     private fun resolveDatabaseEncryptionKey(customKey: ByteArray?): KeyResolutionResult {
         if (customKey != null) {
-            return KeyResolutionResult.Success(customKey, shouldZeroize = false)
+            return KeyResolutionResult.Success(customKey, shouldZeroize = true)
         }
         return when (val keyResult = keystoreManager.getOrCreateDatabaseKey()) {
             is KeystoreResult.Success -> {

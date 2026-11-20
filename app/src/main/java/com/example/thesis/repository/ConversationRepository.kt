@@ -5,6 +5,7 @@ import com.example.thesis.util.CryptoUtils
 import com.example.thesis.xmtp.XmtpEngine
 import com.example.thesis.xmtp.XmtpEngineState
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -25,7 +26,6 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOn
@@ -39,7 +39,9 @@ import org.xmtp.android.library.Client
 import org.xmtp.android.library.ConsentState
 import org.xmtp.android.library.Conversation
 import org.xmtp.android.library.Dm
+import org.xmtp.android.library.codecs.ContentTypeText
 import org.xmtp.android.library.libxmtp.DecodedMessage
+import org.xmtp.proto.mls.message.contents.TranscriptMessages.GroupUpdated
 import org.xmtp.android.library.libxmtp.PublicIdentity
 import org.xmtp.android.library.libxmtp.IdentityKind
 import java.util.Collections
@@ -72,7 +74,7 @@ class ConversationRepository(
     val engine: XmtpEngine,
     private val repositoryScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
-    private val syncIntervalMs: Long = 600L
+    private val syncIntervalMs: Long = 5_000L
 ) : AutoCloseable {
 
     val xmtpEngine: XmtpEngine get() = engine
@@ -84,7 +86,7 @@ class ConversationRepository(
         engine = xmtpEngine,
         repositoryScope = CoroutineScope(SupervisorJob() + ioDispatcher),
         ioDispatcher = ioDispatcher,
-        syncIntervalMs = 600L
+        syncIntervalMs = 5_000L
     )
 
     constructor(
@@ -98,9 +100,8 @@ class ConversationRepository(
         syncIntervalMs = syncIntervalMs
     )
 
-    private val repositoryJob = SupervisorJob()
-
-
+    private val repositoryJob = SupervisorJob(repositoryScope.coroutineContext[Job])
+    private val internalScope = CoroutineScope(repositoryScope.coroutineContext + repositoryJob + ioDispatcher)
 
     /**
      * Internal event bus for optimistic and published outgoing messages.
@@ -142,19 +143,19 @@ class ConversationRepository(
 
     init {
         if (syncIntervalMs > 0L) {
-            repositoryScope.launch(ioDispatcher) {
+            internalScope.launch {
                 readyClientFlow.collectLatest { client ->
                     while (isActive) {
                         try {
                             client.conversations.streamAllMessages().collect { msg ->
+                                if (!msg.isDisplayableUserMessage()) return@collect
                                 messageRefreshTrigger.emit(msg.conversationId)
-                                messageRefreshTrigger.emit("")
                             }
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Exception) {
-                            Log.w(TAG, "streamAllMessages disconnected: ${e.message}. Reconnecting in 1s...")
-                            delay(1000L)
+                            Log.w(TAG, "streamAllMessages disconnected: ${e::class.java.simpleName}. Reconnecting in 2s...")
+                            delay(2_000L)
                         }
                     }
                 }
@@ -175,7 +176,7 @@ class ConversationRepository(
                 createConversationsPipeline(client)
             }
             .shareIn(
-                scope = repositoryScope,
+                scope = internalScope,
                 started = SharingStarted.WhileSubscribed(
                     stopTimeoutMillis = STOP_TIMEOUT_MILLIS,
                     replayExpirationMillis = 0L
@@ -219,7 +220,10 @@ class ConversationRepository(
                 if (conv.consentState() == ConsentState.UNKNOWN) {
                     conv.updateConsentState(ConsentState.ALLOWED)
                 }
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                Log.w(TAG, "Non-fatal consent update error: ${e::class.java.simpleName}")
+            }
         }
         return list
     }
@@ -269,7 +273,10 @@ class ConversationRepository(
                         if (newConv.consentState() == ConsentState.UNKNOWN) {
                             newConv.updateConsentState(ConsentState.ALLOWED)
                         }
-                    } catch (_: Exception) {}
+                    } catch (e: Exception) {
+                        if (e is CancellationException) throw e
+                        Log.w(TAG, "Non-fatal streamed consent update error: ${e::class.java.simpleName}")
+                    }
                     val existingIndex = currentList.indexOfFirst { it.id == newConv.id }
                     if (existingIndex >= 0) {
                         currentList[existingIndex] = newConv
@@ -285,11 +292,11 @@ class ConversationRepository(
             }
         }
 
-        // Periodic network pull to auto-discover incoming conversations from peers (sub-1.5s)
+        // Periodic fallback network pull to discover peer invites if gRPC stream misses a frame
         val autoPollJob = if (syncIntervalMs > 0L) {
             launch(ioDispatcher) {
                 while (isActive) {
-                    delay(minOf(maxOf(syncIntervalMs, 500L), 1500L))
+                    delay(maxOf(syncIntervalMs * 2L, 10_000L))
                     try {
                         val refreshed = fetchConversationsWithConsent(client)
                         if (refreshed.size != currentList.size || refreshed.map { it.id } != currentList.map { it.id }) {
@@ -333,7 +340,7 @@ class ConversationRepository(
                     createMessagesPipeline(readyState.client, id)
                 }
                 .shareIn(
-                    scope = repositoryScope,
+                    scope = internalScope,
                     started = SharingStarted.WhileSubscribed(
                         stopTimeoutMillis = STOP_TIMEOUT_MILLIS,
                         replayExpirationMillis = 0L
@@ -356,12 +363,13 @@ class ConversationRepository(
 
         // 2. Real-time network stream
         val networkStream: Flow<Message> = conversation.streamMessages()
+            .filter { it.isDisplayableUserMessage() }
             .map { it.toDomainMessage() }
             .retryWhen { cause, attempt ->
                 if (cause is CancellationException) return@retryWhen false
                 if (CryptoUtils.isNetworkThrowable(cause) && attempt < MAX_RECONNECT_ATTEMPTS) {
                     val backoffMs = calculateExponentialBackoff(attempt)
-                    Log.w(TAG, "Message stream interrupted for $conversationId. Reconnecting in ${backoffMs}ms...")
+                    Log.w(TAG, "Message stream interrupted [conversation=REDACTED]. Reconnecting in ${backoffMs}ms...")
                     delay(backoffMs)
                     true
                 } else {
@@ -464,10 +472,13 @@ class ConversationRepository(
                         IllegalArgumentException("Δεν μπορείτε να ανοίξετε 1-on-1 DM με το δικό σας Inbox ID. Χρησιμοποιήστε το Loopback.")
                     )
                 }
-                Log.i(TAG, "Resolving MLS conversation via findOrCreateDm with inboxId=$sanitisedInboxId")
+                Log.i(TAG, "Resolving MLS conversation via findOrCreateDm [peer=REDACTED]")
                 client.conversations.findOrCreateDm(sanitisedInboxId)
             } else {
-                val ethAddress = sanitisedEthAddress!!
+                val ethAddress = sanitisedEthAddress
+                    ?: return@withContext Result.failure(
+                        IllegalArgumentException("Invalid Ethereum address format")
+                    )
                 val identity = PublicIdentity(IdentityKind.ETHEREUM, ethAddress)
 
                 val canMessageMap = try {
@@ -491,7 +502,7 @@ class ConversationRepository(
                     )
                 }
 
-                Log.i(TAG, "Resolving MLS conversation via PublicIdentity(ETHEREUM) with peer=$ethAddress")
+                Log.i(TAG, "Resolving MLS conversation via PublicIdentity(ETHEREUM) [peer=REDACTED]")
                 client.conversations.findOrCreateDmWithIdentity(identity)
             }
 
@@ -514,7 +525,7 @@ class ConversationRepository(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to create MLS conversation with peer=$peerIdentifier: ${e.message}", e)
+            Log.e(TAG, "Failed to create MLS conversation [peer=REDACTED]: ${e::class.java.simpleName}")
             Result.failure(e)
         }
     }
@@ -545,27 +556,14 @@ class ConversationRepository(
     // ────────────────────────────────────────────────────────────────────────
 
     /**
-     * Sends a text message to a conversation with two-phase local persistence guarantees.
-     *
-     * Persists the message into the local encrypted SQLCipher database with [MessageDeliveryStatus.LOCAL_PENDING]
-     * **before** transmitting across the network. Updates to [MessageDeliveryStatus.PUBLISHED] upon
-     * network ACK or [MessageDeliveryStatus.FAILED] on transmission failure.
-     *
-     * @param conversationId Identifier of target conversation.
-     * @param content        Plaintext message content.
-     * @return [Result.success] on network confirmation, or [Result.failure].
-     */
-    /**
-     * Live message stream for a direct [Conversation] reference.
-     */
-    /**
-     * Επιστρέφει ενημερωμένη και deduplicated λίστα μηνυμάτων για τη συνομιλία.
+     * Observes a deduplicated, chronologically sorted live message stream for [conversation].
      */
     fun observeMessages(conversation: Conversation): Flow<List<DecryptedMessage>> = callbackFlow {
+        val mapLock = Any()
         val messageMap = LinkedHashMap<String, DecryptedMessage>()
         val syncChannel = Channel<Unit>(Channel.CONFLATED)
 
-        fun getSortedList(): List<DecryptedMessage> {
+        fun getSortedListLocked(): List<DecryptedMessage> {
             return messageMap.values.sortedWith(
                 compareBy<DecryptedMessage> { it.sentAt?.time ?: (it.sentAtNs / 1_000_000L) }
                     .thenBy { it.id }
@@ -573,17 +571,12 @@ class ConversationRepository(
         }
 
         // 1. Instantly load local cached messages from SQLite to eliminate initial UI latency (0ms wait)
-        val initialCached = try {
-            conversation.messages()
-        } catch (_: Exception) {
-            try {
-                conversation.messages()
-            } catch (_: Exception) {
-                emptyList()
-            }
+        val initialCached = fetchMessagesSafely(conversation)
+        val initialSnapshot = synchronized(mapLock) {
+            initialCached.filter { it.isDisplayableUserMessage() }.forEach { msg -> messageMap[msg.id] = msg }
+            getSortedListLocked()
         }
-        initialCached.forEach { msg -> messageMap[msg.id] = msg }
-        trySend(getSortedList())
+        trySend(initialSnapshot)
 
         // 2. Dedicated single-flight sync processor consuming from CONFLATED channel
         val syncProcessorJob = launch(ioDispatcher) {
@@ -593,31 +586,25 @@ class ConversationRepository(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    Log.w(TAG, "observeMessages: conversation.sync failed: ${e.message}")
+                    Log.w(TAG, "observeMessages: conversation.sync failed: ${e::class.java.simpleName}")
                 }
 
-                val latest = try {
-                    conversation.messages()
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (_: Exception) {
-                    try {
-                        conversation.messages()
-                    } catch (_: Exception) {
-                        emptyList()
-                    }
-                }
+                val latest = fetchMessagesSafely(conversation)
 
-                var hasChanges = latest.size != messageMap.size
-                latest.forEach { msg ->
-                    val prev = messageMap[msg.id]
-                    if (prev != msg) {
-                        messageMap[msg.id] = msg
-                        hasChanges = true
+                val filteredLatest = latest.filter { it.isDisplayableUserMessage() }
+                val updatedSnapshot = synchronized(mapLock) {
+                    var hasChanges = filteredLatest.size != messageMap.size
+                    filteredLatest.forEach { msg ->
+                        val prev = messageMap[msg.id]
+                        if (prev != msg) {
+                            messageMap[msg.id] = msg
+                            hasChanges = true
+                        }
                     }
+                    if (hasChanges) getSortedListLocked() else null
                 }
-                if (hasChanges) {
-                    trySend(getSortedList())
+                if (updatedSnapshot != null) {
+                    trySend(updatedSnapshot)
                 }
             }
         }
@@ -630,25 +617,29 @@ class ConversationRepository(
             while (isActive) {
                 try {
                     conversation.streamMessages().collect { incoming ->
-                        Log.i(TAG, "RX COMMITTED | MsgID: ${incoming.id} | ConvID: ${conversation.id} | Topic: ${conversation.topic} | SenderInbox: ${incoming.senderInboxId} | SentNs: ${incoming.sentAtNs}")
-                        messageMap[incoming.id] = incoming
-                        trySend(getSortedList())
+                        if (!incoming.isDisplayableUserMessage()) return@collect
+                        Log.i(TAG, "RX COMMITTED [conversation=REDACTED]")
+                        val streamSnapshot = synchronized(mapLock) {
+                            messageMap[incoming.id] = incoming
+                            getSortedListLocked()
+                        }
+                        trySend(streamSnapshot)
                         syncChannel.trySend(Unit)
                     }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    Log.w(TAG, "streamMessages disconnected for ${conversation.id}: ${e.message}. Reconnecting in 1s...")
+                    Log.w(TAG, "streamMessages disconnected [conversation=REDACTED]: ${e::class.java.simpleName}. Reconnecting in 1s...")
                     delay(1000L)
                 }
             }
         }
 
-        // 4. Low-latency background sync ticker (sub-second 600ms)
+        // 4. Periodic fallback sync ticker when live gRPC stream is idle
         val pollJob = if (syncIntervalMs > 0L) {
             launch(ioDispatcher) {
                 while (isActive) {
-                    delay(minOf(maxOf(syncIntervalMs, 200L), 600L))
+                    delay(maxOf(syncIntervalMs, 3_000L))
                     syncChannel.trySend(Unit)
                 }
             }
@@ -709,11 +700,14 @@ class ConversationRepository(
 
             try {
                 conversation.sync()
-            } catch (_: Exception) {}
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                Log.w(TAG, "Post-send sync failed: ${e::class.java.simpleName}")
+            }
 
             // Trigger flow update to transition message to PUBLISHED state with server timestamp
             messageRefreshTrigger.emit(conversation.id)
-            Log.i(TAG, "TX COMMITTED | MsgID: $msgId | ConvID: ${conversation.id} | Topic: ${conversation.topic}")
+            Log.i(TAG, "TX COMMITTED [conversation=REDACTED]")
             msgId
         }
     }
@@ -772,12 +766,31 @@ class ConversationRepository(
         return conversation ?: throw NoSuchElementException("Conversation not found for ID: $conversationId")
     }
 
+    private suspend fun fetchMessagesSafely(conversation: Conversation): List<DecodedMessage> {
+        return try {
+            conversation.messages()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            try {
+                conversation.messages()
+            } catch (retryEx: CancellationException) {
+                throw retryEx
+            } catch (retryEx: Exception) {
+                Log.w(TAG, "Failed to query cached messages: ${retryEx::class.java.simpleName}")
+                emptyList()
+            }
+        }
+    }
+
     private suspend fun loadHistoricalMessagesSafe(conversation: Conversation, conversationId: String): List<Message> {
         return try {
-            conversation.messages().map { it.toDomainMessage() }
+            conversation.messages()
+                .filter { it.isDisplayableUserMessage() }
+                .map { it.toDomainMessage() }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            Log.w(TAG, "Failed to load message history for $conversationId: ${e.message}")
+            Log.w(TAG, "Failed to load message history [conversation=REDACTED]: ${e::class.java.simpleName}")
             emptyList()
         }
     }
@@ -827,13 +840,13 @@ class ConversationRepository(
                 id = publishedId,
                 deliveryStatus = MessageDeliveryStatus.PUBLISHED
             )
-            Log.i(TAG, "TX COMMITTED | MsgID: $publishedId | ConvID: ${conversation.id} | Topic: ${conversation.topic} | Sender: ${pendingMessage.senderAddress}")
+            Log.i(TAG, "TX COMMITTED [conversation=REDACTED]")
             outgoingMessageEvents.emit(publishedMessage)
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to dispatch message to conversation ${pendingMessage.conversationId}: ${e.message}", e)
+            Log.e(TAG, "Failed to dispatch message [conversation=REDACTED]: ${e::class.java.simpleName}")
             val failedMessage = pendingMessage.copy(
                 deliveryStatus = MessageDeliveryStatus.FAILED
             )
@@ -942,6 +955,29 @@ fun DecodedMessage.toDomainMessage(): Message = Message(
  * Typealias providing backwards-compatibility for callers referring to [DecodedMessage].
  */
 typealias DecryptedMessage = DecodedMessage
+
+/**
+ * Returns true only for user-authored displayable text messages, excluding XMTP v4
+ * MLS protocol/transcript control messages such as `xmtp.org/group_updated:1.0`.
+ */
+internal fun DecodedMessage.isDisplayableUserMessage(): Boolean {
+    val contentType = runCatching { encodedContent.type }.getOrNull()
+    if (contentType != null) {
+        val typeId = runCatching { contentType.typeId }.getOrNull().orEmpty()
+        val authorityId = runCatching { contentType.authorityId }.getOrNull().orEmpty()
+        if (typeId.isNotEmpty() &&
+            !(authorityId == ContentTypeText.authorityId && typeId == ContentTypeText.typeId)
+        ) {
+            return false
+        }
+    }
+    val decoded = runCatching { content<Any>() }.getOrNull()
+    if (decoded is GroupUpdated) {
+        return false
+    }
+    val text = runCatching { body }.getOrNull()
+    return !text.isNullOrBlank()
+}
 
 val DecodedMessage.senderAddress: String
     get() = senderInboxId

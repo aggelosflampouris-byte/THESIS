@@ -218,11 +218,6 @@ class KeystoreManager(context: Context) {
     }
 
     /**
-     * Convenience helper unwrapping the identity private key or throwing the underlying exception.
-     */
-    fun getOrCreateIdentityPrivateKeyBytes(): ByteArray = getOrCreateIdentityPrivateKey().getOrThrow()
-
-    /**
      * Permanently destroys the hardware-backed KEK and purges the stored DEK envelope.
      * Once invoked, any database encrypted with this DEK becomes permanently inaccessible.
      *
@@ -235,6 +230,10 @@ class KeystoreManager(context: Context) {
 
             val prefs = openEncryptedPreferences()
             val committed = prefs.edit().clear().commit()
+            cachedPreferences = null
+            runCatching { appContext.deleteSharedPreferences(PREF_FILE_NAME) }
+            cleanUpAliasQuietly(keyStore, MasterKey.DEFAULT_MASTER_KEY_ALIAS)
+
             if (!committed) {
                 KeystoreResult.Failure.StorageError(
                     message = "Failed to commit SharedPreferences erasure to disk.",
@@ -632,11 +631,6 @@ sealed class KeystoreResult<out T> {
 
     inline fun <R> map(transform: (T) -> R): KeystoreResult<R> = when (this) {
         is Success -> Success(transform(value))
-        is Failure -> this
-    }
-
-    inline fun <R> flatMap(transform: (T) -> KeystoreResult<R>): KeystoreResult<R> = when (this) {
-        is Success -> transform(value)
         is Failure -> this
     }
 

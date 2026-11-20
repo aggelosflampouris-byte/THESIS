@@ -1,0 +1,248 @@
+package com.example.thesis.ui.screens
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import org.xmtp.android.library.libxmtp.DecodedMessage
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+@Composable
+internal fun MessagingChatScreen(
+    messages: List<DecodedMessage>,
+    localInboxId: String,
+    draft: String,
+    isSending: Boolean,
+    isSyncing: Boolean = false,
+    isShredding: Boolean = false,
+    onSync: () -> Unit = {},
+    onDraftChange: (String) -> Unit,
+    onSendMessage: (String) -> Unit,
+    onRetryMessage: (String) -> Unit = onSendMessage
+) {
+    val listState = rememberLazyListState()
+
+    LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty()) {
+            listState.animateScrollToItem(messages.lastIndex)
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .imePadding()
+            .padding(horizontal = 14.dp, vertical = 6.dp)
+    ) {
+        if (messages.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = "Δεν υπάρχουν μηνύματα",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = onSync,
+                        enabled = !isSyncing
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Refresh,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (isSyncing) "Συγχρονισμός..." else "Συγχρονισμός",
+                            fontSize = 12.sp
+                        )
+                    }
+                }
+            }
+        } else {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                contentPadding = PaddingValues(vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(
+                    messages,
+                    key = { it.id }
+                ) { message ->
+                    MessagingMessageBubble(
+                        message = message,
+                        isOwnMessage = message.senderInboxId == localInboxId,
+                        retryEnabled = !isSending && !isShredding,
+                        onRetry = { onRetryMessage(message.body) }
+                    )
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(6.dp))
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 2.dp),
+            verticalAlignment = Alignment.Bottom
+        ) {
+            OutlinedTextField(
+                value = draft,
+                onValueChange = onDraftChange,
+                placeholder = { Text("Γράψτε μήνυμα...", fontSize = 13.sp) },
+                modifier = Modifier.weight(1f),
+                maxLines = 4,
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Text,
+                    imeAction = ImeAction.Default
+                ),
+                enabled = !isSending && !isShredding,
+                shape = RoundedCornerShape(20.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            IconButton(
+                onClick = {
+                    val content = draft.trim()
+                    if (content.isNotEmpty()) onSendMessage(content)
+                },
+                enabled = draft.isNotBlank() && !isSending && !isShredding
+            ) {
+                if (isSending) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp),
+                        strokeWidth = 2.dp
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.Send,
+                        contentDescription = "Αποστολή",
+                        tint = if (draft.isNotBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MessagingMessageBubble(
+    message: DecodedMessage,
+    isOwnMessage: Boolean,
+    retryEnabled: Boolean = true,
+    onRetry: () -> Unit
+) {
+    val timeLabel = remember(message.sentAt, message.sentAtNs) {
+        val date = message.sentAt ?: if (message.sentAtNs > 0L) Date(message.sentAtNs / 1_000_000L) else Date()
+        SimpleDateFormat("HH:mm", Locale.getDefault()).format(date)
+    }
+    val status = when (message.deliveryStatus) {
+        DecodedMessage.MessageDeliveryStatus.FAILED -> "Δεν στάλθηκε"
+        DecodedMessage.MessageDeliveryStatus.UNPUBLISHED -> "Αποστολή…"
+        DecodedMessage.MessageDeliveryStatus.PUBLISHED -> "Στάλθηκε"
+        DecodedMessage.MessageDeliveryStatus.ALL -> null
+    }
+    val isFailed = message.deliveryStatus == DecodedMessage.MessageDeliveryStatus.FAILED
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = if (isOwnMessage) Alignment.End else Alignment.Start
+    ) {
+        Surface(
+            modifier = Modifier.widthIn(min = 60.dp, max = 340.dp),
+            shape = RoundedCornerShape(
+                topStart = 16.dp,
+                topEnd = 16.dp,
+                bottomEnd = if (isOwnMessage) 4.dp else 16.dp,
+                bottomStart = if (isOwnMessage) 16.dp else 4.dp
+            ),
+            color = if (isOwnMessage) MaterialTheme.colorScheme.primaryContainer
+            else MaterialTheme.colorScheme.surfaceVariant
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                Text(
+                    text = message.body,
+                    style = MaterialTheme.typography.bodyLarge
+                )
+                if (isOwnMessage && status != null) {
+                    Spacer(Modifier.height(4.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text(
+                            timeLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 10.sp
+                        )
+                        Text(
+                            status,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (isFailed) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 10.sp
+                        )
+                    }
+                } else {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        timeLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 10.sp
+                    )
+                }
+            }
+        }
+        if (isOwnMessage && isFailed) {
+            TextButton(onClick = onRetry, enabled = retryEnabled) {
+                Text("Προσπάθεια ξανά", color = MaterialTheme.colorScheme.error, fontSize = 11.sp)
+            }
+        }
+    }
+}

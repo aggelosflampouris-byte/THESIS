@@ -32,7 +32,9 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import io.mockk.slot
 import org.xmtp.android.library.Client
+import org.xmtp.android.library.ClientOptions
 import org.xmtp.android.library.DelicateApi
 import org.xmtp.android.library.XMTPEnvironment
 import uniffi.xmtpv3.InternalException
@@ -329,5 +331,38 @@ class XmtpEngineTest {
 
             cancelAndIgnoreRemainingEvents()
         }
+    }
+
+    @Test
+    fun test_initialiseAndAwait_zeroizesCustomDekCopy() = runTest(testDispatcher) {
+        val optionsSlot = slot<ClientOptions>()
+        coEvery { Client.create(any(), capture(optionsSlot)) } returns mockClient
+
+        val callerKey = ByteArray(32) { 0x5A.toByte() }
+        val state = engine.initialiseAndAwait(realSigner, dbEncryptionKey = callerKey)
+
+        assertTrue("State must reach Ready", state is XmtpEngineState.Ready)
+        val capturedDek = optionsSlot.captured.dbEncryptionKey
+        assertTrue(
+            "Captured ClientOptions DEK copy must be zeroized after initialization completes",
+            capturedDek.all { it == 0.toByte() }
+        )
+        assertTrue(
+            "Caller input buffer remains untouched so caller finally-block controls its lifecycle",
+            callerKey.all { it == 0x5A.toByte() }
+        )
+    }
+
+    @Test
+    fun test_shutdownAndAwait_completesNativeCleanupBeforeReturning() = runTest(testDispatcher) {
+        val state = engine.initialiseAndAwait(realSigner)
+        assertTrue("Engine must be Ready prior to shutdown", state is XmtpEngineState.Ready)
+
+        engine.shutdownAndAwait()
+
+        assertEquals("State must reset to Idle", XmtpEngineState.Idle, engine.state.value)
+        assertNull("Client must be cleared", engine.client)
+        verify(exactly = 1) { mockClient.dropLocalDatabaseConnection() }
+        assertFalse("Background engine jobs must be stopped before returning", engine.hasActiveJobs)
     }
 }

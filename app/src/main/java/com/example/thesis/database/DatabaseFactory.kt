@@ -52,8 +52,6 @@ class DatabaseFactory(context: Context) {
          * Validates and normalizes Ethereum address. Delegated to [CryptoUtils.sanitiseEthereumAddress].
          */
         fun sanitiseEthereumAddress(address: String): String? = CryptoUtils.sanitiseEthereumAddress(address)
-
-        fun sanitizeEthereumAddress(address: String): String? = CryptoUtils.sanitiseEthereumAddress(address)
     }
 
     private val defaultErrorHandler: DatabaseErrorHandler = DefaultDatabaseErrorHandler()
@@ -144,14 +142,6 @@ class DatabaseFactory(context: Context) {
         }
     }
 
-    /**
-     * Checks if a database file exists for the given Ethereum address without opening it.
-     */
-    suspend fun databaseExists(ethAddress: String): Boolean = withContext(Dispatchers.IO) {
-        val sanitised = sanitiseEthereumAddress(ethAddress) ?: return@withContext false
-        resolveDatabaseFile(sanitised).exists()
-    }
-
     // ────────────────────────────────────────────────────────────────────────
     //  Sanitization & Path Derivation
     // ────────────────────────────────────────────────────────────────────────
@@ -161,9 +151,6 @@ class DatabaseFactory(context: Context) {
      * Returns canonical lowercase address on success, or null if validation fails.
      */
     internal fun sanitiseEthereumAddress(address: String): String? =
-        Companion.sanitiseEthereumAddress(address)
-
-    internal fun sanitizeEthereumAddress(address: String): String? =
         Companion.sanitiseEthereumAddress(address)
 
     /**

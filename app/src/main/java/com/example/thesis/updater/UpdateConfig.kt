@@ -41,4 +41,10 @@ object UpdateConfig {
      * Buffer chunk size for APK stream writes.
      */
     const val STREAM_BUFFER_SIZE_BYTES = 16_384
+
+    /**
+     * Strict HTTPS host allowlist for release discovery and asset downloads.
+     */
+    val ALLOWED_EXACT_HOSTS: Set<String> = setOf("api.github.com", "github.com")
+    const val ALLOWED_CDN_HOST_SUFFIX: String = ".githubusercontent.com"
 }

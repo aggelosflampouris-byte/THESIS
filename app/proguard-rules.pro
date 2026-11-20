@@ -37,3 +37,10 @@
 -dontwarn com.google.j2objc.annotations.**
 -dontwarn org.bouncycastle.asn1.cms.**
 -dontwarn org.slf4j.impl.**
+
+# ─── Strip Verbose/Debug/Info Logcat Calls in Release Builds (Zero-PII) ──────
+-assumenosideeffects class android.util.Log {
+    public static int v(...);
+    public static int d(...);
+    public static int i(...);
+}

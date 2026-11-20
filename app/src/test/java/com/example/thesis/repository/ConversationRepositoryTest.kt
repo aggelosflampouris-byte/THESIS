@@ -11,7 +11,11 @@ import io.mockk.mockk
 import io.mockk.mockkStatic
 import io.mockk.unmockkAll
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -37,8 +41,11 @@ import org.xmtp.android.library.Conversation
 import org.xmtp.android.library.Conversations
 import org.xmtp.android.library.Dm
 import org.xmtp.android.library.Group
+import org.xmtp.android.library.codecs.ContentTypeGroupUpdated
+import org.xmtp.android.library.codecs.ContentTypeText
 import org.xmtp.android.library.libxmtp.DecodedMessage
 import org.xmtp.android.library.libxmtp.PublicIdentity
+import org.xmtp.proto.mls.message.contents.TranscriptMessages.GroupUpdated
 import java.io.IOException
 import java.util.Date
 
@@ -538,5 +545,194 @@ class ConversationRepositoryTest {
 
             cancelAndIgnoreRemainingEvents()
         }
+    }
+
+    @Test
+    fun test_observeMessages_filtersOutGroupUpdatedSystemMessages() = runTest(testDispatcher) {
+        val mockGroupInit = mockk<DecodedMessage>(relaxed = true)
+        every { mockGroupInit.id } returns "sys_group_init_1"
+        every { mockGroupInit.conversationId } returns testConvId
+        every { mockGroupInit.senderInboxId } returns testPeerAddress
+        every { mockGroupInit.encodedContent.type } returns ContentTypeGroupUpdated
+        every { mockGroupInit.body } returns "a".repeat(64)
+        every { mockGroupInit.sentAt } returns Date(500L)
+        every { mockGroupInit.deliveryStatus } returns DecodedMessage.MessageDeliveryStatus.PUBLISHED
+
+        val mockUserMsg = mockk<DecodedMessage>(relaxed = true)
+        every { mockUserMsg.id } returns "user_msg_1"
+        every { mockUserMsg.conversationId } returns testConvId
+        every { mockUserMsg.senderInboxId } returns testPeerAddress
+        every { mockUserMsg.encodedContent.type } returns ContentTypeText
+        every { mockUserMsg.content<Any>() } returns "Hello MLS"
+        every { mockUserMsg.body } returns "Hello MLS"
+        every { mockUserMsg.sentAt } returns Date(1000L)
+        every { mockUserMsg.deliveryStatus } returns DecodedMessage.MessageDeliveryStatus.PUBLISHED
+
+        val mockStreamGroupUpdate = mockk<DecodedMessage>(relaxed = true)
+        every { mockStreamGroupUpdate.id } returns "sys_group_update_2"
+        every { mockStreamGroupUpdate.conversationId } returns testConvId
+        every { mockStreamGroupUpdate.senderInboxId } returns testPeerAddress
+        every { mockStreamGroupUpdate.encodedContent.type } returns ContentTypeGroupUpdated
+        every { mockStreamGroupUpdate.body } returns "b".repeat(64)
+        every { mockStreamGroupUpdate.sentAt } returns Date(1500L)
+        every { mockStreamGroupUpdate.deliveryStatus } returns DecodedMessage.MessageDeliveryStatus.PUBLISHED
+
+        val mockStreamUserMsg = mockk<DecodedMessage>(relaxed = true)
+        every { mockStreamUserMsg.id } returns "user_msg_2"
+        every { mockStreamUserMsg.conversationId } returns testConvId
+        every { mockStreamUserMsg.senderInboxId } returns testPeerAddress
+        every { mockStreamUserMsg.encodedContent.type } returns ContentTypeText
+        every { mockStreamUserMsg.content<Any>() } returns "Real reply"
+        every { mockStreamUserMsg.body } returns "Real reply"
+        every { mockStreamUserMsg.sentAt } returns Date(2000L)
+        every { mockStreamUserMsg.deliveryStatus } returns DecodedMessage.MessageDeliveryStatus.PUBLISHED
+
+        val streamFlow = MutableSharedFlow<DecodedMessage>()
+        coEvery { mockConversation.messages() } returns listOf(mockGroupInit, mockUserMsg)
+        every { mockConversation.streamMessages() } returns streamFlow
+
+        repository.observeMessages(mockConversation).test {
+            val initial = awaitItem()
+            assertEquals(1, initial.size)
+            assertEquals("user_msg_1", initial[0].id)
+            assertEquals("Hello MLS", initial[0].body)
+
+            streamFlow.emit(mockStreamGroupUpdate)
+            testScheduler.advanceUntilIdle()
+            expectNoEvents()
+
+            streamFlow.emit(mockStreamUserMsg)
+            testScheduler.advanceUntilIdle()
+            val updated = awaitItem()
+            assertEquals(2, updated.size)
+            assertEquals("user_msg_2", updated[1].id)
+            assertEquals("Real reply", updated[1].body)
+
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
+    fun test_observeMessages_filtersOutDecodedGroupUpdatedAndBlankMessages() {
+        val mockDecodedGroup = mockk<DecodedMessage>(relaxed = true)
+        every { mockDecodedGroup.encodedContent.type } returns ContentTypeText
+        every { mockDecodedGroup.content<Any>() } returns GroupUpdated.getDefaultInstance()
+        every { mockDecodedGroup.body } returns "some fallback text"
+        assertFalse(mockDecodedGroup.isDisplayableUserMessage())
+
+        val mockBlank = mockk<DecodedMessage>(relaxed = true)
+        every { mockBlank.encodedContent.type } returns ContentTypeText
+        every { mockBlank.content<Any>() } returns "   "
+        every { mockBlank.body } returns "   "
+        assertFalse(mockBlank.isDisplayableUserMessage())
+
+        val mockValid = mockk<DecodedMessage>(relaxed = true)
+        every { mockValid.encodedContent.type } returns ContentTypeText
+        every { mockValid.content<Any>() } returns "Valid MLS message"
+        every { mockValid.body } returns "Valid MLS message"
+        assertTrue(mockValid.isDisplayableUserMessage())
+    }
+
+    @Test
+    fun test_streamAllMessages_filtersSystemMessagesAndTargetsSpecificConversation() = runTest(testDispatcher) {
+        val allMessagesStream = MutableSharedFlow<DecodedMessage>()
+        val perConvStream = MutableSharedFlow<DecodedMessage>()
+        every { mockConversations.streamAllMessages() } returns allMessagesStream
+        every { mockConversation.streamMessages() } returns perConvStream
+
+        val targetUserMsg = mockk<DecodedMessage>(relaxed = true)
+        every { targetUserMsg.id } returns "target_user_msg_1"
+        every { targetUserMsg.conversationId } returns testConvId
+        every { targetUserMsg.senderInboxId } returns testPeerAddress
+        every { targetUserMsg.encodedContent.type } returns ContentTypeText
+        every { targetUserMsg.content<Any>() } returns "Targeted update"
+        every { targetUserMsg.body } returns "Targeted update"
+        every { targetUserMsg.sentAt } returns Date(5000L)
+
+        val sysMsg = mockk<DecodedMessage>(relaxed = true)
+        every { sysMsg.id } returns "sys_ignore_1"
+        every { sysMsg.conversationId } returns testConvId
+        every { sysMsg.encodedContent.type } returns ContentTypeGroupUpdated
+        every { sysMsg.body } returns testPeerAddress
+
+        val otherUserMsg = mockk<DecodedMessage>(relaxed = true)
+        every { otherUserMsg.id } returns "other_msg_1"
+        every { otherUserMsg.conversationId } returns "other_conv_999"
+        every { otherUserMsg.encodedContent.type } returns ContentTypeText
+        every { otherUserMsg.content<Any>() } returns "Other chat"
+        every { otherUserMsg.body } returns "Other chat"
+
+        coEvery { mockConversation.messages() } returns emptyList()
+
+        val repoScope = CoroutineScope(SupervisorJob() + testDispatcher)
+        val polledRepo = ConversationRepository(
+            engine = mockEngine,
+            repositoryScope = repoScope,
+            ioDispatcher = testDispatcher,
+            syncIntervalMs = 5_000L
+        )
+        try {
+            polledRepo.observeMessages(mockConversation).test {
+                val initial = awaitItem()
+                assertTrue(initial.isEmpty())
+                coVerify(exactly = 1) { mockConversation.sync() }
+
+                // System transcript on streamAllMessages is ignored
+                allMessagesStream.emit(sysMsg)
+                testScheduler.runCurrent()
+                coVerify(exactly = 1) { mockConversation.sync() }
+
+                // User message for another conversation does not trigger wildcard sync on mockConversation
+                allMessagesStream.emit(otherUserMsg)
+                testScheduler.runCurrent()
+                coVerify(exactly = 1) { mockConversation.sync() }
+
+                // Valid user message for testConvId triggers targeted sync and emits update
+                coEvery { mockConversation.messages() } returns listOf(targetUserMsg)
+                allMessagesStream.emit(targetUserMsg)
+                testScheduler.runCurrent()
+                coVerify(exactly = 2) { mockConversation.sync() }
+
+                val updated = awaitItem()
+                assertEquals(1, updated.size)
+                assertEquals("target_user_msg_1", updated[0].id)
+
+                cancelAndIgnoreRemainingEvents()
+            }
+        } finally {
+            repoScope.cancel()
+            polledRepo.close()
+        }
+    }
+
+    @Test
+    fun test_close_cancelsInternalRepositoryScopeWithoutCancellingParent() = runTest(testDispatcher) {
+        val allMessagesStream = MutableSharedFlow<DecodedMessage>()
+        every { mockConversations.streamAllMessages() } returns allMessagesStream
+
+        val parentScope = CoroutineScope(SupervisorJob() + testDispatcher)
+        val repo = ConversationRepository(
+            engine = mockEngine,
+            repositoryScope = parentScope,
+            ioDispatcher = testDispatcher,
+            syncIntervalMs = 5_000L
+        )
+
+        testScheduler.runCurrent()
+        assertEquals(1, allMessagesStream.subscriptionCount.value)
+
+        repo.close()
+        testScheduler.runCurrent()
+
+        assertEquals(
+            "Closing repository must cancel internal stream collectors",
+            0,
+            allMessagesStream.subscriptionCount.value
+        )
+        assertTrue(
+            "Closing repository must not cancel caller parent scope",
+            parentScope.coroutineContext[Job]?.isActive == true
+        )
+        parentScope.cancel()
     }
 }

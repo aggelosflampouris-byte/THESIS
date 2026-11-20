@@ -20,5 +20,6 @@ data class AppUpdateInfo(
     val assetSizeBytes: Long = 0L,
     val publishedAt: String = "",
     val isUpdateAvailable: Boolean,
-    val currentVersion: String
+    val currentVersion: String,
+    val expectedSha256: String? = null
 )

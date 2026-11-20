@@ -12,6 +12,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.thesis.database.DatabaseFactory
 import com.example.thesis.identity.ThesisSigner
 import com.example.thesis.repository.ConversationRepository
+import com.example.thesis.repository.isDisplayableUserMessage
 import com.example.thesis.updater.AppUpdateInfo
 import com.example.thesis.updater.AppUpdateManager
 import com.example.thesis.updater.UpdateStatus
@@ -34,6 +35,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.UUID
@@ -61,7 +63,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val cryptoShredder = CryptoShredder(appContext, keystoreManager, databaseFactory)
     private val engine = XmtpEngine(appContext, XMTPEnvironment.DEV)
     private val repository = ConversationRepository(engine, viewModelScope)
-    val appUpdateManager = AppUpdateManager(appContext)
+    private val appUpdateManager = AppUpdateManager(appContext)
     val updateStatus: StateFlow<UpdateStatus> = appUpdateManager.updateStatus
 
     private val sessionStateMutex = Mutex()
@@ -73,6 +75,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _isShredding = MutableStateFlow(false)
     val isShredding: StateFlow<Boolean> = _isShredding.asStateFlow()
+
+    private val _isCreatingConversation = MutableStateFlow(false)
+    val isCreatingConversation: StateFlow<Boolean> = _isCreatingConversation.asStateFlow()
 
     val engineState: StateFlow<XmtpEngineState> = engine.state
 
@@ -111,6 +116,35 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _isBenchmarking = MutableStateFlow(false)
     val isBenchmarking: StateFlow<Boolean> = _isBenchmarking.asStateFlow()
 
+    private data class CommittedMessageProof(
+        val msgId: String,
+        val sender: String,
+        val topic: String,
+        val sentAtNs: Long? = null
+    )
+
+    private val committedProofMap = Collections.synchronizedMap(LinkedHashMap<String, CommittedMessageProof>())
+    private val _verifiedMessageCount = MutableStateFlow(0)
+    val verifiedMessageCount: StateFlow<Int> = _verifiedMessageCount.asStateFlow()
+
+    private fun recordCommittedMessage(
+        msgId: String,
+        sender: String,
+        topic: String,
+        sentAtNs: Long? = null
+    ) {
+        if (msgId.isBlank()) return
+        synchronized(committedProofMap) {
+            committedProofMap[msgId] = CommittedMessageProof(
+                msgId = msgId,
+                sender = sender,
+                topic = topic,
+                sentAtNs = sentAtNs
+            )
+            _verifiedMessageCount.value = committedProofMap.size
+        }
+    }
+
     fun logAction(tag: String, message: String, durationMs: Double? = null, isError: Boolean = false) {
         val entry = ActionLogEntry(
             tag = tag,
@@ -121,10 +155,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _actionLogs.value = (_actionLogs.value + entry).takeLast(100)
     }
 
-    /**
-     * Generates a complete Proof-of-Operation cryptographic manifest in the Action Log,
-     * dumping active 0x addresses, XMTP Inbox/Installation IDs, MLS Group IDs, and Message IDs.
-     */
     /**
      * Generates a complete Proof-of-Operation cryptographic manifest in the Action Log,
      * dumping active 0x addresses, XMTP Inbox/Installation IDs, MLS Conversation IDs, Topics,
@@ -189,7 +219,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
 
-                val convMessages = runCatching { conv.messages(limit = 10) }.getOrDefault(emptyList())
+                val convMessages = runCatching { conv.messages(limit = 10) }
+                    .getOrDefault(emptyList())
+                    .filter { it.isDisplayableUserMessage() }
 
                 logAction(
                     tag = "SYNC",
@@ -197,6 +229,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 )
 
                 convMessages.forEach { msg ->
+                    recordCommittedMessage(
+                        msgId = msg.id,
+                        sender = msg.senderInboxId,
+                        topic = conv.topic,
+                        sentAtNs = msg.sentAtNs
+                    )
                     logAction(
                         tag = "E2EE",
                         message = "[POC_MSG_PROOF] MsgID: ${msg.id} | ConvID: ${conv.id} | Topic: ${conv.topic} | SenderInbox: ${msg.senderInboxId} | SentNs: ${msg.sentAtNs}"
@@ -206,7 +244,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun consumeStatusBanner() {
+        _statusBanner.value = null
+    }
+
     fun clearActionLogs() {
+        committedProofMap.clear()
+        _verifiedMessageCount.value = 0
         _actionLogs.value = emptyList()
         ThesisTelemetry.clearTelemetryData()
     }
@@ -218,7 +262,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val activeInstallationId = client?.installationId ?: installationId.value ?: "N/A"
         val convList = _conversations.value
         val msgList = _messages.value
-        val actionLogs = _actionLogs.value
 
         val pocHeader = buildString {
             appendLine("# XMTP v4 (MLS) & Blockchain Identity Proof of Concept")
@@ -253,27 +296,25 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
             appendLine()
             appendLine("## Committed Message ID Ledger (Cryptographic Proof of Operation)")
-            val recordedMessages = if (msgList.isNotEmpty()) {
+            val recordedMessages = synchronized(committedProofMap) {
+                committedProofMap.values.toList()
+            }.ifEmpty {
                 msgList.map { m ->
-                    Triple(m.id, m.senderInboxId, "${m.topic} | ${m.sentAtNs}")
-                }
-            } else {
-                val regex = Regex("""MsgID:\s*([a-zA-Z0-9_\-]+).*?Topic:\s*([^\s|]+).*?Sender(?:Inbox|0x)?:\s*([^\s|]+)""")
-                actionLogs.mapNotNull { entry ->
-                    regex.find(entry.message)?.let { match ->
-                        Triple(match.groupValues[1], match.groupValues[3], match.groupValues[2])
-                    }
+                    CommittedMessageProof(
+                        msgId = m.id,
+                        sender = m.senderInboxId,
+                        topic = m.topic,
+                        sentAtNs = m.sentAtNs
+                    )
                 }
             }
 
             if (recordedMessages.isNotEmpty()) {
                 appendLine("| Message ID (SHA-256 / MLS Commit Hash) | Sender Inbox / Identity | Topic / Scope | Nanosecond Timestamp |")
                 appendLine("| :--- | :--- | :--- | :--- |")
-                recordedMessages.take(30).forEach { (msgId, sender, topic) ->
-                    val parts = topic.split(" | ")
-                    val topicPart = parts.firstOrNull() ?: topic
-                    val nsPart = parts.getOrNull(1) ?: "N/A"
-                    appendLine("| `$msgId` | `$sender` | `$topicPart` | `$nsPart` |")
+                recordedMessages.takeLast(30).forEach { proof ->
+                    val nsPart = proof.sentAtNs?.toString() ?: "N/A"
+                    appendLine("| `${proof.msgId}` | `${proof.sender}` | `${proof.topic}` | `$nsPart` |")
                 }
             } else {
                 appendLine("_No committed messages recorded in active session._")
@@ -284,8 +325,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
         return pocHeader + ThesisTelemetry.exportFullReport()
     }
-
-    fun exportBenchmarkCsv(): String = ThesisTelemetry.exportAsCsv()
 
     init {
         viewModelScope.launch {
@@ -322,8 +361,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 _isInitializing.value = true
                 try {
                     logAction("KEYSTORE", "Requesting hardware DEK unwrap (AES-256-GCM)...")
-                    val dekResult = ThesisTelemetry.measureOperation("1. Keystore AES-256-GCM DEK Unwrap") {
-                        keystoreManager.getOrCreateDatabaseKey()
+                    val dekResult = withContext(Dispatchers.IO) {
+                        ThesisTelemetry.measureOperation("1. Keystore AES-256-GCM DEK Unwrap") {
+                            keystoreManager.getOrCreateDatabaseKey()
+                        }
                     }
                     val dekBytes = try {
                         dekResult.getOrThrow()
@@ -334,8 +375,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     }
 
                     try {
-                        val idKeyResult = ThesisTelemetry.measureOperation("2. Keystore Hardware Identity Unwrap") {
-                            keystoreManager.getOrCreateIdentityPrivateKey()
+                        val idKeyResult = withContext(Dispatchers.IO) {
+                            ThesisTelemetry.measureOperation("2. Keystore Hardware Identity Unwrap") {
+                                keystoreManager.getOrCreateIdentityPrivateKey()
+                            }
                         }
                         val privKeyBytes = try {
                             idKeyResult.getOrThrow()
@@ -346,7 +389,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         }
 
                         val signer = try {
-                            activeSigner ?: ThesisSigner.fromPrivateKey(privKeyBytes).also { activeSigner = it }
+                            activeSigner ?: withContext(Dispatchers.Default) {
+                                ThesisSigner.fromPrivateKey(privKeyBytes)
+                            }.also { activeSigner = it }
                         } finally {
                             // Άμεσος μηδενισμός του ενδιάμεσου buffer ιδιωτικού κλειδιού στη μνήμη RAM
                             privKeyBytes.fill(0x00)
@@ -357,17 +402,29 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         } else signer.address
                         logAction("IDENTITY", "Hardware-backed SECP256K1 identity active: $maskedAddress")
 
-                        val dbDirectory = databaseFactory.resolveAccountDatabaseDirectory(signer.address)
+                        val dbDirectory = withContext(Dispatchers.IO) {
+                            databaseFactory.resolveAccountDatabaseDirectory(signer.address)
+                        }
 
-                        ThesisTelemetry.measureSuspendOperation("3. SQLCipher Sandbox & MLS Init") {
-                            engine.initialise(
+                        _statusBanner.value = "Σύνδεση με Hardware-Backed SQLCipher & MLS..."
+                        val initState = ThesisTelemetry.measureSuspendOperation("3. SQLCipher Sandbox & MLS Init") {
+                            engine.initialiseAndAwait(
                                 signer = signer,
                                 dbDirectory = dbDirectory,
-                                dbEncryptionKey = dekBytes.copyOf()
+                                dbEncryptionKey = dekBytes
                             )
                         }
-                        _statusBanner.value = "Σύνδεση με Hardware-Backed SQLCipher & MLS..."
-                        logAction("XMTP", "Connected to XMTP v4 MLS network with SQLCipher storage")
+                        when (initState) {
+                            is XmtpEngineState.Ready -> {
+                                _statusBanner.value = "Συνδέθηκε στο δίκτυο XMTP v4 (MLS) με SQLCipher."
+                                logAction("XMTP", "Connected to XMTP v4 MLS network with SQLCipher storage")
+                            }
+                            is XmtpEngineState.Error -> {
+                                _statusBanner.value = "Σφάλμα σύνδεσης XMTP: ${initState.error.message}"
+                                logAction("XMTP", "XMTP initialization failed: ${initState.error.message}", isError = true)
+                            }
+                            else -> {}
+                        }
                     } finally {
                         // Άμεσος μηδενισμός του DEK στη μνήμη RAM
                         dekBytes.fill(0x00)
@@ -392,6 +449,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 repository.observeMessages(conversation).collectLatest { msgList ->
                     _messages.value = msgList
                     msgList.forEach { msg ->
+                        recordCommittedMessage(
+                            msgId = msg.id,
+                            sender = msg.senderInboxId,
+                            topic = conversation.topic,
+                            sentAtNs = msg.sentAtNs
+                        )
                         if (msg.id.isNotBlank() && loggedMessageIds.add(msg.id)) {
                             val isOwn = msg.senderInboxId == currentInboxId
                             val tag = if (isOwn) "MLS" else "E2EE"
@@ -408,76 +471,93 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startNewConversation(peerIdentifier: String) {
+        if (_isCreatingConversation.value || _isShredding.value || _isBenchmarking.value) return
+        _isCreatingConversation.value = true
         viewModelScope.launch {
-            val masked = if (peerIdentifier.length >= 14) "${peerIdentifier.take(6)}...${peerIdentifier.takeLast(4)}" else peerIdentifier
-            logAction("MLS", "Initiating MLS handshake with $masked...")
-            ThesisTelemetry.measureSuspendOperation("4. MLS Conversation Handshake") {
-                repository.createConversation(peerIdentifier)
-            }
-            .onSuccess { conv ->
-                _statusBanner.value = "Η συνομιλία MLS δημιουργήθηκε."
-                logAction("MLS", "MLS conversation established. Topic: ${conv.topic.take(24)}...")
-                selectConversation(conv)
-            }
-            .onFailure { err ->
-                _statusBanner.value = "Αποτυχία δημιουργίας συνομιλίας: ${err.message}"
-                logAction("MLS", "Handshake failed: ${err.message}", isError = true)
+            try {
+                val masked = if (peerIdentifier.length >= 14) "${peerIdentifier.take(6)}...${peerIdentifier.takeLast(4)}" else peerIdentifier
+                logAction("MLS", "Initiating MLS handshake with $masked...")
+                ThesisTelemetry.measureSuspendOperation("4. MLS Conversation Handshake") {
+                    repository.createConversation(peerIdentifier)
+                }
+                .onSuccess { conv ->
+                    _statusBanner.value = "Η συνομιλία MLS δημιουργήθηκε."
+                    logAction("MLS", "MLS conversation established. Topic: ${conv.topic.take(24)}...")
+                    selectConversation(conv)
+                }
+                .onFailure { err ->
+                    _statusBanner.value = "Αποτυχία δημιουργίας συνομιλίας: ${err.message}"
+                    logAction("MLS", "Handshake failed: ${err.message}", isError = true)
+                }
+            } finally {
+                _isCreatingConversation.value = false
             }
         }
     }
 
     fun syncConversations() {
+        if (_isSyncing.value || _isShredding.value) return
         val activeConv = _selectedConversation.value
+        _isSyncing.value = true
         viewModelScope.launch {
-            _isSyncing.value = true
-            logAction("SYNC", "Syncing with XMTP DEV network...")
-            if (activeConv != null) {
-                ThesisTelemetry.measureSuspendOperation("MLS Conversation Sync") {
-                    repository.syncConversation(activeConv)
+            try {
+                logAction("SYNC", "Syncing with XMTP DEV network...")
+                if (activeConv != null) {
+                    ThesisTelemetry.measureSuspendOperation("MLS Conversation Sync") {
+                        repository.syncConversation(activeConv)
+                    }
+                    .onSuccess {
+                        logAction("SYNC", "Active conversation messages synced.")
+                    }
+                    .onFailure { err ->
+                        logAction("SYNC", "Conversation sync failed: ${err.message}", isError = true)
+                    }
+                } else {
+                    ThesisTelemetry.measureSuspendOperation("MLS Network Sync") {
+                        repository.syncConversations()
+                    }
+                    .onSuccess {
+                        logAction("SYNC", "Sync complete. Active conversations: ${_conversations.value.size}")
+                    }
+                    .onFailure { err ->
+                        logAction("SYNC", "Sync failed: ${err.message}", isError = true)
+                    }
                 }
-                .onSuccess {
-                    logAction("SYNC", "Active conversation messages synced.")
-                }
-                .onFailure { err ->
-                    logAction("SYNC", "Conversation sync failed: ${err.message}", isError = true)
-                }
-            } else {
-                ThesisTelemetry.measureSuspendOperation("MLS Network Sync") {
-                    repository.syncConversations()
-                }
-                .onSuccess {
-                    logAction("SYNC", "Sync complete. Active conversations: ${_conversations.value.size}")
-                }
-                .onFailure { err ->
-                    logAction("SYNC", "Sync failed: ${err.message}", isError = true)
-                }
+            } finally {
+                _isSyncing.value = false
             }
-            _isSyncing.value = false
         }
     }
 
     fun startSelfConversation() {
+        if (_isCreatingConversation.value || _isShredding.value || _isBenchmarking.value) return
+        _isCreatingConversation.value = true
         viewModelScope.launch {
-            logAction("MLS", "Initiating MLS Loopback Ratchet Session...")
-            ThesisTelemetry.measureSuspendOperation("4. MLS Conversation Handshake") {
-                repository.createLoopbackConversation()
-            }
-            .onSuccess { conv ->
-                _statusBanner.value = "Πειραματική Συνεδρία MLS (Loopback) ενεργή."
-                logAction("MLS", "Loopback Ratchet Group established. Topic: ${conv.topic.take(24)}...")
-                selectConversation(conv)
-            }
-            .onFailure { err ->
-                _statusBanner.value = "Αποτυχία εκκίνησης loopback: ${err.message}"
-                logAction("MLS", "Loopback failed: ${err.message}", isError = true)
+            try {
+                logAction("MLS", "Initiating MLS Loopback Ratchet Session...")
+                ThesisTelemetry.measureSuspendOperation("4. MLS Conversation Handshake") {
+                    repository.createLoopbackConversation()
+                }
+                .onSuccess { conv ->
+                    _statusBanner.value = "Πειραματική Συνεδρία MLS (Loopback) ενεργή."
+                    logAction("MLS", "Loopback Ratchet Group established. Topic: ${conv.topic.take(24)}...")
+                    selectConversation(conv)
+                }
+                .onFailure { err ->
+                    _statusBanner.value = "Αποτυχία εκκίνησης loopback: ${err.message}"
+                    logAction("MLS", "Loopback failed: ${err.message}", isError = true)
+                }
+            } finally {
+                _isCreatingConversation.value = false
             }
         }
     }
 
-    fun sendMessage(text: String) {
+    fun sendMessage(text: String, onFailureRestore: (() -> Unit)? = null) {
+        if (_isSending.value || _isShredding.value || _isBenchmarking.value) return
         val conv = _selectedConversation.value ?: return
+        _isSending.value = true
         viewModelScope.launch {
-            _isSending.value = true
             try {
                 logAction("E2EE", "Dispatching encrypted MLS payload...")
                 ThesisTelemetry.measureSuspendOperation("5. MLS E2EE Message Dispatch") {
@@ -486,6 +566,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 .onSuccess { msgId ->
                     val sender0x = _walletAddress.value ?: "0x..."
                     val clientInbox = (engine.state.value as? XmtpEngineState.Ready)?.client?.inboxId ?: "N/A"
+                    recordCommittedMessage(
+                        msgId = msgId,
+                        sender = if (clientInbox != "N/A") clientInbox else sender0x,
+                        topic = conv.topic
+                    )
                     logAction(
                         "MLS",
                         "TX COMMITTED | MsgID: $msgId | ConvID: ${conv.id} | Topic: ${conv.topic} | Sender0x: $sender0x | SenderInbox: $clientInbox"
@@ -494,6 +579,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 .onFailure { err ->
                     _statusBanner.value = "Αποτυχία αποστολής: ${err.message}"
                     logAction("E2EE", "Dispatch failed: ${err.message}", isError = true)
+                    onFailureRestore?.invoke()
                 }
             } finally {
                 _isSending.value = false
@@ -508,18 +594,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      * 3. Διαγράφει φυσικά τα αρχεία της SQLCipher (.db, -wal, -shm, -journal).
      */
     fun performCryptoShredding() {
+        if (_isShredding.value) return
         val address = _walletAddress.value ?: return
+        _isShredding.value = true
         viewModelScope.launch {
-            sessionStateMutex.withLock {
-                _isShredding.value = true
-                try {
+            try {
+                sessionStateMutex.withLock {
                     logAction("GDPR", "Executing GDPR Art. 17 cryptographic wipe...")
                     messagesJob?.cancel()
                     _selectedConversation.value = null
                     _messages.value = emptyList()
                     _conversations.value = emptyList()
 
-                    engine.shutdown()
+                    engine.shutdownAndAwait()
                     activeSigner?.close()
                     activeSigner = null
 
@@ -528,6 +615,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     when (res) {
                         is ShredResult.Success -> {
+                            committedProofMap.clear()
+                            _verifiedMessageCount.value = 0
+                            loggedMessageIds.clear()
+                            _actionLogs.value = emptyList()
+                            ThesisTelemetry.clearTelemetryData()
                             _walletAddress.value = null
                             _statusBanner.value = "GDPR Wipe: Κλειδί Keystore & ${res.deletedFilesCount} αρχεία βάσης καταστράφηκαν οριστικά."
                             logAction("GDPR", "KEK destroyed & ${res.deletedFilesCount} database files expunged")
@@ -539,6 +631,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             }
                         }
                         is ShredResult.PartialSuccessCryptoShreddedOnly -> {
+                            committedProofMap.clear()
+                            _verifiedMessageCount.value = 0
+                            loggedMessageIds.clear()
+                            _actionLogs.value = emptyList()
+                            ThesisTelemetry.clearTelemetryData()
                             _walletAddress.value = null
                             _statusBanner.value = "Crypto-Shredded: ${res.message}"
                             logAction("GDPR", "Crypto-shredded: ${res.message}")
@@ -549,6 +646,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             }
                         }
                         is ShredResult.PartialSuccess -> {
+                            committedProofMap.clear()
+                            _verifiedMessageCount.value = 0
+                            loggedMessageIds.clear()
+                            _actionLogs.value = emptyList()
+                            ThesisTelemetry.clearTelemetryData()
                             _walletAddress.value = null
                             _statusBanner.value = "Crypto-Shredded: ${res.message}"
                             logAction("GDPR", "Crypto-shredded: ${res.message}")
@@ -563,9 +665,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             logAction("GDPR", "Crypto-shredding failed", isError = true)
                         }
                     }
-                } finally {
-                    _isShredding.value = false
                 }
+            } finally {
+                _isShredding.value = false
             }
         }
     }
@@ -575,18 +677,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      * to gather empirical latency distributions for research evaluation.
      */
     fun runBatchBenchmark(iterations: Int = 10) {
-        if (_isBenchmarking.value) return
+        if (_isBenchmarking.value || _isShredding.value || _isCreatingConversation.value) return
         val readyClient = (engine.state.value as? XmtpEngineState.Ready)?.client
         if (readyClient == null) {
             _statusBanner.value = "Απαιτείται ενεργή σύνδεση XMTP για την εκτέλεση benchmark."
             return
         }
 
+        _isBenchmarking.value = true
         viewModelScope.launch {
-            sessionStateMutex.withLock {
-                _isBenchmarking.value = true
-                _statusBanner.value = "Εκτέλεση Batch Benchmark ($iterations δοκιμές MLS)..."
-                logAction("BENCHMARK", "Starting automated batch benchmark (N=$iterations)...")
+            try {
+                sessionStateMutex.withLock {
+                    _statusBanner.value = "Εκτέλεση Batch Benchmark ($iterations δοκιμές MLS)..."
+                    logAction("BENCHMARK", "Starting automated batch benchmark (N=$iterations)...")
 
                 try {
                     var activeConv = _selectedConversation.value
@@ -619,6 +722,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             val sender0x = _walletAddress.value ?: "0x..."
                             val clientInbox = readyClient.inboxId
                             successfulSamples++
+                            recordCommittedMessage(
+                                msgId = probeMsgId,
+                                sender = clientInbox,
+                                topic = conv.topic
+                            )
                             logAction(
                                 tag = "BENCHMARK",
                                 message = "TX COMMITTED | Probe #$i/$iterations | MsgID: $probeMsgId | ConvID: ${conv.id} | Topic: ${conv.topic} | Sender0x: $sender0x | SenderInbox: $clientInbox"
@@ -638,12 +746,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         tag = "BENCHMARK",
                         message = "Batch complete ($successfulSamples/$iterations). Summaries ready for export."
                     )
-                } catch (e: Exception) {
-                    _statusBanner.value = "Σφάλμα κατά το batch benchmark: ${e.message}"
-                    logAction("BENCHMARK", "Batch test error: ${e.message}", isError = true)
-                } finally {
-                    _isBenchmarking.value = false
+                    } catch (e: Exception) {
+                        _statusBanner.value = "Σφάλμα κατά το batch benchmark: ${e.message}"
+                        logAction("BENCHMARK", "Batch test error: ${e.message}", isError = true)
+                    }
                 }
+            } finally {
+                _isBenchmarking.value = false
             }
         }
     }
@@ -692,6 +801,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun dismissUpdate() {
         appUpdateManager.dismissUpdate()
     }
+
+    fun getCurrentVersionName(): String = appUpdateManager.getCurrentVersionName()
+
+    fun canRequestPackageInstalls(): Boolean = appUpdateManager.canRequestPackageInstalls()
+
+    fun openInstallPermissionSettings() = appUpdateManager.openInstallPermissionSettings()
 
     override fun onCleared() {
         engine.shutdown()
