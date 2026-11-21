@@ -180,6 +180,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     val unreadCounts by viewModel.unreadCounts.collectAsState()
     val nicknameSnapshot by viewModel.nicknameSnapshot.collectAsState()
     val peerReadTimestamps by viewModel.peerReadTimestamps.collectAsState()
+    val callEventsByConversation by viewModel.callEventsByConversation.collectAsState()
     val isScreenRecordingActive by viewModel.isScreenRecordingActive.collectAsState()
     val deviceTransferState by viewModel.deviceTransferState.collectAsState()
     val callState by viewModel.callState.collectAsState()
@@ -648,8 +649,20 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                         is XmtpEngineState.Ready -> {
                             val activeConv = selectedConversation
                             if (activeConv != null) {
+                                val peerDisplayName = remember(activeConv, nicknameSnapshot) {
+                                    if (activeConv is Conversation.Dm) {
+                                        val peerId = activeConv.dm.peerInboxId
+                                        NicknamePolicy.resolveContactNickname(peerId, nicknameSnapshot)
+                                            ?: NicknamePolicy.resolveContactNickname(activeConv.id, nicknameSnapshot)
+                                            ?: if (peerId.length > 14) "${peerId.take(6)}...${peerId.takeLast(4)}" else peerId
+                                    } else {
+                                        "Επαφή"
+                                    }
+                                }
                                 MessagingChatScreen(
                                     messages = messages,
+                                    callEvents = callEventsByConversation[activeConv.id].orEmpty(),
+                                    peerDisplayName = peerDisplayName,
                                     localInboxId = state.client.inboxId,
                                     peerLastReadTimestampMs = peerReadTimestamps[activeConv.id],
                                     draft = draft,
@@ -657,6 +670,13 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                                     isSyncing = isSyncing,
                                     isShredding = isShredding,
                                     onSync = { viewModel.syncConversations() },
+                                    onStartVoiceCall = if (activeConv is Conversation.Dm && callState is CallUiState.Idle) {
+                                        {
+                                            runWithRecordAudioPermission {
+                                                viewModel.startVoiceCall(activeConv)
+                                            }
+                                        }
+                                    } else null,
                                     onDraftChange = { draft = it },
                                     onSendMessage = { text ->
                                         draft = ""

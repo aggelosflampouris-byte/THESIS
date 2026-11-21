@@ -27,6 +27,7 @@ import com.example.thesis.security.ThesisTelemetry
 import com.example.thesis.ui.util.ReportExporter
 import com.example.thesis.call.CallForegroundService
 import com.example.thesis.call.CallUiState
+import com.example.thesis.call.ChatCallEvent
 import com.example.thesis.diagnostics.ActionLogSession
 import com.example.thesis.xmtp.XmtpEngineState
 import kotlinx.coroutines.Job
@@ -114,6 +115,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     val unreadCounts: StateFlow<Map<String, Int>> = sessionContainer.unreadCounts
     val nicknameSnapshot: StateFlow<NicknameSnapshot> = sessionContainer.nicknameSnapshot
     val peerReadTimestamps: StateFlow<Map<String, Long>> = repository.peerReadTimestamps
+    val callEventsByConversation: StateFlow<Map<String, List<ChatCallEvent>>> = repository.callEventsByConversation
     val callState: StateFlow<CallUiState> = sessionContainer.callSessionManager.callState
 
     private val _isScreenRecordingActive = MutableStateFlow(false)

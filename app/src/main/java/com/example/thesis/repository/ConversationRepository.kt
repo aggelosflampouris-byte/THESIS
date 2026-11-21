@@ -1,6 +1,9 @@
 package com.example.thesis.repository
 
 import android.util.Log
+import com.example.thesis.call.CallHistoryPolicy
+import com.example.thesis.call.ChatCallEvent
+import com.example.thesis.call.DecodedCallSignalRecord
 import com.example.thesis.identity.InMemoryNicknameStorage
 import com.example.thesis.identity.NicknamePolicy
 import com.example.thesis.identity.NicknameStorage
@@ -181,6 +184,9 @@ class ConversationRepository(
     val incomingCallSignals: SharedFlow<IncomingCallSignal> = _incomingCallSignals.asSharedFlow()
 
     private val processedCallSignalIds = BoundedIdDeduplicator(maxSize = MAX_DEDUPLICATOR_CAPACITY)
+    private val callSignalRecordsByConv = ConcurrentHashMap<String, LinkedHashMap<String, DecodedCallSignalRecord>>()
+    private val _callEventsByConversation = MutableStateFlow<Map<String, List<ChatCallEvent>>>(emptyMap())
+    internal val callEventsByConversation: StateFlow<Map<String, List<ChatCallEvent>>> = _callEventsByConversation.asStateFlow()
 
     private val _peerReadTimestamps = MutableStateFlow<Map<String, Long>>(emptyMap())
     val peerReadTimestamps: StateFlow<Map<String, Long>> = _peerReadTimestamps.asStateFlow()
@@ -684,6 +690,8 @@ class ConversationRepository(
         hasSeededMessageBaseline = false
         seenMessageIds.clear()
         processedCallSignalIds.clear()
+        callSignalRecordsByConv.clear()
+        _callEventsByConversation.value = emptyMap()
         seenMessageStorage.clear()
         _peerReadTimestamps.value = emptyMap()
         _localReadTimestamps.value = emptyMap()
@@ -952,11 +960,23 @@ class ConversationRepository(
                     signal,
                     SendOptions(contentType = ContentTypeCallSignal)
                 )
+                recordCallSignalAndRefreshHistory(
+                    conversationId = conversationId,
+                    record = DecodedCallSignalRecord(
+                        messageId = msgId.ifBlank { UUID.randomUUID().toString() },
+                        conversationId = conversationId,
+                        senderInboxId = client.inboxId,
+                        timestampMs = signal.timestampMs.takeIf { it > 0L } ?: System.currentTimeMillis(),
+                        signal = signal
+                    ),
+                    localInboxId = client.inboxId
+                )
                 try {
                     conversation.sync()
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
                 }
+                messageRefreshTrigger.tryEmit(conversationId)
                 msgId
             }
         }
@@ -1178,6 +1198,32 @@ class ConversationRepository(
             .sortedBy { it.resolvedTimestampMs() }
             .toList()
 
+        if (allCallSignalMessages.isNotEmpty()) {
+            val convMap = callSignalRecordsByConv.getOrPut(conversationId) { LinkedHashMap() }
+            var changed = false
+            synchronized(convMap) {
+                for (msg in allCallSignalMessages) {
+                    val parsed = msg.extractCallSignal() ?: continue
+                    val key = msg.id.ifBlank { "${parsed.callId}_${parsed.type.name}_${parsed.timestampMs}" }
+                    val ts = msg.resolvedTimestampMs().takeIf { it > 0L } ?: parsed.timestampMs
+                    val rec = DecodedCallSignalRecord(
+                        messageId = key,
+                        conversationId = conversationId,
+                        senderInboxId = msg.senderInboxId,
+                        timestampMs = ts,
+                        signal = parsed
+                    )
+                    if (convMap.put(key, rec) != rec) {
+                        changed = true
+                    }
+                }
+                if (changed) {
+                    val events = CallHistoryPolicy.buildCallEvents(convMap.values, localInboxId)
+                    _callEventsByConversation.update { current -> current + (conversationId to events) }
+                }
+            }
+        }
+
         if (!emitLiveCallSignals) {
             // Marcamos como ya vistas las senales historicas cargadas de cache para no reemitirlas como llamadas nuevas.
             for (msg in allCallSignalMessages) {
@@ -1191,14 +1237,17 @@ class ConversationRepository(
         // Descartamos ofertas que ya tienen respuesta o fin en el historial (incluyendo REJECT/HANGUP propios).
         val resolvedCallIds = HashSet<String>()
         var latestPeerOfferCallId: String? = null
-        for (msg in allCallSignalMessages) {
-            val parsed = msg.extractCallSignal() ?: continue
+        val knownRecords = callSignalRecordsByConv[conversationId]?.let { map ->
+            synchronized(map) { map.values.toList() }
+        }.orEmpty()
+        for (rec in knownRecords) {
+            val parsed = rec.signal
             if (parsed.type != com.example.thesis.xmtp.CallSignalType.OFFER) {
                 if (parsed.type != com.example.thesis.xmtp.CallSignalType.ICE_BATCH) {
                     resolvedCallIds.add(parsed.callId)
                 }
             } else {
-                val sender = msg.senderInboxId
+                val sender = rec.senderInboxId
                 val isFromPeer = sender.isNotBlank() &&
                     (localInboxId.isBlank() || !sender.equals(localInboxId, ignoreCase = true))
                 if (isFromPeer) {
@@ -1232,6 +1281,20 @@ class ConversationRepository(
                     signal = parsed
                 )
             )
+        }
+    }
+
+    private fun recordCallSignalAndRefreshHistory(
+        conversationId: String,
+        record: DecodedCallSignalRecord,
+        localInboxId: String
+    ) {
+        if (conversationId.isBlank()) return
+        val convMap = callSignalRecordsByConv.getOrPut(conversationId) { LinkedHashMap() }
+        synchronized(convMap) {
+            convMap[record.messageId] = record
+            val events = CallHistoryPolicy.buildCallEvents(convMap.values, localInboxId)
+            _callEventsByConversation.update { current -> current + (conversationId to events) }
         }
     }
 

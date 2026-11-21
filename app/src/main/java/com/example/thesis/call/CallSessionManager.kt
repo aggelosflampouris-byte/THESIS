@@ -347,11 +347,19 @@ internal class CallSessionManager(
             } else {
                 CallSignalType.HANGUP
             }
+            val durationSec = session.connectedAtElapsedMs?.let { connectedAt ->
+                ((SystemClock.elapsedRealtime() - connectedAt) / 1_000L).coerceAtLeast(1L)
+            }
+            val reason = if (signalType == CallSignalType.HANGUP) {
+                CallHistoryPolicy.encodeHangupReason("hangup", durationSec)
+            } else {
+                "declined"
+            }
             val signal = CallSignal(
                 callId = session.callId,
                 type = signalType,
                 timestampMs = System.currentTimeMillis(),
-                reason = "hangup"
+                reason = reason
             )
             teardownSessionLocked(
                 endReasonText = null,

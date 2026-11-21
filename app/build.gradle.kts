@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.thesis"
         minSdk = 26
         targetSdk = 35
-        versionCode = 27
-        versionName = "1.0.30"
+        versionCode = 28
+        versionName = "1.0.31"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

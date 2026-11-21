@@ -1,5 +1,6 @@
 package com.example.thesis.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -44,19 +46,44 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.thesis.R
+import com.example.thesis.call.CallHistoryPolicy
+import com.example.thesis.call.ChatCallEvent
+import com.example.thesis.call.ChatCallOutcome
 import com.example.thesis.repository.ReadReceiptPolicy
 import org.xmtp.android.library.libxmtp.DecodedMessage
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+private sealed interface ChatTimelineItem {
+    val itemKey: String
+    val timestampMs: Long
+
+    data class TextMessage(
+        val message: DecodedMessage,
+        override val timestampMs: Long
+    ) : ChatTimelineItem {
+        override val itemKey: String = "msg_${message.id}"
+    }
+
+    data class CallFeedback(
+        val event: ChatCallEvent
+    ) : ChatTimelineItem {
+        override val itemKey: String = "call_${event.callId}"
+        override val timestampMs: Long = event.startedAtMs
+    }
+}
+
 @Composable
 internal fun MessagingChatScreen(
     messages: List<DecodedMessage>,
+    callEvents: List<ChatCallEvent> = emptyList(),
+    peerDisplayName: String = "Επαφή",
     localInboxId: String,
     peerLastReadTimestampMs: Long? = null,
     draft: String,
@@ -64,6 +91,7 @@ internal fun MessagingChatScreen(
     isSyncing: Boolean = false,
     isShredding: Boolean = false,
     onSync: () -> Unit = {},
+    onStartVoiceCall: (() -> Unit)? = null,
     onDraftChange: (String) -> Unit,
     onSendMessage: (String) -> Unit,
     onRetryMessage: (String) -> Unit = onSendMessage
@@ -79,9 +107,25 @@ internal fun MessagingChatScreen(
         }?.id
     }
 
-    LaunchedEffect(messages.size) {
-        if (messages.isNotEmpty()) {
-            listState.animateScrollToItem(messages.lastIndex)
+    // Intercalamos mensajes de texto y eventos de llamada en una sola linea temporal cronologica.
+    val timelineItems = remember(messages, callEvents) {
+        val combined = ArrayList<ChatTimelineItem>(messages.size + callEvents.size)
+        for (msg in messages) {
+            val ts = msg.sentAt?.time ?: if (msg.sentAtNs > 0L) msg.sentAtNs / 1_000_000L else 0L
+            combined.add(ChatTimelineItem.TextMessage(msg, ts))
+        }
+        for (call in callEvents) {
+            combined.add(ChatTimelineItem.CallFeedback(call))
+        }
+        combined.sortedWith(
+            compareBy<ChatTimelineItem> { it.timestampMs }
+                .thenBy { it.itemKey }
+        )
+    }
+
+    LaunchedEffect(timelineItems.size) {
+        if (timelineItems.isNotEmpty()) {
+            listState.animateScrollToItem(timelineItems.lastIndex)
         }
     }
 
@@ -103,7 +147,7 @@ internal fun MessagingChatScreen(
             ) {
                 val maxBubbleWidth = minOf(maxWidth * 0.82f, 360.dp)
 
-                if (messages.isEmpty()) {
+                if (timelineItems.isEmpty()) {
                     Box(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
@@ -144,25 +188,38 @@ internal fun MessagingChatScreen(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         items(
-                            messages,
-                            key = { it.id }
-                        ) { message ->
-                            val isOwn = message.senderInboxId == localInboxId
-                            val isSeen = isOwn && ReadReceiptPolicy.isMessageSeenByPeer(
-                                message = message,
-                                localInboxId = localInboxId,
-                                peerLastReadTimestampMs = peerLastReadTimestampMs
-                            )
-                            MessagingMessageBubble(
-                                message = message,
-                                isOwnMessage = isOwn,
-                                isSeen = isSeen,
-                                isLastSeenOwnMessage = isSeen && message.id == lastSeenOwnMessageId,
-                                seenAtMs = peerLastReadTimestampMs,
-                                maxBubbleWidth = maxBubbleWidth,
-                                retryEnabled = !isSending && !isShredding,
-                                onRetry = { onRetryMessage(message.body) }
-                            )
+                            timelineItems,
+                            key = { it.itemKey }
+                        ) { item ->
+                            when (item) {
+                                is ChatTimelineItem.TextMessage -> {
+                                    val message = item.message
+                                    val isOwn = message.senderInboxId == localInboxId
+                                    val isSeen = isOwn && ReadReceiptPolicy.isMessageSeenByPeer(
+                                        message = message,
+                                        localInboxId = localInboxId,
+                                        peerLastReadTimestampMs = peerLastReadTimestampMs
+                                    )
+                                    MessagingMessageBubble(
+                                        message = message,
+                                        isOwnMessage = isOwn,
+                                        isSeen = isSeen,
+                                        isLastSeenOwnMessage = isSeen && message.id == lastSeenOwnMessageId,
+                                        seenAtMs = peerLastReadTimestampMs,
+                                        maxBubbleWidth = maxBubbleWidth,
+                                        retryEnabled = !isSending && !isShredding,
+                                        onRetry = { onRetryMessage(message.body) }
+                                    )
+                                }
+
+                                is ChatTimelineItem.CallFeedback -> {
+                                    CallFeedbackChatCard(
+                                        event = item.event,
+                                        peerDisplayName = peerDisplayName,
+                                        onCallback = onStartVoiceCall
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -212,6 +269,120 @@ internal fun MessagingChatScreen(
                                 tint = if (draft.isNotBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CallFeedbackChatCard(
+    event: ChatCallEvent,
+    peerDisplayName: String,
+    onCallback: (() -> Unit)?
+) {
+    val isMissedOrDeclined = event.outcome == ChatCallOutcome.MISSED ||
+        event.outcome == ChatCallOutcome.DECLINED ||
+        event.outcome == ChatCallOutcome.BUSY
+    val accentColor = if (isMissedOrDeclined) {
+        MaterialTheme.colorScheme.error
+    } else {
+        MaterialTheme.colorScheme.primary
+    }
+    val containerColor = if (isMissedOrDeclined) {
+        MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.28f)
+    } else {
+        MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f)
+    }
+    val timeLabel = remember(event.startedAtMs) {
+        SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(event.startedAtMs))
+    }
+    val title = remember(event) { CallHistoryPolicy.formatCallTitle(event) }
+    val subtitle = remember(event, peerDisplayName) {
+        CallHistoryPolicy.formatCallSubtitle(event, peerDisplayName)
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Surface(
+            modifier = Modifier.widthIn(min = 220.dp, max = 420.dp),
+            shape = RoundedCornerShape(14.dp),
+            color = containerColor,
+            border = BorderStroke(1.dp, accentColor.copy(alpha = 0.35f))
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Surface(
+                    shape = CircleShape,
+                    color = accentColor.copy(alpha = 0.16f),
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            painter = painterResource(
+                                if (isMissedOrDeclined) R.drawable.ic_call_end else R.drawable.ic_call_phone
+                            ),
+                            contentDescription = null,
+                            tint = accentColor,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = title,
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isMissedOrDeclined) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = timeLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 10.sp
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp
+                    )
+                }
+
+                if (onCallback != null &&
+                    event.outcome != ChatCallOutcome.RINGING &&
+                    event.outcome != ChatCallOutcome.IN_PROGRESS
+                ) {
+                    TextButton(
+                        onClick = onCallback,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = "Κλήση",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
                     }
                 }
             }
