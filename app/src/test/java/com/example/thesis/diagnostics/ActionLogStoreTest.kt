@@ -84,4 +84,15 @@ class ActionLogStoreTest {
         assertNull(ActionLogStore.decodeLine("1\t0\t\t!!!\t!!!\t!!!"))
         assertNull(ActionLogStore.decodeLine(""))
     }
+
+    @Test
+    fun mainActivity_fragmentActivitySupports32BitPermissionRequestCodes() {
+        // Verificamos que FragmentActivity provenga de androidx.fragment 1.8+ (sin checkForValidRequestCode de 16 bits).
+        val legacyValidator = androidx.fragment.app.FragmentActivity::class.java.declaredMethods
+            .firstOrNull { it.name == "checkForValidRequestCode" }
+        assertNull(
+            "FragmentActivity must not contain legacy 16-bit checkForValidRequestCode from fragment 1.2.x",
+            legacyValidator
+        )
+    }
 }

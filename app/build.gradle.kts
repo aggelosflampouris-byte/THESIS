@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.thesis"
         minSdk = 26
         targetSdk = 35
-        versionCode = 24
-        versionName = "1.0.27"
+        versionCode = 25
+        versionName = "1.0.28"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -143,6 +143,8 @@ dependencies {
     // - io.grpc:grpc-okhttp:1.62.2 (mobile gRPC transport)
     // ------------------------------------------------------------------------
     implementation("org.xmtp:android:4.11.0")
+    // Actualizamos androidx.fragment para que FragmentActivity sea compatible con ActivityResultRegistry (codigos > 16 bits).
+    implementation("androidx.fragment:fragment-ktx:1.8.6")
     implementation("androidx.biometric:biometric:1.1.0")
     implementation("androidx.camera:camera-core:1.4.2")
     implementation("androidx.camera:camera-camera2:1.4.2")
