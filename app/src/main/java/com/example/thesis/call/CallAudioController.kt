@@ -12,11 +12,18 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.Log
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
-// Controlador de foco de audio VoIP, altavoz/Bluetooth y tono de llamada compatible con API 26 a API 37.
+// Controlador de audio VoIP aislado en su propio hilo para que IPC de AudioManager/Ringtone nunca bloquee la UI ni las corrutinas de llamada.
 internal class CallAudioController(context: Context) {
     private val appContext = context.applicationContext
     private val audioManager = appContext.getSystemService(AudioManager::class.java)
+    private val ringingDesired = AtomicBoolean(false)
+
+    private val audioExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "ThesisCallAudioThread").apply { isDaemon = true }
+    }
 
     private var activeFocusRequest: AudioFocusRequest? = null
     private var activeRingtone: Ringtone? = null
@@ -28,84 +35,109 @@ internal class CallAudioController(context: Context) {
     }
 
     fun startIncomingRinging() {
-        stopRinging()
-        val mgr = audioManager ?: return
-        if (mgr.ringerMode == AudioManager.RINGER_MODE_SILENT) return
+        ringingDesired.set(true)
+        runOnAudioThread {
+            stopRingingOnExecutor()
+            if (!ringingDesired.get()) return@runOnAudioThread
+            val mgr = audioManager ?: return@runOnAudioThread
+            if (mgr.ringerMode == AudioManager.RINGER_MODE_SILENT) return@runOnAudioThread
 
-        if (mgr.ringerMode == AudioManager.RINGER_MODE_NORMAL) {
-            runCatching {
-                val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
-                val ringtone = RingtoneManager.getRingtone(appContext, uri)
-                if (ringtone != null) {
-                    ringtone.audioAttributes = AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                        .build()
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                        ringtone.isLooping = true
+            if (mgr.ringerMode == AudioManager.RINGER_MODE_NORMAL) {
+                runCatching {
+                    val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+                    val ringtone = RingtoneManager.getRingtone(appContext, uri)
+                    if (ringtone != null && ringingDesired.get()) {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                            ringtone.isLooping = true
+                        }
+                        ringtone.play()
+                        if (ringingDesired.get()) {
+                            activeRingtone = ringtone
+                        } else {
+                            runCatching { ringtone.stop() }
+                        }
                     }
-                    ringtone.play()
-                    activeRingtone = ringtone
                 }
             }
-        }
 
-        runCatching {
-            val vibrator = resolveVibrator() ?: return@runCatching
-            if (vibrator.hasVibrator()) {
-                val pattern = longArrayOf(0L, 450L, 900L)
-                vibrator.vibrate(VibrationEffect.createWaveform(pattern, 1))
+            if (ringingDesired.get()) {
+                runCatching {
+                    val vibrator = resolveVibrator() ?: return@runCatching
+                    if (vibrator.hasVibrator()) {
+                        val pattern = longArrayOf(0L, 450L, 900L)
+                        vibrator.vibrate(VibrationEffect.createWaveform(pattern, 1))
+                    }
+                }
             }
         }
     }
 
     fun stopRinging() {
+        ringingDesired.set(false)
+        // Cancelamos la vibracion de inmediato y detenemos el Ringtone en el hilo dedicado de audio.
+        runCatching { resolveVibrator()?.cancel() }
+        runOnAudioThread {
+            stopRingingOnExecutor()
+        }
+    }
+
+    fun startInCallAudio(speakerOn: Boolean = false) {
+        ringingDesired.set(false)
+        runCatching { resolveVibrator()?.cancel() }
+        runOnAudioThread {
+            stopRingingOnExecutor()
+            speakerEnabled = speakerOn
+            val mgr = audioManager ?: return@runOnAudioThread
+            if (!sessionActive) {
+                requestVoiceAudioFocusOnExecutor(mgr)
+                runCatching { mgr.mode = AudioManager.MODE_IN_COMMUNICATION }
+                sessionActive = true
+            }
+            applyAudioRouteOnExecutor(speakerOn)
+        }
+    }
+
+    fun setSpeakerEnabled(enabled: Boolean) {
+        runOnAudioThread {
+            speakerEnabled = enabled
+            if (sessionActive) {
+                applyAudioRouteOnExecutor(enabled)
+            }
+        }
+    }
+
+    fun release() {
+        ringingDesired.set(false)
+        runCatching { resolveVibrator()?.cancel() }
+        runOnAudioThread {
+            stopRingingOnExecutor()
+            speakerEnabled = false
+            val mgr = audioManager ?: return@runOnAudioThread
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                runCatching { mgr.clearCommunicationDevice() }
+            } else {
+                setLegacySpeakerphone(mgr, false)
+            }
+            runCatching {
+                activeFocusRequest?.let { req ->
+                    mgr.abandonAudioFocusRequest(req)
+                }
+            }
+            activeFocusRequest = null
+            if (sessionActive) {
+                runCatching { mgr.mode = AudioManager.MODE_NORMAL }
+                sessionActive = false
+            }
+        }
+    }
+
+    private fun stopRingingOnExecutor() {
         runCatching { activeRingtone?.stop() }
         activeRingtone = null
         runCatching { resolveVibrator()?.cancel() }
     }
 
-    fun startInCallAudio(speakerOn: Boolean = false) {
-        stopRinging()
-        speakerEnabled = speakerOn
-        val mgr = audioManager ?: return
-        if (!sessionActive) {
-            requestVoiceAudioFocus(mgr)
-            runCatching { mgr.mode = AudioManager.MODE_IN_COMMUNICATION }
-            sessionActive = true
-        }
-        applyAudioRoute(speakerOn)
-    }
-
-    fun setSpeakerEnabled(enabled: Boolean) {
-        speakerEnabled = enabled
-        if (sessionActive) {
-            applyAudioRoute(enabled)
-        }
-    }
-
-    fun release() {
-        stopRinging()
-        speakerEnabled = false
-        val mgr = audioManager ?: return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            runCatching { mgr.clearCommunicationDevice() }
-        } else {
-            setLegacySpeakerphone(mgr, false)
-        }
-        runCatching {
-            activeFocusRequest?.let { req ->
-                mgr.abandonAudioFocusRequest(req)
-            }
-        }
-        activeFocusRequest = null
-        if (sessionActive) {
-            runCatching { mgr.mode = AudioManager.MODE_NORMAL }
-            sessionActive = false
-        }
-    }
-
-    private fun requestVoiceAudioFocus(mgr: AudioManager) {
+    private fun requestVoiceAudioFocusOnExecutor(mgr: AudioManager) {
         if (activeFocusRequest != null) return
         val attrs = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
@@ -120,10 +152,10 @@ internal class CallAudioController(context: Context) {
         runCatching { mgr.requestAudioFocus(req) }
     }
 
-    private fun applyAudioRoute(speakerOn: Boolean) {
+    private fun applyAudioRouteOnExecutor(speakerOn: Boolean) {
         val mgr = audioManager ?: return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val devices = mgr.availableCommunicationDevices
+            val devices = runCatching { mgr.availableCommunicationDevices }.getOrDefault(emptyList())
             val targetDevice = when {
                 speakerOn -> devices.firstOrNull { it.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER }
                 else -> {
@@ -156,6 +188,16 @@ internal class CallAudioController(context: Context) {
         } else {
             // getSystemService(Vibrator) solo se usa en Android < 12 antes de VibratorManager.
             appContext.getSystemService(Vibrator::class.java)
+        }
+    }
+
+    private fun runOnAudioThread(block: () -> Unit) {
+        runCatching {
+            audioExecutor.execute {
+                runCatching { block() }.onFailure { err ->
+                    Log.w(TAG, "Audio task failed: ${err::class.java.simpleName}: ${err.message}")
+                }
+            }
         }
     }
 

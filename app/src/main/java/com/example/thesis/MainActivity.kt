@@ -61,6 +61,7 @@ import com.example.thesis.call.CallNotificationManager
 import com.example.thesis.call.CallUiState
 import com.example.thesis.notifications.MessageNotificationManager
 import com.example.thesis.ui.screens.ActiveCallOverlay
+import com.example.thesis.ui.screens.MinimizedCallBanner
 import com.example.thesis.ui.util.ReportExporter
 import com.example.thesis.ui.util.copyToClipboard
 import com.example.thesis.updater.UpdateConfig
@@ -183,6 +184,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     val deviceTransferState by viewModel.deviceTransferState.collectAsState()
     val callState by viewModel.callState.collectAsState()
     val pendingCallAcceptId by viewModel.pendingCallNotificationAcceptId.collectAsState()
+    var isCallOverlayMinimized by rememberSaveable(callState.callId) { mutableStateOf(false) }
 
     val updateStatus by viewModel.updateStatus.collectAsState()
     var showUpdateDialog by rememberSaveable { mutableStateOf(false) }
@@ -312,10 +314,10 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
 
     LaunchedEffect(pendingCallAcceptId) {
         val acceptCallId = pendingCallAcceptId ?: return@LaunchedEffect
-        viewModel.consumeNotificationCallAccept()
         runWithRecordAudioPermission {
             viewModel.acceptIncomingCall(acceptCallId.takeIf { it.isNotBlank() })
         }
+        viewModel.consumeNotificationCallAccept()
     }
 
     LaunchedEffect(Unit) {
@@ -338,6 +340,15 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
         statusBanner?.let { message ->
             snackbarHostState.showSnackbar(messagingStatusText(message))
             viewModel.consumeStatusBanner()
+        }
+    }
+
+    BackHandler(enabled = callState !is CallUiState.Idle && !isCallOverlayMinimized) {
+        // Permitimos minimizar la pantalla de llamada con Atras para poder cambiar a registros o chat en cualquier momento.
+        if (callState is CallUiState.Ended) {
+            viewModel.dismissEndedCall()
+        } else {
+            isCallOverlayMinimized = true
         }
     }
 
@@ -573,6 +584,25 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                         .padding(padding)
                         .consumeWindowInsets(padding)
                 ) {
+                    if (callState !is CallUiState.Idle && isCallOverlayMinimized) {
+                        MinimizedCallBanner(
+                            callState = callState,
+                            onExpand = { isCallOverlayMinimized = false },
+                            onAccept = {
+                                isCallOverlayMinimized = false
+                                runWithRecordAudioPermission {
+                                    viewModel.acceptIncomingCall()
+                                }
+                            },
+                            onDeclineOrHangup = {
+                                if (callState is CallUiState.IncomingRinging) {
+                                    viewModel.declineIncomingCall()
+                                } else {
+                                    viewModel.hangupCall()
+                                }
+                            }
+                        )
+                    }
                     val availableUpdate = updateStatus as? UpdateStatus.UpdateAvailable
                     if (selectedConversation == null && availableUpdate != null) {
                         UpdateAvailableBanner(
@@ -668,19 +698,20 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
             }
         }
         }
-        if (callState !is CallUiState.Idle) {
+        if (callState !is CallUiState.Idle && !isCallOverlayMinimized) {
             ActiveCallOverlay(
                 callState = callState,
                 onAccept = {
                     runWithRecordAudioPermission {
-                        viewModel.acceptIncomingCall(callState.callId)
+                        viewModel.acceptIncomingCall()
                     }
                 },
-                onDecline = { viewModel.declineIncomingCall(callState.callId) },
-                onHangup = { viewModel.hangupCall(callState.callId) },
+                onDecline = { viewModel.declineIncomingCall() },
+                onHangup = { viewModel.hangupCall() },
                 onToggleMute = { viewModel.toggleCallMute() },
                 onToggleSpeaker = { viewModel.toggleCallSpeaker() },
-                onDismissEnded = { viewModel.dismissEndedCall() }
+                onDismissEnded = { viewModel.dismissEndedCall() },
+                onMinimize = { isCallOverlayMinimized = true }
             )
         }
         if (ScreenSecurityPolicy.shouldShowPrivacyShield(isScreenRecordingActive)) {

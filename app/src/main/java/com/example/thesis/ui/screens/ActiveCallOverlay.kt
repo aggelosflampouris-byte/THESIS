@@ -2,6 +2,7 @@ package com.example.thesis.ui.screens
 
 import android.os.SystemClock
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,15 +16,19 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilledIconToggleButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -58,7 +63,8 @@ internal fun ActiveCallOverlay(
     onHangup: () -> Unit,
     onToggleMute: () -> Unit,
     onToggleSpeaker: () -> Unit,
-    onDismissEnded: () -> Unit
+    onDismissEnded: () -> Unit,
+    onMinimize: () -> Unit = {}
 ) {
     if (callState is CallUiState.Idle) return
 
@@ -109,7 +115,7 @@ internal fun ActiveCallOverlay(
             modifier = Modifier
                 .fillMaxSize()
                 .windowInsetsPadding(WindowInsets.safeDrawing)
-                .padding(horizontal = 24.dp, vertical = 28.dp),
+                .padding(horizontal = 24.dp, vertical = 20.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.SpaceBetween
         ) {
@@ -117,20 +123,45 @@ internal fun ActiveCallOverlay(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Surface(
-                    shape = RoundedCornerShape(999.dp),
-                    color = Color(0xFF1B2B36)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = transportLabel,
-                        color = Color(0xFF7CE8A5),
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
-                    )
+                    OutlinedButton(
+                        onClick = if (callState is CallUiState.Ended) onDismissEnded else onMinimize,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        shape = RoundedCornerShape(999.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.KeyboardArrowDown,
+                            contentDescription = "Ελαχιστοποίηση",
+                            tint = Color.White,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = if (callState is CallUiState.Ended) "Κλείσιμο" else "Οθόνη Εφαρμογής",
+                            color = Color.White,
+                            fontSize = 11.sp
+                        )
+                    }
+
+                    Surface(
+                        shape = RoundedCornerShape(999.dp),
+                        color = Color(0xFF1B2B36)
+                    ) {
+                        Text(
+                            text = transportLabel,
+                            color = Color(0xFF7CE8A5),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                        )
+                    }
                 }
 
-                Spacer(modifier = Modifier.height(28.dp))
+                Spacer(modifier = Modifier.height(24.dp))
 
                 Box(
                     modifier = Modifier
@@ -225,7 +256,7 @@ internal fun ActiveCallOverlay(
                                 onClick = onDecline,
                                 shape = CircleShape,
                                 modifier = Modifier.size(68.dp),
-                            contentPadding = PaddingValues(0.dp),
+                                contentPadding = PaddingValues(0.dp),
                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD9383A))
                             ) {
                                 Icon(
@@ -244,7 +275,7 @@ internal fun ActiveCallOverlay(
                                 onClick = onAccept,
                                 shape = CircleShape,
                                 modifier = Modifier.size(68.dp),
-                            contentPadding = PaddingValues(0.dp),
+                                contentPadding = PaddingValues(0.dp),
                                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF23A55A))
                             ) {
                                 Icon(
@@ -381,6 +412,84 @@ internal fun ActiveCallOverlay(
                 }
 
                 CallUiState.Idle -> Unit
+            }
+        }
+    }
+}
+
+@Composable
+internal fun MinimizedCallBanner(
+    callState: CallUiState,
+    onExpand: () -> Unit,
+    onAccept: () -> Unit,
+    onDeclineOrHangup: () -> Unit
+) {
+    if (callState is CallUiState.Idle) return
+    val statusLabel = when (callState) {
+        is CallUiState.IncomingRinging -> "Εισερχόμενη κλήση"
+        is CallUiState.OutgoingRinging -> "Κλήση σε εξέλιξη..."
+        is CallUiState.Connecting -> "Σύνδεση DTLS-SRTP..."
+        is CallUiState.Active -> "Ενεργή κλήση φωνής"
+        is CallUiState.Ended -> callState.reasonText
+        CallUiState.Idle -> ""
+    }
+
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onExpand),
+        color = Color(0xFF142834),
+        contentColor = Color.White
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "${callState.peerDisplayName.ifBlank { "Επαφή XMTP" }} • $statusLabel",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = "Πατήστε για εμφάνιση οθόνης κλήσης",
+                    fontSize = 10.sp,
+                    color = Color(0xFF9BB0BE),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (callState is CallUiState.IncomingRinging) {
+                    Button(
+                        onClick = onAccept,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF23A55A)),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                    ) {
+                        Text("Απάντηση", fontSize = 11.sp, color = Color.White)
+                    }
+                }
+                Button(
+                    onClick = onDeclineOrHangup,
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFD9383A)),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        text = if (callState is CallUiState.IncomingRinging) "Απόρριψη" else "Τέλος",
+                        fontSize = 11.sp,
+                        color = Color.White
+                    )
+                }
             }
         }
     }

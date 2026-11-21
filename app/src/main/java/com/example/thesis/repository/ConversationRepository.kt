@@ -1172,34 +1172,66 @@ class ConversationRepository(
             }
         }
 
-        if (emitLiveCallSignals) {
-            val callSignals = rawMessages
-                .asSequence()
-                .filter { msg ->
-                    val sender = msg.senderInboxId
-                    sender.isNotBlank() &&
-                        (localInboxId.isBlank() || !sender.equals(localInboxId, ignoreCase = true)) &&
-                        msg.isCallSignalMessage()
-                }
-                .sortedBy { it.resolvedTimestampMs() }
+        val allCallSignalMessages = rawMessages
+            .asSequence()
+            .filter { it.isCallSignalMessage() }
+            .sortedBy { it.resolvedTimestampMs() }
+            .toList()
 
-            for (msg in callSignals) {
-                val msgId = msg.id
-                val parsed = msg.extractCallSignal() ?: continue
-                // Evitamos reemitir la misma senal entre el stream global, el stream del chat y el worker.
-                val shouldEmit = if (msgId.isNotBlank()) processedCallSignalIds.add(msgId) else true
-                if (shouldEmit) {
-                    _incomingCallSignals.tryEmit(
-                        IncomingCallSignal(
-                            messageId = msgId,
-                            conversationId = conversationId,
-                            senderInboxId = msg.senderInboxId,
-                            sentAtMs = msg.resolvedTimestampMs().takeIf { it > 0L } ?: parsed.timestampMs,
-                            signal = parsed
-                        )
-                    )
+        if (!emitLiveCallSignals) {
+            // Marcamos como ya vistas las senales historicas cargadas de cache para no reemitirlas como llamadas nuevas.
+            for (msg in allCallSignalMessages) {
+                if (msg.id.isNotBlank()) {
+                    processedCallSignalIds.add(msg.id)
                 }
             }
+            return
+        }
+
+        // Descartamos ofertas que ya tienen respuesta o fin en el historial (incluyendo REJECT/HANGUP propios).
+        val resolvedCallIds = HashSet<String>()
+        var latestPeerOfferCallId: String? = null
+        for (msg in allCallSignalMessages) {
+            val parsed = msg.extractCallSignal() ?: continue
+            if (parsed.type != com.example.thesis.xmtp.CallSignalType.OFFER) {
+                if (parsed.type != com.example.thesis.xmtp.CallSignalType.ICE_BATCH) {
+                    resolvedCallIds.add(parsed.callId)
+                }
+            } else {
+                val sender = msg.senderInboxId
+                val isFromPeer = sender.isNotBlank() &&
+                    (localInboxId.isBlank() || !sender.equals(localInboxId, ignoreCase = true))
+                if (isFromPeer) {
+                    latestPeerOfferCallId = parsed.callId
+                } else {
+                    resolvedCallIds.add(parsed.callId)
+                }
+            }
+        }
+
+        for (msg in allCallSignalMessages) {
+            val msgId = msg.id
+            val sender = msg.senderInboxId
+            val isFromPeer = sender.isNotBlank() &&
+                (localInboxId.isBlank() || !sender.equals(localInboxId, ignoreCase = true))
+            // Evitamos reemitir la misma senal entre el stream global, el stream del chat y el worker.
+            val shouldEmit = if (msgId.isNotBlank()) processedCallSignalIds.add(msgId) else true
+            if (!isFromPeer || !shouldEmit) continue
+
+            val parsed = msg.extractCallSignal() ?: continue
+            if (parsed.type == com.example.thesis.xmtp.CallSignalType.OFFER) {
+                if (parsed.callId in resolvedCallIds) continue
+                if (latestPeerOfferCallId != null && parsed.callId != latestPeerOfferCallId) continue
+            }
+            _incomingCallSignals.tryEmit(
+                IncomingCallSignal(
+                    messageId = msgId,
+                    conversationId = conversationId,
+                    senderInboxId = sender,
+                    sentAtMs = msg.resolvedTimestampMs().takeIf { it > 0L } ?: parsed.timestampMs,
+                    signal = parsed
+                )
+            )
         }
     }
 

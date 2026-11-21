@@ -26,6 +26,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.xmtp.android.library.Conversation
+import java.util.Collections
+import java.util.LinkedHashMap
 import java.util.UUID
 
 sealed interface CallUiState {
@@ -138,10 +140,22 @@ internal class CallSessionManager(
     private val _callState = MutableStateFlow<CallUiState>(CallUiState.Idle)
     val callState: StateFlow<CallUiState> = _callState.asStateFlow()
 
+    @Volatile
     private var activeSession: ActiveSession? = null
     private var ringTimeoutJob: Job? = null
     private var connectTimeoutJob: Job? = null
     private var endedDismissJob: Job? = null
+
+    // Recordamos llamadas ya terminadas o rechazadas para que sincronizaciones posteriores nunca las vuelvan a abrir.
+    private val terminatedCallIds: MutableSet<String> = Collections.synchronizedSet(
+        Collections.newSetFromMap(
+            object : LinkedHashMap<String, Boolean>(MAX_TERMINATED_CALL_IDS, 0.75f, true) {
+                override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Boolean>?): Boolean {
+                    return size > MAX_TERMINATED_CALL_IDS
+                }
+            }
+        )
+    )
 
     init {
         managerScope.launch {
@@ -195,17 +209,48 @@ internal class CallSessionManager(
     }
 
     fun acceptIncomingCall(targetCallId: String? = null) {
-        if (!CallForegroundService.hasRecordAudioPermission(appContext)) return
+        if (!CallForegroundService.hasRecordAudioPermission(appContext)) {
+            diagnosticsLogger("CALL", "Αδυναμία απάντησης: λείπει η άδεια RECORD_AUDIO", true)
+            return
+        }
+        // Detenemos timbre y notificacion al instante y adelantamos el estado visual para respuesta inmediata al toque.
+        audioController.stopRinging()
+        notificationManager.cancelIncomingCallNotification()
+        val currentUi = _callState.value
+        if (currentUi is CallUiState.IncomingRinging &&
+            (targetCallId.isNullOrBlank() || currentUi.callId == targetCallId)
+        ) {
+            _callState.value = CallUiState.Connecting(
+                callId = currentUi.callId,
+                conversationId = currentUi.conversationId,
+                isOutgoing = false,
+                peerInboxId = currentUi.peerInboxId,
+                peerDisplayName = currentUi.peerDisplayName,
+                sasCode = null
+            )
+        }
+
         managerScope.launch {
-            val session = activeSession ?: return@launch
-            if (session.phase != SessionPhase.INCOMING_RINGING) return@launch
+            val session = activeSession
+            if (session == null) {
+                _callState.value = CallUiState.Idle
+                return@launch
+            }
             if (!targetCallId.isNullOrBlank() && session.callId != targetCallId) return@launch
-            val offerSdp = session.remoteOfferSdp ?: return@launch
+            if (session.phase != SessionPhase.INCOMING_RINGING && session.phase != SessionPhase.CONNECTING) {
+                return@launch
+            }
+            val offerSdp = session.remoteOfferSdp
+            if (offerSdp.isNullOrBlank()) {
+                teardownSessionLocked(
+                    endReasonText = "Μη έγκυρο σήμα κλήσης",
+                    signalToSend = null,
+                    targetConvId = session.conversationId
+                )
+                return@launch
+            }
 
             ringTimeoutJob?.cancel()
-            audioController.stopRinging()
-            notificationManager.cancelIncomingCallNotification()
-
             session.phase = SessionPhase.CONNECTING
             _callState.value = CallUiState.Connecting(
                 callId = session.callId,
@@ -216,6 +261,7 @@ internal class CallSessionManager(
                 sasCode = session.sasCode
             )
 
+            diagnosticsLogger("CALL", "Αποδοχή εισερχόμενης κλήσης [call=${session.callId.take(8)}]", false)
             CallForegroundService.start(
                 context = appContext,
                 callId = session.callId,
@@ -237,10 +283,28 @@ internal class CallSessionManager(
     }
 
     fun declineIncomingCall(targetCallId: String? = null) {
+        val currentUi = _callState.value
+        if (!targetCallId.isNullOrBlank() && currentUi.callId.isNotBlank() && currentUi.callId != targetCallId) {
+            return
+        }
+        if (currentUi.callId.isNotBlank()) {
+            terminatedCallIds.add(currentUi.callId)
+        }
+        // Cerramos la superposicion de inmediato en el hilo llamador para que el boton Rechazar nunca quede bloqueado.
+        audioController.stopRinging()
+        notificationManager.cancelAllCallNotifications()
+        _callState.value = CallUiState.Idle
+
         managerScope.launch {
-            val session = activeSession ?: return@launch
+            val session = activeSession ?: run {
+                CallForegroundService.stop(appContext)
+                audioController.release()
+                _callState.value = CallUiState.Idle
+                return@launch
+            }
             if (!targetCallId.isNullOrBlank() && session.callId != targetCallId) return@launch
-            if (session.phase != SessionPhase.INCOMING_RINGING) return@launch
+            terminatedCallIds.add(session.callId)
+            diagnosticsLogger("CALL", "Απόρριψη εισερχόμενης κλήσης [call=${session.callId.take(8)}]", false)
 
             val signal = CallSignal(
                 callId = session.callId,
@@ -257,14 +321,26 @@ internal class CallSessionManager(
     }
 
     fun hangup(targetCallId: String? = null) {
+        val currentUi = _callState.value
+        if (!targetCallId.isNullOrBlank() && currentUi.callId.isNotBlank() && currentUi.callId != targetCallId) {
+            return
+        }
+        if (currentUi.callId.isNotBlank()) {
+            terminatedCallIds.add(currentUi.callId)
+        }
+        audioController.stopRinging()
+        notificationManager.cancelAllCallNotifications()
+        _callState.value = CallUiState.Idle
+
         managerScope.launch {
             val session = activeSession ?: run {
-                notificationManager.cancelAllCallNotifications()
                 CallForegroundService.stop(appContext)
                 audioController.release()
+                _callState.value = CallUiState.Idle
                 return@launch
             }
             if (!targetCallId.isNullOrBlank() && session.callId != targetCallId) return@launch
+            terminatedCallIds.add(session.callId)
 
             val signalType = if (session.phase == SessionPhase.INCOMING_RINGING) {
                 CallSignalType.REJECT
@@ -278,7 +354,7 @@ internal class CallSessionManager(
                 reason = "hangup"
             )
             teardownSessionLocked(
-                endReasonText = "Η κλήση τερματίστηκε",
+                endReasonText = null,
                 signalToSend = signal,
                 targetConvId = session.conversationId
             )
@@ -312,11 +388,9 @@ internal class CallSessionManager(
     }
 
     fun dismissEndedState() {
-        managerScope.launch {
-            endedDismissJob?.cancel()
-            if (_callState.value is CallUiState.Ended) {
-                _callState.value = CallUiState.Idle
-            }
+        endedDismissJob?.cancel()
+        if (_callState.value is CallUiState.Ended) {
+            _callState.value = CallUiState.Idle
         }
     }
 
@@ -332,6 +406,7 @@ internal class CallSessionManager(
         webrtcEngine.disposeSession(null)
         managerScope.launch {
             activeSession?.let { old ->
+                terminatedCallIds.add(old.callId)
                 old.outboundSignalChannel.close()
                 old.signalSenderJob?.cancel()
             }
@@ -516,9 +591,13 @@ internal class CallSessionManager(
 
     private suspend fun handleIncomingOfferLocked(incoming: IncomingCallSignal) {
         val signal = incoming.signal
+        if (signal.callId.isBlank() || signal.callId in terminatedCallIds) {
+            return
+        }
         val offerSdp = signal.sdp ?: return
         val offerTs = signal.timestampMs.takeIf { it > 0L } ?: incoming.sentAtMs
         if (CallSignalingPolicy.isOfferExpired(offerTimestampMs = offerTs)) {
+            terminatedCallIds.add(signal.callId)
             Log.i(TAG, "Ignoring expired OFFER for callId=${signal.callId}")
             return
         }
@@ -528,11 +607,18 @@ internal class CallSessionManager(
         val current = activeSession
 
         if (current != null) {
-            // Resolvemos colision simultanea de ofertas (glare) con desempate determinista por inboxId.
-            val isSamePeerGlare = current.phase == SessionPhase.OUTGOING_RINGING &&
-                current.peerInboxId.equals(incoming.senderInboxId, ignoreCase = true)
-
-            if (isSamePeerGlare) {
+            if (current.callId == signal.callId) return
+            val isSamePeer = current.peerInboxId.equals(incoming.senderInboxId, ignoreCase = true)
+            // Si el mismo contacto envia una nueva oferta mientras la anterior aun estaba timbrando sin responder,
+            // reemplazamos la oferta obsoleta en lugar de responder BUSY a su reintento.
+            if (isSamePeer && current.phase == SessionPhase.INCOMING_RINGING) {
+                terminatedCallIds.add(current.callId)
+                teardownSessionLocked(
+                    endReasonText = null,
+                    signalToSend = null,
+                    targetConvId = current.conversationId
+                )
+            } else if (isSamePeer && current.phase == SessionPhase.OUTGOING_RINGING) {
                 val glareDecision = CallSignalingPolicy.resolveGlare(localInboxId, incoming.senderInboxId)
                 if (glareDecision == GlareResolution.KEEP_LOCAL_OFFER) {
                     return
@@ -549,6 +635,7 @@ internal class CallSessionManager(
                     targetConvId = current.conversationId
                 )
             } else if (CallSignalingPolicy.shouldAutoReplyBusy(current.callId, signal.callId)) {
+                terminatedCallIds.add(signal.callId)
                 sendSignalFireAndForget(
                     conversationId = incoming.conversationId,
                     signal = CallSignal(
@@ -585,6 +672,7 @@ internal class CallSessionManager(
             peerDisplayName = session.peerDisplayName
         )
 
+        diagnosticsLogger("CALL", "Εισερχόμενη κλήση [call=${session.callId.take(8)}]", false)
         audioController.startIncomingRinging()
         notificationManager.showIncomingCallNotification(
             callId = session.callId,
@@ -627,10 +715,13 @@ internal class CallSessionManager(
         }
     }
 
-    private suspend fun handleRemoteTerminalSignalLocked(
+    private fun handleRemoteTerminalSignalLocked(
         incoming: IncomingCallSignal,
         endMessage: String
     ) {
+        if (incoming.signal.callId.isNotBlank()) {
+            terminatedCallIds.add(incoming.signal.callId)
+        }
         val session = activeSession ?: return
         if (session.callId != incoming.signal.callId) return
         teardownSessionLocked(
@@ -685,35 +776,20 @@ internal class CallSessionManager(
         }
     }
 
-    private suspend fun teardownSessionLocked(
+    private fun teardownSessionLocked(
         endReasonText: String?,
         signalToSend: CallSignal?,
         targetConvId: String
     ) {
         val session = activeSession
         activeSession = null
-        if (!endReasonText.isNullOrBlank()) {
-            diagnosticsLogger("CALL", "Τερματισμός κλήσης: $endReasonText", false)
+        if (session != null) {
+            terminatedCallIds.add(session.callId)
         }
         ringTimeoutJob?.cancel()
         connectTimeoutJob?.cancel()
 
-        audioController.release()
-        notificationManager.cancelAllCallNotifications()
-        CallForegroundService.stop(appContext)
-
-        if (session != null) {
-            session.outboundSignalChannel.close()
-            session.signalSenderJob?.cancel()
-            webrtcEngine.disposeSessionAndAwait(session.callId)
-        } else {
-            webrtcEngine.disposeSessionAndAwait(null)
-        }
-
-        if (signalToSend != null) {
-            sendSignalFireAndForget(targetConvId, signalToSend)
-        }
-
+        // Actualizamos primero el estado de UI para que la pantalla nunca quede bloqueada esperando cierre de recursos.
         if (!endReasonText.isNullOrBlank() && session != null) {
             val callId = session.callId
             _callState.value = CallUiState.Ended(
@@ -733,6 +809,26 @@ internal class CallSessionManager(
             }
         } else {
             _callState.value = CallUiState.Idle
+        }
+
+        if (!endReasonText.isNullOrBlank()) {
+            diagnosticsLogger("CALL", "Τερματισμός κλήσης: $endReasonText", false)
+        }
+
+        audioController.release()
+        notificationManager.cancelAllCallNotifications()
+        CallForegroundService.stop(appContext)
+
+        if (session != null) {
+            session.outboundSignalChannel.close()
+            session.signalSenderJob?.cancel()
+            webrtcEngine.disposeSession(session.callId)
+        } else {
+            webrtcEngine.disposeSession(null)
+        }
+
+        if (signalToSend != null) {
+            sendSignalFireAndForget(targetConvId, signalToSend)
         }
     }
 
@@ -794,16 +890,17 @@ internal class CallSessionManager(
             true
         )
         // Liberamos recursos de forma defensiva; cada paso aislado para que un fallo no impida los siguientes.
+        _callState.value = CallUiState.Idle
         runCatching { ringTimeoutJob?.cancel() }
         runCatching { connectTimeoutJob?.cancel() }
         runCatching { audioController.release() }
         runCatching { notificationManager.cancelAllCallNotifications() }
         runCatching { CallForegroundService.stop(appContext) }
         runCatching { webrtcEngine.disposeSession(null) }
-        _callState.value = CallUiState.Idle
         runCatching {
             managerScope.launch {
                 activeSession?.let { old ->
+                    terminatedCallIds.add(old.callId)
                     old.outboundSignalChannel.close()
                     old.signalSenderJob?.cancel()
                 }
@@ -814,5 +911,6 @@ internal class CallSessionManager(
 
     companion object {
         private const val TAG = "CallSessionManager"
+        private const val MAX_TERMINATED_CALL_IDS = 256
     }
 }
