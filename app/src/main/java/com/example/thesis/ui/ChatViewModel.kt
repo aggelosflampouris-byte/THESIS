@@ -25,6 +25,8 @@ import com.example.thesis.security.ShredAuditProof
 import com.example.thesis.security.ShredResult
 import com.example.thesis.security.ThesisTelemetry
 import com.example.thesis.ui.util.ReportExporter
+import com.example.thesis.call.CallForegroundService
+import com.example.thesis.call.CallUiState
 import com.example.thesis.xmtp.XmtpEngineState
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -109,6 +111,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     val unreadCounts: StateFlow<Map<String, Int>> = sessionContainer.unreadCounts
     val nicknameSnapshot: StateFlow<NicknameSnapshot> = sessionContainer.nicknameSnapshot
     val peerReadTimestamps: StateFlow<Map<String, Long>> = repository.peerReadTimestamps
+    val callState: StateFlow<CallUiState> = sessionContainer.callSessionManager.callState
 
     private val _isScreenRecordingActive = MutableStateFlow(false)
     val isScreenRecordingActive: StateFlow<Boolean> = _isScreenRecordingActive.asStateFlow()
@@ -143,6 +146,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     val lastShredProof: StateFlow<ShredAuditProof?> = _lastShredProof.asStateFlow()
 
     private val _pendingNotificationConversationId = MutableStateFlow<String?>(null)
+    private val _pendingCallNotificationAcceptId = MutableStateFlow<String?>(null)
+    val pendingCallNotificationAcceptId: StateFlow<String?> = _pendingCallNotificationAcceptId.asStateFlow()
 
     val inboxId: StateFlow<String?> = engine.state
         .map { (it as? XmtpEngineState.Ready)?.client?.inboxId }
@@ -1383,6 +1388,53 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 dekBytes?.fill(0x00)
             }
         }
+
+    fun hasRecordAudioPermission(): Boolean {
+        return CallForegroundService.hasRecordAudioPermission(getApplication())
+    }
+
+    fun startVoiceCall(conversation: Conversation) {
+        if (conversation !is Conversation.Dm) return
+        if (!hasRecordAudioPermission()) return
+        sessionContainer.callSessionManager.startOutgoingCall(conversation)
+        logAction(
+            tag = "CALL",
+            message = "Εκκίνηση κρυπτογραφημένης κλήσης φωνής DTLS-SRTP."
+        )
+    }
+
+    fun requestNotificationCallAccept(callId: String?) {
+        _pendingCallNotificationAcceptId.value = callId ?: ""
+    }
+
+    fun consumeNotificationCallAccept() {
+        _pendingCallNotificationAcceptId.value = null
+    }
+
+    fun acceptIncomingCall(callId: String? = null) {
+        if (!hasRecordAudioPermission()) return
+        sessionContainer.callSessionManager.acceptIncomingCall(callId)
+    }
+
+    fun declineIncomingCall(callId: String? = null) {
+        sessionContainer.callSessionManager.declineIncomingCall(callId)
+    }
+
+    fun hangupCall(callId: String? = null) {
+        sessionContainer.callSessionManager.hangup(callId)
+    }
+
+    fun toggleCallMute() {
+        sessionContainer.callSessionManager.toggleMute()
+    }
+
+    fun toggleCallSpeaker() {
+        sessionContainer.callSessionManager.toggleSpeaker()
+    }
+
+    fun dismissEndedCall() {
+        sessionContainer.callSessionManager.dismissEndedState()
+    }
 
     override fun onCleared() {
         cancelDeviceTransfer()

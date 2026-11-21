@@ -3,6 +3,7 @@ package com.example.thesis.notifications
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import com.example.thesis.call.CallNotificationManager
 import com.example.thesis.ThesisApplication
 
 internal class XmtpNotificationReceiver : BroadcastReceiver() {
@@ -34,6 +35,14 @@ internal class XmtpNotificationReceiver : BroadcastReceiver() {
                 if (!container.isInForeground() && !XmtpMessagingService.isRunning) {
                     BackgroundSyncScheduler.enqueueImmediateSync(context)
                 }
+            }
+            CallNotificationManager.ACTION_DECLINE_CALL -> {
+                val callId = intent.getStringExtra(CallNotificationManager.EXTRA_CALL_ID)
+                container.callSessionManager.declineIncomingCall(callId)
+            }
+            CallNotificationManager.ACTION_HANGUP_CALL -> {
+                val callId = intent.getStringExtra(CallNotificationManager.EXTRA_CALL_ID)
+                container.callSessionManager.hangup(callId)
             }
         }
     }

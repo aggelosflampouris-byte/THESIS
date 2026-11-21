@@ -4,6 +4,9 @@ import android.util.Log
 import app.cash.turbine.test
 import com.example.thesis.identity.InMemoryNicknameStorage
 import com.example.thesis.notifications.InMemorySeenMessageStorage
+import com.example.thesis.xmtp.CallSignal
+import com.example.thesis.xmtp.CallSignalType
+import com.example.thesis.xmtp.ContentTypeCallSignal
 import com.example.thesis.xmtp.ContentTypeProfileNickname
 import com.example.thesis.xmtp.ProfileNickname
 import com.example.thesis.xmtp.XmtpEngine
@@ -1004,6 +1007,139 @@ class ConversationRepositoryTest {
             mockConversation.send(
                 match<Any> { it is ProfileNickname && it.nickname == "Μαρία" },
                 match<SendOptions> { it.contentType == ContentTypeProfileNickname }
+            )
+        }
+    }
+
+    @Test
+    fun test_callSignalControlFrames_routedToIncomingCallSignalsWithoutPollutingChatOrTextNotifications() = runTest(testDispatcher) {
+        every { mockClient.inboxId } returns testSenderAddress
+        val streamFlow = MutableSharedFlow<DecodedMessage>()
+        every { mockConversation.streamMessages() } returns streamFlow
+        coEvery { mockConversation.messages() } returns emptyList()
+
+        val offerSignal = CallSignal(
+            callId = "call-uuid-101",
+            type = CallSignalType.OFFER,
+            timestampMs = 5_000L,
+            sdp = "v=0\r\na=fingerprint:sha-256 aa:bb:cc"
+        )
+        val callMsg = mockk<DecodedMessage>(relaxed = true)
+        every { callMsg.id } returns "call_sig_1"
+        every { callMsg.conversationId } returns testConvId
+        every { callMsg.senderInboxId } returns testPeerAddress
+        every { callMsg.encodedContent.type } returns ContentTypeCallSignal
+        every { callMsg.content<Any>() } returns offerSignal
+        every { callMsg.sentAt } returns Date(5_000L)
+        every { callMsg.body } returns ""
+
+        val repoScope = CoroutineScope(SupervisorJob() + testDispatcher)
+        val repo = ConversationRepository(
+            engine = mockEngine,
+            repositoryScope = repoScope,
+            ioDispatcher = testDispatcher,
+            syncIntervalMs = 0L
+        )
+        try {
+            repo.incomingCallSignals.test {
+                repo.incomingMessages.test {
+                    repo.observeMessages(mockConversation).test {
+                        val initial = awaitItem()
+                        assertTrue(initial.isEmpty())
+
+                        streamFlow.emit(callMsg)
+                        testScheduler.runCurrent()
+
+                        expectNoEvents()
+                        cancelAndIgnoreRemainingEvents()
+                    }
+                    expectNoEvents()
+                    cancelAndIgnoreRemainingEvents()
+                }
+                val emittedCall = awaitItem()
+                assertEquals("call_sig_1", emittedCall.messageId)
+                assertEquals(testConvId, emittedCall.conversationId)
+                assertEquals(testPeerAddress, emittedCall.senderInboxId)
+                assertEquals(offerSignal, emittedCall.signal)
+                cancelAndIgnoreRemainingEvents()
+            }
+        } finally {
+            repoScope.cancel()
+            repo.close()
+        }
+    }
+
+    @Test
+    fun test_callSignalDeduplication_preventsDuplicateEmissionsAcrossStreams() = runTest(testDispatcher) {
+        every { mockClient.inboxId } returns testSenderAddress
+        val allStream = MutableSharedFlow<DecodedMessage>()
+        val convStream = MutableSharedFlow<DecodedMessage>()
+        every { mockConversations.streamAllMessages() } returns allStream
+        every { mockConversation.streamMessages() } returns convStream
+        coEvery { mockConversation.messages() } returns emptyList()
+
+        val hangupSignal = CallSignal(
+            callId = "call-dup-202",
+            type = CallSignalType.HANGUP,
+            timestampMs = 7_000L,
+            reason = "hangup"
+        )
+        val callMsg = mockk<DecodedMessage>(relaxed = true)
+        every { callMsg.id } returns "call_sig_dup_1"
+        every { callMsg.conversationId } returns testConvId
+        every { callMsg.senderInboxId } returns testPeerAddress
+        every { callMsg.encodedContent.type } returns ContentTypeCallSignal
+        every { callMsg.content<Any>() } returns hangupSignal
+        every { callMsg.sentAt } returns Date(7_000L)
+
+        val repoScope = CoroutineScope(SupervisorJob() + testDispatcher)
+        val repo = ConversationRepository(
+            engine = mockEngine,
+            repositoryScope = repoScope,
+            ioDispatcher = testDispatcher,
+            syncIntervalMs = 5_000L
+        )
+        try {
+            repo.incomingCallSignals.test {
+                repo.observeMessages(mockConversation).test {
+                    awaitItem()
+                    testScheduler.runCurrent()
+
+                    allStream.emit(callMsg)
+                    convStream.emit(callMsg)
+                    testScheduler.runCurrent()
+
+                    cancelAndIgnoreRemainingEvents()
+                }
+                val first = awaitItem()
+                assertEquals("call_sig_dup_1", first.messageId)
+                expectNoEvents()
+                cancelAndIgnoreRemainingEvents()
+            }
+        } finally {
+            repoScope.cancel()
+            repo.close()
+        }
+    }
+
+    @Test
+    fun test_sendCallSignal_dispatchesWithContentTypeCallSignal() = runTest(testDispatcher) {
+        coEvery { mockConversation.send(any<Any>(), any<SendOptions>()) } returns "call_msg_sent_1"
+
+        val signal = CallSignal(
+            callId = "call-out-303",
+            type = CallSignalType.OFFER,
+            timestampMs = 8_000L,
+            sdp = "v=0"
+        )
+        val result = repository.sendCallSignal(testConvId, signal)
+        assertTrue(result.isSuccess)
+        assertEquals("call_msg_sent_1", result.getOrNull())
+
+        coVerify(exactly = 1) {
+            mockConversation.send(
+                match<Any> { it is CallSignal && it.callId == "call-out-303" },
+                match<SendOptions> { it.contentType == ContentTypeCallSignal }
             )
         }
     }

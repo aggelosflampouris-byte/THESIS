@@ -12,6 +12,8 @@ import com.example.thesis.security.KeystoreManager
 import com.example.thesis.security.ScreenSecurityManager
 import com.example.thesis.updater.AppUpdateManager
 import com.example.thesis.xmtp.XmtpEngine
+import com.example.thesis.call.CallNotificationManager
+import com.example.thesis.call.CallSessionManager
 import com.example.thesis.xmtp.XmtpEngineState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -52,6 +54,15 @@ internal class ThesisSessionContainer(context: Context) {
     )
     val appUpdateManager = AppUpdateManager(appContext)
     val notificationManager = MessageNotificationManager(appContext)
+    val callNotificationManager = CallNotificationManager(appContext)
+    val callSessionManager = CallSessionManager(
+        appContext = appContext,
+        engine = engine,
+        repository = repository,
+        nicknameSnapshot = nicknameSnapshot,
+        notificationManager = callNotificationManager,
+        conversationsSnapshotProvider = { conversationsSnapshot }
+    )
     val sessionMutex = Mutex()
 
     @Volatile
@@ -82,6 +93,7 @@ internal class ThesisSessionContainer(context: Context) {
 
     init {
         notificationManager.ensureChannelCreated()
+        callNotificationManager.ensureChannelCreated()
         // Purgamos preferencias heredadas al iniciar para garantizar proteccion inmutable.
         ScreenSecurityManager.purgeLegacyPreference(appContext)
         TransferFileHygiene.purgeTransferCache(appContext.cacheDir)
@@ -160,6 +172,8 @@ internal class ThesisSessionContainer(context: Context) {
         }
         XmtpMessagingService.stop(appContext)
         BackgroundSyncScheduler.cancelAll(appContext)
+        callSessionManager.forceTeardownOnGdprShred()
+        callNotificationManager.cancelAllCallNotifications()
         notificationManager.cancelAllNotifications()
         _walletAddress.value = null
         activeSigner?.close()

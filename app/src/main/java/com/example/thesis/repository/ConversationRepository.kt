@@ -7,6 +7,9 @@ import com.example.thesis.identity.NicknameStorage
 import com.example.thesis.notifications.InMemorySeenMessageStorage
 import com.example.thesis.notifications.SeenMessageStorage
 import com.example.thesis.util.CryptoUtils
+import com.example.thesis.xmtp.CallSignal
+import com.example.thesis.xmtp.CallSignalCodec
+import com.example.thesis.xmtp.ContentTypeCallSignal
 import com.example.thesis.xmtp.ContentTypeProfileNickname
 import com.example.thesis.xmtp.ProfileNickname
 import com.example.thesis.xmtp.XmtpEngine
@@ -67,6 +70,14 @@ import java.util.concurrent.ConcurrentHashMap
 data class PolledMessagesBatch(
     val conversations: List<Conversation>,
     val newMessages: List<DecodedMessage>
+)
+
+data class IncomingCallSignal(
+    val messageId: String,
+    val conversationId: String,
+    val senderInboxId: String,
+    val sentAtMs: Long,
+    val signal: CallSignal
 )
 
 /**
@@ -162,6 +173,15 @@ class ConversationRepository(
         addAll(seenMessageStorage.loadSeenIds())
     }
 
+    // Bus separado para tramas efimeras de senalizacion WebRTC sin mezclarlas con notificaciones de texto.
+    private val _incomingCallSignals = MutableSharedFlow<IncomingCallSignal>(
+        extraBufferCapacity = CHANNEL_BUFFER_CAPACITY,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+    val incomingCallSignals: SharedFlow<IncomingCallSignal> = _incomingCallSignals.asSharedFlow()
+
+    private val processedCallSignalIds = BoundedIdDeduplicator(maxSize = MAX_DEDUPLICATOR_CAPACITY)
+
     private val _peerReadTimestamps = MutableStateFlow<Map<String, Long>>(emptyMap())
     val peerReadTimestamps: StateFlow<Map<String, Long>> = _peerReadTimestamps.asStateFlow()
 
@@ -192,7 +212,7 @@ class ConversationRepository(
                         try {
                             client.conversations.streamAllMessages().collect { msg ->
                                 // Extraemos acuses de lectura y apodos antes de descartar tramas no textuales.
-                                processControlMessages(msg.conversationId, listOf(msg))
+                                processControlMessages(msg.conversationId, listOf(msg), emitLiveCallSignals = true)
                                 if (!msg.isDisplayableUserMessage()) return@collect
                                 if (recordSeenId(msg.id)) {
                                     _incomingMessages.tryEmit(msg)
@@ -615,7 +635,7 @@ class ConversationRepository(
 
                 for (conv in conversations) {
                     val rawMsgs = fetchMessagesSafely(conv)
-                    processControlMessages(conv.id, rawMsgs)
+                    processControlMessages(conv.id, rawMsgs, emitLiveCallSignals = !shouldSeed)
                     val msgs = rawMsgs
                         .filter { it.isDisplayableUserMessage() }
                         .sortedBy { it.resolvedTimestampMs() }
@@ -663,6 +683,7 @@ class ConversationRepository(
     fun resetNotificationBaseline() {
         hasSeededMessageBaseline = false
         seenMessageIds.clear()
+        processedCallSignalIds.clear()
         seenMessageStorage.clear()
         _peerReadTimestamps.value = emptyMap()
         _localReadTimestamps.value = emptyMap()
@@ -743,7 +764,7 @@ class ConversationRepository(
                 }
 
                 val latest = fetchMessagesSafely(conversation)
-                processControlMessages(conversation.id, latest)
+                processControlMessages(conversation.id, latest, emitLiveCallSignals = true)
 
                 val filteredLatest = latest.filter { it.isDisplayableUserMessage() }
                 val newlySyncedMessages = mutableListOf<DecodedMessage>()
@@ -780,7 +801,7 @@ class ConversationRepository(
             while (isActive) {
                 try {
                     conversation.streamMessages().collect { incoming ->
-                        processControlMessages(conversation.id, listOf(incoming))
+                        processControlMessages(conversation.id, listOf(incoming), emitLiveCallSignals = true)
                         if (!incoming.isDisplayableUserMessage()) return@collect
                         if (recordSeenId(incoming.id)) {
                             _incomingMessages.tryEmit(incoming)
@@ -907,6 +928,30 @@ class ConversationRepository(
                 val msgId = conversation.send(
                     ProfileNickname(clean),
                     SendOptions(contentType = ContentTypeProfileNickname)
+                )
+                try {
+                    conversation.sync()
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                }
+                msgId
+            }
+        }
+
+    suspend fun sendCallSignal(conversationId: String, signal: CallSignal): Result<String> =
+        withContext(ioDispatcher) {
+            val client = xmtpEngine.client
+                ?: return@withContext Result.failure(
+                    IllegalStateException("XMTP engine is not ready (current state: ${xmtpEngine.state.value})")
+                )
+            val conversation = client.conversations.findConversation(conversationId)
+                ?: return@withContext Result.failure(
+                    NoSuchElementException("Conversation not found for ID: $conversationId")
+                )
+            runCatching {
+                val msgId = conversation.send(
+                    signal,
+                    SendOptions(contentType = ContentTypeCallSignal)
                 )
                 try {
                     conversation.sync()
@@ -1087,7 +1132,11 @@ class ConversationRepository(
         return added
     }
 
-    private fun processControlMessages(conversationId: String, rawMessages: List<DecodedMessage>) {
+    private fun processControlMessages(
+        conversationId: String,
+        rawMessages: List<DecodedMessage>,
+        emitLiveCallSignals: Boolean = false
+    ) {
         if (conversationId.isBlank() || rawMessages.isEmpty()) return
         val localInboxId = xmtpEngine.client?.inboxId.orEmpty()
 
@@ -1123,6 +1172,36 @@ class ConversationRepository(
                 nicknameStorage.setSharedPeerNickname(msg.senderInboxId, nickname)
             }
         }
+
+        if (emitLiveCallSignals) {
+            val callSignals = rawMessages
+                .asSequence()
+                .filter { msg ->
+                    val sender = msg.senderInboxId
+                    sender.isNotBlank() &&
+                        (localInboxId.isBlank() || !sender.equals(localInboxId, ignoreCase = true)) &&
+                        msg.isCallSignalMessage()
+                }
+                .sortedBy { it.resolvedTimestampMs() }
+
+            for (msg in callSignals) {
+                val msgId = msg.id
+                val parsed = msg.extractCallSignal() ?: continue
+                // Evitamos reemitir la misma senal entre el stream global, el stream del chat y el worker.
+                val shouldEmit = if (msgId.isNotBlank()) processedCallSignalIds.add(msgId) else true
+                if (shouldEmit) {
+                    _incomingCallSignals.tryEmit(
+                        IncomingCallSignal(
+                            messageId = msgId,
+                            conversationId = conversationId,
+                            senderInboxId = msg.senderInboxId,
+                            sentAtMs = msg.resolvedTimestampMs().takeIf { it > 0L } ?: parsed.timestampMs,
+                            signal = parsed
+                        )
+                    )
+                }
+            }
+        }
     }
 
     private fun recordSeenIdsBatch(ids: Collection<String>) {
@@ -1135,6 +1214,7 @@ class ConversationRepository(
         // Conservamos el estado persistido en disco entre cierres de ciclo; solo resetNotificationBaseline() lo borra en GDPR Shred.
         hasSeededMessageBaseline = false
         seenMessageIds.clear()
+        processedCallSignalIds.clear()
         repositoryJob.cancel()
         messageFlows.clear()
     }
@@ -1259,7 +1339,7 @@ internal fun DecodedMessage.isDisplayableUserMessage(): Boolean {
         }
     }
     val decoded = runCatching { content<Any>() }.getOrNull()
-    if (decoded is GroupUpdated || decoded is ReadReceipt || decoded is ProfileNickname) {
+    if (decoded is GroupUpdated || decoded is ReadReceipt || decoded is ProfileNickname || decoded is CallSignal) {
         return false
     }
     val text = runCatching { body }.getOrNull()
@@ -1301,6 +1381,24 @@ internal fun DecodedMessage.extractProfileNickname(): String? {
     }
     val rawUtf8 = runCatching { encodedContent.content.toStringUtf8() }.getOrNull()
     return NicknamePolicy.sanitize(rawUtf8)
+}
+
+internal fun DecodedMessage.isCallSignalMessage(): Boolean {
+    val ct = runCatching { encodedContent.type }.getOrNull()
+    val authority = ct?.let { runCatching { it.authorityId }.getOrNull() }.orEmpty()
+    val typeId = ct?.let { runCatching { it.typeId }.getOrNull() }.orEmpty()
+    if (authority == ContentTypeCallSignal.authorityId && typeId == ContentTypeCallSignal.typeId) {
+        return true
+    }
+    return runCatching { content<Any>() }.getOrNull() is CallSignal
+}
+
+internal fun DecodedMessage.extractCallSignal(): CallSignal? {
+    if (!isCallSignalMessage()) return null
+    val decoded = runCatching { content<Any>() }.getOrNull() as? CallSignal
+    if (decoded != null) return decoded
+    val rawBytes = runCatching { encodedContent.content.toByteArray() }.getOrNull() ?: return null
+    return runCatching { CallSignalCodec.decodeBytes(rawBytes) }.getOrNull()
 }
 
 val DecodedMessage.senderAddress: String

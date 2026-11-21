@@ -44,3 +44,7 @@
     public static int d(...);
     public static int i(...);
 }
+
+# ─── WebRTC JNI Rules (evita ofuscacion de callbacks nativos de libjingle) ────
+-keep class org.webrtc.** { *; }
+-dontwarn org.webrtc.**

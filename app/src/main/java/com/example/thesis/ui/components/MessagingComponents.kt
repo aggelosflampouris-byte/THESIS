@@ -44,6 +44,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.res.painterResource
+import com.example.thesis.R
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
@@ -71,12 +73,14 @@ internal fun MessagingTopBar(
     engineState: XmtpEngineState,
     isSyncing: Boolean,
     isShredding: Boolean = false,
+    isCallActive: Boolean = false,
     onBack: () -> Unit,
     onSync: () -> Unit,
     onOpenIdentity: () -> Unit,
     onOpenShred: () -> Unit,
     onOpenLogs: () -> Unit = {},
-    onOpenProtocolInspector: () -> Unit = {}
+    onOpenProtocolInspector: () -> Unit = {},
+    onStartVoiceCall: () -> Unit = {}
 ) {
     TopAppBar(
         title = {
@@ -167,6 +171,19 @@ internal fun MessagingTopBar(
         },
         actions = {
             if (selectedConversation != null) {
+                if (selectedConversation is Conversation.Dm && engineState is XmtpEngineState.Ready) {
+                    IconButton(
+                        onClick = onStartVoiceCall,
+                        enabled = !isShredding && !isCallActive
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_call_phone),
+                            contentDescription = "Κλήση φωνής",
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                }
+
                 IconButton(onClick = onOpenProtocolInspector) {
                     Icon(Icons.Default.Info, contentDescription = "Protocol Info")
                 }

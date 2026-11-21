@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.thesis"
         minSdk = 26
         targetSdk = 35
-        versionCode = 22
-        versionName = "1.0.25"
+        versionCode = 23
+        versionName = "1.0.26"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -148,6 +148,9 @@ dependencies {
     implementation("androidx.camera:camera-camera2:1.4.2")
     implementation("androidx.camera:camera-lifecycle:1.4.2")
     implementation("androidx.camera:camera-view:1.4.2")
+
+    // Pila WebRTC nativa para llamadas de voz cifradas DTLS-SRTP sin servidor propio de senalizacion
+    implementation("io.getstream:stream-webrtc-android:1.3.10")
 
     // ------------------------------------------------------------------------
     // Web3j Cryptography: EIP-191 & SECP256K1 Key Derivation

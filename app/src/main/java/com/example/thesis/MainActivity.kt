@@ -57,7 +57,10 @@ import com.example.thesis.ui.screens.MessagingConnectionError
 import com.example.thesis.ui.screens.MessagingLoadingScreen
 import com.example.thesis.ui.screens.MessagingStartScreen
 import com.example.thesis.ui.theme.ThesisTheme
+import com.example.thesis.call.CallNotificationManager
+import com.example.thesis.call.CallUiState
 import com.example.thesis.notifications.MessageNotificationManager
+import com.example.thesis.ui.screens.ActiveCallOverlay
 import com.example.thesis.ui.util.ReportExporter
 import com.example.thesis.ui.util.copyToClipboard
 import com.example.thesis.updater.UpdateConfig
@@ -130,9 +133,22 @@ class MainActivity : FragmentActivity() {
 
     private fun handleNotificationIntent(intent: Intent?) {
         val conversationId = intent?.getStringExtra(MessageNotificationManager.EXTRA_CONVERSATION_ID)
+            ?: intent?.getStringExtra(CallNotificationManager.EXTRA_CONVERSATION_ID)
         if (!conversationId.isNullOrBlank()) {
             viewModel.openConversationById(conversationId)
-            intent.removeExtra(MessageNotificationManager.EXTRA_CONVERSATION_ID)
+            intent?.removeExtra(MessageNotificationManager.EXTRA_CONVERSATION_ID)
+            intent?.removeExtra(CallNotificationManager.EXTRA_CONVERSATION_ID)
+        }
+
+        val callAction = intent?.getStringExtra(CallNotificationManager.EXTRA_CALL_ACTION)
+        if (callAction == CallNotificationManager.ACTION_ACCEPT_CALL) {
+            val callId = intent.getStringExtra(CallNotificationManager.EXTRA_CALL_ID)
+            viewModel.requestNotificationCallAccept(callId)
+            intent.removeExtra(CallNotificationManager.EXTRA_CALL_ACTION)
+            intent.removeExtra(CallNotificationManager.EXTRA_CALL_ID)
+        } else if (!callAction.isNullOrBlank()) {
+            intent?.removeExtra(CallNotificationManager.EXTRA_CALL_ACTION)
+            intent?.removeExtra(CallNotificationManager.EXTRA_CALL_ID)
         }
     }
 }
@@ -160,6 +176,8 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     val peerReadTimestamps by viewModel.peerReadTimestamps.collectAsState()
     val isScreenRecordingActive by viewModel.isScreenRecordingActive.collectAsState()
     val deviceTransferState by viewModel.deviceTransferState.collectAsState()
+    val callState by viewModel.callState.collectAsState()
+    val pendingCallAcceptId by viewModel.pendingCallNotificationAcceptId.collectAsState()
 
     val updateStatus by viewModel.updateStatus.collectAsState()
     var showUpdateDialog by rememberSaveable { mutableStateOf(false) }
@@ -261,6 +279,38 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
         contract = ActivityResultContracts.RequestPermission()
     ) { granted ->
         viewModel.onNotificationPermissionResult(granted)
+    }
+
+    var pendingAudioAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val recordAudioPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val action = pendingAudioAction
+        pendingAudioAction = null
+        if (granted) {
+            action?.invoke()
+        } else {
+            scope.launch {
+                snackbarHostState.showSnackbar("Απαιτείται άδεια μικροφώνου για κλήσεις φωνής.")
+            }
+        }
+    }
+
+    val runWithRecordAudioPermission: (() -> Unit) -> Unit = { action ->
+        if (viewModel.hasRecordAudioPermission()) {
+            action()
+        } else {
+            pendingAudioAction = action
+            recordAudioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    LaunchedEffect(pendingCallAcceptId) {
+        val acceptCallId = pendingCallAcceptId ?: return@LaunchedEffect
+        viewModel.consumeNotificationCallAccept()
+        runWithRecordAudioPermission {
+            viewModel.acceptIncomingCall(acceptCallId.takeIf { it.isNotBlank() })
+        }
     }
 
     LaunchedEffect(Unit) {
@@ -487,12 +537,21 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                         engineState = engineState,
                         isSyncing = isSyncing,
                         isShredding = isShredding,
+                        isCallActive = callState !is CallUiState.Idle,
                         onBack = { viewModel.selectConversation(null) },
                         onSync = { viewModel.syncConversations() },
                         onOpenIdentity = { showIdentityDialog = true },
                         onOpenShred = { showShredConfirmationDialog = true },
                         onOpenLogs = { showLogsScreen = true },
-                        onOpenProtocolInspector = { showProtocolInspectorDialog = true }
+                        onOpenProtocolInspector = { showProtocolInspectorDialog = true },
+                        onStartVoiceCall = {
+                            val targetConv = selectedConversation
+                            if (targetConv != null) {
+                                runWithRecordAudioPermission {
+                                    viewModel.startVoiceCall(targetConv)
+                                }
+                            }
+                        }
                     )
                 }
             ) { padding ->
@@ -597,6 +656,21 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                 }
             }
         }
+        }
+        if (callState !is CallUiState.Idle) {
+            ActiveCallOverlay(
+                callState = callState,
+                onAccept = {
+                    runWithRecordAudioPermission {
+                        viewModel.acceptIncomingCall(callState.callId)
+                    }
+                },
+                onDecline = { viewModel.declineIncomingCall(callState.callId) },
+                onHangup = { viewModel.hangupCall(callState.callId) },
+                onToggleMute = { viewModel.toggleCallMute() },
+                onToggleSpeaker = { viewModel.toggleCallSpeaker() },
+                onDismissEnded = { viewModel.dismissEndedCall() }
+            )
         }
         if (ScreenSecurityPolicy.shouldShowPrivacyShield(isScreenRecordingActive)) {
             ScreenRecordingShieldOverlay()
