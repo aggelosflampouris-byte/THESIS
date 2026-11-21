@@ -5,39 +5,145 @@ import com.example.thesis.ui.ActionLogEntry
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import java.io.File
 import java.nio.charset.StandardCharsets
 import java.util.Base64
+import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
-// Almacen persistente de registros en el directorio privado de la app para conservarlos entre reinicios y fallos.
+data class ActionLogSession(
+    val sessionId: String,
+    val sessionNumber: Int,
+    val startedAt: Long,
+    val endedAt: Long,
+    val isCurrent: Boolean,
+    val entries: List<ActionLogEntry>
+) {
+    val errorCount: Int get() = entries.count { it.isError }
+    val hasCrash: Boolean get() = entries.any { it.tag.equals("CRASH", ignoreCase = true) }
+}
+
+// Almacen persistente que separa los registros por sesion cada vez que la aplicacion se cierra y vuelve a abrirse.
 class ActionLogStore(
     private val logFile: File,
-    private val maxEntries: Int = DEFAULT_MAX_ENTRIES
+    private val maxEntries: Int = DEFAULT_MAX_ENTRIES,
+    private val maxSessions: Int = DEFAULT_MAX_SESSIONS
 ) {
+    private val stateLock = Any()
     private val writer = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "ThesisActionLogWriter").apply { isDaemon = true }
     }
 
-    private val _entries = MutableStateFlow(loadEntries(logFile, maxEntries))
-    val entries: StateFlow<List<ActionLogEntry>> = _entries.asStateFlow()
+    @Volatile
+    var currentSessionId: String = UUID.randomUUID().toString()
+        private set
+
+    @Volatile
+    var currentSessionStartedAt: Long = System.currentTimeMillis()
+        private set
+
+    @Volatile
+    private var currentSessionHasEntries: Boolean = false
+
+    private val _entries: MutableStateFlow<List<ActionLogEntry>>
+    val entries: StateFlow<List<ActionLogEntry>>
+
+    private val _sessions: MutableStateFlow<List<ActionLogSession>>
+    val sessions: StateFlow<List<ActionLogSession>>
+
+    init {
+        val initialEntries = trimEntries(loadEntries(logFile, maxEntries), maxEntries, maxSessions)
+        registerActiveSessionForCrashHandler(currentSessionId, currentSessionStartedAt)
+        _entries = MutableStateFlow(initialEntries)
+        entries = _entries.asStateFlow()
+        _sessions = MutableStateFlow(
+            buildSessions(
+                entries = initialEntries,
+                currentSessionId = currentSessionId,
+                currentSessionStartedAt = currentSessionStartedAt
+            )
+        )
+        sessions = _sessions.asStateFlow()
+    }
+
+    // Inicia una nueva sesion al reabrir la UI si la sesion previa ya contenia eventos, evitando sesiones vacias duplicadas en arranque en frio.
+    fun onAppOpened(nowMs: Long = System.currentTimeMillis()): String {
+        synchronized(stateLock) {
+            if (!currentSessionHasEntries) {
+                currentSessionStartedAt = nowMs
+                registerActiveSessionForCrashHandler(currentSessionId, currentSessionStartedAt)
+                refreshSessionsLocked()
+                return currentSessionId
+            }
+            return startNewSessionLocked(nowMs)
+        }
+    }
+
+    fun startNewSession(nowMs: Long = System.currentTimeMillis()): String {
+        synchronized(stateLock) {
+            return startNewSessionLocked(nowMs)
+        }
+    }
+
+    private fun startNewSessionLocked(nowMs: Long): String {
+        currentSessionId = UUID.randomUUID().toString()
+        currentSessionStartedAt = nowMs
+        currentSessionHasEntries = false
+        registerActiveSessionForCrashHandler(currentSessionId, currentSessionStartedAt)
+        refreshSessionsLocked()
+        return currentSessionId
+    }
 
     fun append(entry: ActionLogEntry) {
-        _entries.update { current -> (current + entry).takeLast(maxEntries) }
-        val line = encodeLine(entry)
+        val boundEntry: ActionLogEntry
+        synchronized(stateLock) {
+            val sid = entry.sessionId.ifBlank { currentSessionId }
+            val startedAt = if (entry.sessionStartedAt > 0L) {
+                entry.sessionStartedAt
+            } else if (sid == currentSessionId) {
+                currentSessionStartedAt
+            } else {
+                entry.timestamp
+            }
+            if (sid == currentSessionId) {
+                currentSessionHasEntries = true
+            }
+            boundEntry = entry.copy(
+                sessionId = sid,
+                sessionStartedAt = startedAt
+            )
+            val updated = trimEntries(_entries.value + boundEntry, maxEntries, maxSessions)
+            _entries.value = updated
+            refreshSessionsLocked()
+        }
+        val line = encodeLine(boundEntry)
         // Escribimos fuera del hilo principal para no bloquear la UI con E/S de disco.
         runCatching { writer.execute { appendLineAndCompact(logFile, line, maxEntries) } }
     }
 
     fun clear() {
-        _entries.value = emptyList()
+        synchronized(stateLock) {
+            currentSessionId = UUID.randomUUID().toString()
+            currentSessionStartedAt = System.currentTimeMillis()
+            currentSessionHasEntries = false
+            registerActiveSessionForCrashHandler(currentSessionId, currentSessionStartedAt)
+            _entries.value = emptyList()
+            refreshSessionsLocked()
+        }
         runCatching {
             writer.execute {
                 synchronized(FILE_LOCK) { runCatching { logFile.delete() } }
             }
         }
+    }
+
+    private fun refreshSessionsLocked() {
+        _sessions.value = buildSessions(
+            entries = _entries.value,
+            currentSessionId = currentSessionId,
+            currentSessionStartedAt = currentSessionStartedAt
+        )
     }
 
     // Permite a las pruebas esperar a que terminen las escrituras asincronas pendientes.
@@ -46,27 +152,120 @@ class ActionLogStore(
     }
 
     companion object {
-        const val DEFAULT_MAX_ENTRIES = 500
+        const val DEFAULT_MAX_ENTRIES = 1_000
+        const val DEFAULT_MAX_SESSIONS = 25
+        const val LEGACY_SESSION_ID = "legacy-session"
         private const val MAX_MESSAGE_CHARS = 8_000
-        private const val COMPACT_THRESHOLD_BYTES = 512L * 1024L
+        private const val COMPACT_THRESHOLD_BYTES = 768L * 1024L
         private const val FIELD_SEPARATOR = "\t"
         private val FILE_LOCK = Any()
+
+        @Volatile
+        private var lastActiveSessionId: String = ""
+
+        @Volatile
+        private var lastActiveSessionStartedAt: Long = 0L
+
+        private fun registerActiveSessionForCrashHandler(sessionId: String, startedAt: Long) {
+            lastActiveSessionId = sessionId
+            lastActiveSessionStartedAt = startedAt
+        }
 
         fun defaultFile(context: Context): File =
             File(context.applicationContext.filesDir, "diagnostics/action_logs.log")
 
-        // Escritura sincrona usada por el manejador de fallos, ya que el proceso muere justo despues.
+        // Escritura sincrona usada por el manejador de fallos para asociar el crash a la sesion activa antes de morir el proceso.
         fun appendSync(file: File, entry: ActionLogEntry, maxEntries: Int = DEFAULT_MAX_ENTRIES) {
-            appendLineAndCompact(file, encodeLine(entry), maxEntries)
+            val activeSid = entry.sessionId.ifBlank {
+                lastActiveSessionId.ifBlank { UUID.randomUUID().toString() }
+            }
+            val activeStarted = when {
+                entry.sessionStartedAt > 0L -> entry.sessionStartedAt
+                lastActiveSessionStartedAt > 0L -> lastActiveSessionStartedAt
+                else -> entry.timestamp
+            }
+            val bound = entry.copy(sessionId = activeSid, sessionStartedAt = activeStarted)
+            appendLineAndCompact(file, encodeLine(bound), maxEntries)
+        }
+
+        internal fun buildSessions(
+            entries: List<ActionLogEntry>,
+            currentSessionId: String,
+            currentSessionStartedAt: Long
+        ): List<ActionLogSession> {
+            val grouped = LinkedHashMap<String, MutableList<ActionLogEntry>>()
+            for (entry in entries) {
+                val sid = entry.sessionId.ifBlank { LEGACY_SESSION_ID }
+                grouped.getOrPut(sid) { mutableListOf() }.add(entry)
+            }
+            if (!grouped.containsKey(currentSessionId)) {
+                grouped[currentSessionId] = mutableListOf()
+            }
+
+            val total = grouped.size
+            val chronological = ArrayList<ActionLogSession>(total)
+            var index = 0
+            for ((sid, sessionEntries) in grouped) {
+                index++
+                val isCurrent = sid == currentSessionId
+                val startedAt = sessionEntries.firstOrNull()?.sessionStartedAt?.takeIf { it > 0L }
+                    ?: sessionEntries.minOfOrNull { it.timestamp }
+                    ?: if (isCurrent) currentSessionStartedAt else 0L
+                val endedAt = sessionEntries.maxOfOrNull { it.timestamp } ?: startedAt
+                chronological.add(
+                    ActionLogSession(
+                        sessionId = sid,
+                        sessionNumber = index,
+                        startedAt = startedAt,
+                        endedAt = endedAt,
+                        isCurrent = isCurrent,
+                        entries = sessionEntries.toList()
+                    )
+                )
+            }
+            // Mostramos primero la sesion actual y debajo las sesiones anteriores en orden inverso.
+            return chronological.asReversed()
+        }
+
+        private fun trimEntries(
+            entries: List<ActionLogEntry>,
+            maxEntries: Int,
+            maxSessions: Int
+        ): List<ActionLogEntry> {
+            if (entries.isEmpty()) return emptyList()
+            val sessionOrder = LinkedHashSet<String>()
+            for (entry in entries) {
+                sessionOrder.add(entry.sessionId.ifBlank { LEGACY_SESSION_ID })
+            }
+            val allowedSessions = if (sessionOrder.size > maxSessions) {
+                sessionOrder.toList().takeLast(maxSessions).toSet()
+            } else {
+                sessionOrder
+            }
+            return entries
+                .filter { (it.sessionId.ifBlank { LEGACY_SESSION_ID }) in allowedSessions }
+                .takeLast(maxEntries)
         }
 
         internal fun loadEntries(file: File, maxEntries: Int): List<ActionLogEntry> {
             return synchronized(FILE_LOCK) {
                 runCatching {
                     if (!file.exists()) return@runCatching emptyList()
-                    file.readLines(StandardCharsets.UTF_8)
+                    val decoded = file.readLines(StandardCharsets.UTF_8)
                         .mapNotNull { decodeLine(it) }
                         .takeLast(maxEntries)
+                    val firstLegacyTs = decoded.firstOrNull { it.sessionId == LEGACY_SESSION_ID }?.timestamp ?: 0L
+                    if (firstLegacyTs > 0L) {
+                        decoded.map { entry ->
+                            if (entry.sessionId == LEGACY_SESSION_ID && entry.sessionStartedAt == 0L) {
+                                entry.copy(sessionStartedAt = firstLegacyTs)
+                            } else {
+                                entry
+                            }
+                        }
+                    } else {
+                        decoded
+                    }
                 }.getOrDefault(emptyList())
             }
         }
@@ -78,29 +277,49 @@ class ActionLogStore(
                 entry.message.take(MAX_MESSAGE_CHARS).toByteArray(StandardCharsets.UTF_8)
             )
             val id = encoder.encodeToString(entry.id.toByteArray(StandardCharsets.UTF_8))
+            val sid = encoder.encodeToString(
+                entry.sessionId.ifBlank { LEGACY_SESSION_ID }.toByteArray(StandardCharsets.UTF_8)
+            )
+            val startedAt = (entry.sessionStartedAt.takeIf { it > 0L } ?: entry.timestamp).toString()
             return listOf(
                 entry.timestamp.toString(),
                 if (entry.isError) "1" else "0",
                 entry.durationMs?.toString().orEmpty(),
                 tag,
                 message,
-                id
+                id,
+                sid,
+                startedAt
             ).joinToString(FIELD_SEPARATOR)
         }
 
         internal fun decodeLine(line: String): ActionLogEntry? {
             if (line.isBlank()) return null
             val parts = line.split(FIELD_SEPARATOR)
-            if (parts.size != 6) return null
+            if (parts.size != 6 && parts.size != 8) return null
             return runCatching {
                 val decoder = Base64.getDecoder()
+                val timestamp = parts[0].toLong()
+                // Mantenemos compatibilidad con lineas de 6 columnas guardadas por versiones previas.
+                val sessionId = if (parts.size >= 8) {
+                    String(decoder.decode(parts[6]), StandardCharsets.UTF_8).ifBlank { LEGACY_SESSION_ID }
+                } else {
+                    LEGACY_SESSION_ID
+                }
+                val sessionStartedAt = if (parts.size >= 8) {
+                    parts[7].toLongOrNull() ?: timestamp
+                } else {
+                    0L
+                }
                 ActionLogEntry(
                     id = String(decoder.decode(parts[5]), StandardCharsets.UTF_8),
-                    timestamp = parts[0].toLong(),
+                    timestamp = timestamp,
                     tag = String(decoder.decode(parts[3]), StandardCharsets.UTF_8),
                     message = String(decoder.decode(parts[4]), StandardCharsets.UTF_8),
                     durationMs = parts[2].takeIf { it.isNotEmpty() }?.toDouble(),
-                    isError = parts[1] == "1"
+                    isError = parts[1] == "1",
+                    sessionId = sessionId,
+                    sessionStartedAt = sessionStartedAt
                 )
             }.getOrNull()
         }

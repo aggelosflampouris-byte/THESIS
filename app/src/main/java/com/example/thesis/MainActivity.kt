@@ -85,6 +85,10 @@ class MainActivity : FragmentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (savedInstanceState == null) {
+            // Iniciamos una nueva sesion de registros cada vez que la aplicacion se abre tras haberse cerrado.
+            (application as? ThesisApplication)?.sessionContainer?.actionLogStore?.onAppOpened()
+        }
         ScreenSecurityManager.applyWindowProtection(this)
         enableEdgeToEdge()
         handleNotificationIntent(intent)
@@ -165,6 +169,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     val messages by viewModel.messages.collectAsState()
     val statusBanner by viewModel.statusBanner.collectAsState()
     val actionLogs by viewModel.actionLogs.collectAsState()
+    val actionLogSessions by viewModel.actionLogSessions.collectAsState()
     val isSending by viewModel.isSending.collectAsState()
     val isSyncing by viewModel.isSyncing.collectAsState()
     val isBenchmarking by viewModel.isBenchmarking.collectAsState()
@@ -344,6 +349,11 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
         viewModel.selectConversation(null)
     }
 
+    BackHandler(enabled = !showLogsScreen && selectedConversation == null && callState is CallUiState.Idle) {
+        // Finalizamos la actividad al salir con Atras para que la siguiente apertura cree una nueva sesion de registros.
+        (context as? FragmentActivity)?.finish()
+    }
+
     if (showNewConversationDialog) {
         NewConversationDialog(
             onDismiss = { showNewConversationDialog = false },
@@ -512,6 +522,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
         if (showLogsScreen) {
             LogsTelemetryScreen(
                 logs = actionLogs,
+                sessions = actionLogSessions,
                 walletAddress = walletAddress,
                 inboxId = inboxId,
                 installationId = installationId,

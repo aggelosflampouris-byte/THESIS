@@ -27,6 +27,7 @@ import com.example.thesis.security.ThesisTelemetry
 import com.example.thesis.ui.util.ReportExporter
 import com.example.thesis.call.CallForegroundService
 import com.example.thesis.call.CallUiState
+import com.example.thesis.diagnostics.ActionLogSession
 import com.example.thesis.xmtp.XmtpEngineState
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -65,7 +66,9 @@ data class ActionLogEntry(
     val tag: String,
     val message: String,
     val durationMs: Double? = null,
-    val isError: Boolean = false
+    val isError: Boolean = false,
+    val sessionId: String = "",
+    val sessionStartedAt: Long = 0L
 )
 
 sealed interface DeviceTransferState {
@@ -169,9 +172,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _statusBanner = MutableStateFlow<String?>(null)
     val statusBanner: StateFlow<String?> = _statusBanner.asStateFlow()
 
-    // Los registros se cargan del disco para que sobrevivan al cierre de la app y a los fallos.
+    // Los registros se cargan del disco separados por sesion para que sobrevivan al cierre de la app y a los fallos.
     private val actionLogStore = sessionContainer.actionLogStore
     val actionLogs: StateFlow<List<ActionLogEntry>> = actionLogStore.entries
+    val actionLogSessions: StateFlow<List<ActionLogSession>> = actionLogStore.sessions
 
     private val _isSending = MutableStateFlow(false)
     val isSending: StateFlow<Boolean> = _isSending.asStateFlow()
@@ -389,7 +393,29 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             appendLine("---")
             appendLine()
         }
-        return pocHeader + ThesisTelemetry.exportFullReport()
+        val sessionLogsSection = buildString {
+            val sessionsSnapshot = actionLogSessions.value
+            val fmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
+            appendLine()
+            appendLine("## Persisted Session Action Logs (${sessionsSnapshot.size} sessions)")
+            sessionsSnapshot.forEach { session ->
+                val stateLabel = if (session.isCurrent) "ACTIVE" else "SAVED"
+                val crashLabel = if (session.hasCrash) " [CRASH]" else ""
+                appendLine()
+                appendLine("### Session #${session.sessionNumber} ($stateLabel$crashLabel) — ${session.entries.size} events")
+                if (session.entries.isEmpty()) {
+                    appendLine("_No events recorded in this session._")
+                } else {
+                    appendLine("```text")
+                    session.entries.forEach { entry ->
+                        val dur = entry.durationMs?.let { String.format(Locale.US, " (%.1f ms)", it) }.orEmpty()
+                        appendLine("${fmt.format(Date(entry.timestamp))} [${entry.tag}] ${entry.message}$dur")
+                    }
+                    appendLine("```")
+                }
+            }
+        }
+        return pocHeader + ThesisTelemetry.exportFullReport() + sessionLogsSection
     }
 
     init {

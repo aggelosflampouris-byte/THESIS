@@ -1,6 +1,7 @@
 package com.example.thesis.ui.screens
 
 import android.widget.Toast
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -64,6 +65,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.thesis.diagnostics.ActionLogSession
+import com.example.thesis.diagnostics.ActionLogStore
 import com.example.thesis.ui.ActionLogEntry
 import com.example.thesis.ui.util.copyToClipboard
 import java.text.SimpleDateFormat
@@ -74,6 +77,7 @@ import java.util.Locale
 @Composable
 internal fun LogsTelemetryScreen(
     logs: List<ActionLogEntry>,
+    sessions: List<ActionLogSession> = emptyList(),
     walletAddress: String? = null,
     inboxId: String? = null,
     installationId: String? = null,
@@ -89,12 +93,30 @@ internal fun LogsTelemetryScreen(
     modifier: Modifier = Modifier
 ) {
     var selectedTagFilter by rememberSaveable { mutableStateOf("ALL") }
+    var selectedSessionFilter by rememberSaveable { mutableStateOf("ALL") }
+    var collapsedSessionIds by rememberSaveable { mutableStateOf(emptySet<String>()) }
     var isPoCCardExpanded by rememberSaveable { mutableStateOf(true) }
     val context = LocalContext.current
 
-    val filteredLogs = remember(logs, selectedTagFilter) {
-        if (selectedTagFilter == "ALL") logs
-        else logs.filter { it.tag.equals(selectedTagFilter, ignoreCase = true) }
+    val effectiveSessions = remember(sessions, logs) {
+        if (sessions.isNotEmpty()) {
+            sessions
+        } else {
+            val latestSid = logs.lastOrNull()?.sessionId.orEmpty()
+            ActionLogStore.buildSessions(
+                entries = logs,
+                currentSessionId = latestSid,
+                currentSessionStartedAt = logs.lastOrNull()?.sessionStartedAt ?: System.currentTimeMillis()
+            )
+        }
+    }
+
+    val visibleSessions = remember(effectiveSessions, selectedSessionFilter) {
+        if (selectedSessionFilter == "ALL") {
+            effectiveSessions
+        } else {
+            effectiveSessions.filter { it.sessionId == selectedSessionFilter }.ifEmpty { effectiveSessions }
+        }
     }
 
     val metricCount = remember(logs) { logs.count { it.tag.equals("METRIC", ignoreCase = true) } }
@@ -104,7 +126,11 @@ internal fun LogsTelemetryScreen(
         if (latencies.isNotEmpty()) latencies.average() else null
     }
     val timeFormat = remember { SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()) }
-    val filterTags = listOf("ALL", "NOTIF", "METRIC", "E2EE", "MLS", "KEYSTORE", "SYNC", "BENCHMARK", "GDPR", "UPDATE")
+    val sessionDateFormat = remember { SimpleDateFormat("dd/MM HH:mm:ss", Locale.getDefault()) }
+    val filterTags = listOf(
+        "ALL", "CRASH", "CALL", "NOTIF", "METRIC", "E2EE",
+        "MLS", "KEYSTORE", "SYNC", "BENCHMARK", "GDPR", "UPDATE"
+    )
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -121,7 +147,7 @@ internal fun LogsTelemetryScreen(
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = "${logs.size} συμβάντα • RFC 9420 / SQLCipher",
+                            text = "${effectiveSessions.size} συνεδρίες • ${logs.size} συμβάντα • RFC 9420",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
@@ -149,7 +175,11 @@ internal fun LogsTelemetryScreen(
                     }
                     if (logs.isNotEmpty()) {
                         TextButton(
-                            onClick = onClear,
+                            onClick = {
+                                selectedSessionFilter = "ALL"
+                                collapsedSessionIds = emptySet()
+                                onClear()
+                            },
                             contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
                         ) {
                             Text("Clear", color = MaterialTheme.colorScheme.error, fontSize = 11.sp, maxLines = 1)
@@ -168,7 +198,7 @@ internal fun LogsTelemetryScreen(
                 .padding(padding),
             contentAlignment = Alignment.TopCenter
         ) {
-            // Unificamos cabecera, metricas y registros en un solo LazyColumn para evitar aplastamiento vertical en pantallas compactas.
+            // Unificamos cabecera, metricas y sesiones en un solo LazyColumn para evitar aplastamiento vertical en pantallas compactas.
             LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
@@ -315,6 +345,12 @@ internal fun LogsTelemetryScreen(
                                 verticalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
                                 Text(
+                                    text = "Sessions: ${effectiveSessions.size}",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
                                     text = "Metrics: $metricCount",
                                     fontSize = 11.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -388,6 +424,52 @@ internal fun LogsTelemetryScreen(
                     }
                 }
 
+                item(key = "session_filter_chips") {
+                    LazyRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        item(key = "session_chip_all") {
+                            FilterChip(
+                                selected = selectedSessionFilter == "ALL",
+                                onClick = { selectedSessionFilter = "ALL" },
+                                label = {
+                                    Text(
+                                        text = "Όλες οι συνεδρίες (${effectiveSessions.size})",
+                                        fontSize = 11.sp,
+                                        maxLines = 1
+                                    )
+                                }
+                            )
+                        }
+                        items(effectiveSessions, key = { "session_chip_${it.sessionId}" }) { session ->
+                            val chipLabel = buildString {
+                                if (session.isCurrent) {
+                                    append("Τρέχουσα #${session.sessionNumber}")
+                                } else {
+                                    append("Συνεδρία #${session.sessionNumber}")
+                                }
+                                append(" (${session.entries.size})")
+                                if (session.hasCrash) {
+                                    append(" • CRASH")
+                                }
+                            }
+                            FilterChip(
+                                selected = selectedSessionFilter == session.sessionId,
+                                onClick = { selectedSessionFilter = session.sessionId },
+                                label = {
+                                    Text(
+                                        text = chipLabel,
+                                        fontSize = 11.sp,
+                                        maxLines = 1,
+                                        color = if (session.hasCrash) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                            )
+                        }
+                    }
+                }
+
                 item(key = "filter_chips") {
                     LazyRow(
                         modifier = Modifier.fillMaxWidth(),
@@ -403,108 +485,89 @@ internal fun LogsTelemetryScreen(
                     }
                 }
 
-                if (filteredLogs.isEmpty()) {
-                    item(key = "empty_logs") {
-                        Card(
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = CardDefaults.cardColors(
-                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
-                            ),
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(24.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = "Δεν υπάρχουν καταγραφές για το φίλτρο $selectedTagFilter.",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    textAlign = TextAlign.Center
-                                )
-                            }
-                        }
+                for (session in visibleSessions) {
+                    val sessionFilteredEntries = if (selectedTagFilter == "ALL") {
+                        session.entries
+                    } else {
+                        session.entries.filter { it.tag.equals(selectedTagFilter, ignoreCase = true) }
                     }
-                } else {
-                    items(filteredLogs.reversed(), key = { it.id }) { entry ->
-                        Card(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    val logText = "${timeFormat.format(Date(entry.timestamp))} [${entry.tag}] ${entry.message}" +
-                                        (entry.durationMs?.let { " (${String.format(Locale.US, "%.1f ms", it)})" } ?: "")
-                                    copyToClipboard(context, "Telemetry Log", logText)
-                                    Toast.makeText(context, "Αντιγράφηκε στο πρόχειρο", Toast.LENGTH_SHORT).show()
-                                },
-                            colors = CardDefaults.cardColors(
-                                containerColor = if (entry.isError) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
-                                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
-                            ),
-                            shape = RoundedCornerShape(8.dp)
-                        ) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 10.dp, vertical = 8.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                FlowRow(
+                    val isCollapsed = session.sessionId in collapsedSessionIds
+
+                    item(key = "session_header_${session.sessionId}") {
+                        SessionHeaderCard(
+                            session = session,
+                            filteredCount = sessionFilteredEntries.size,
+                            isCollapsed = isCollapsed,
+                            sessionDateFormat = sessionDateFormat,
+                            timeFormat = timeFormat,
+                            onToggleExpand = {
+                                collapsedSessionIds = if (isCollapsed) {
+                                    collapsedSessionIds - session.sessionId
+                                } else {
+                                    collapsedSessionIds + session.sessionId
+                                }
+                            },
+                            onCopySession = {
+                                val text = formatSessionText(
+                                    session = session,
+                                    entries = sessionFilteredEntries,
+                                    sessionDateFormat = sessionDateFormat,
+                                    timeFormat = timeFormat
+                                )
+                                copyToClipboard(context, "Session #${session.sessionNumber} Logs", text)
+                                Toast.makeText(
+                                    context,
+                                    "Η Συνεδρία #${session.sessionNumber} αντιγράφηκε στο πρόχειρο",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        )
+                    }
+
+                    if (!isCollapsed) {
+                        if (sessionFilteredEntries.isEmpty()) {
+                            item(key = "session_empty_${session.sessionId}") {
+                                Card(
                                     modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+                                    ),
+                                    shape = RoundedCornerShape(8.dp)
                                 ) {
-                                    Text(
-                                        text = timeFormat.format(Date(entry.timestamp)),
-                                        fontSize = 11.sp,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                    Surface(
-                                        shape = RoundedCornerShape(4.dp),
-                                        color = when (entry.tag.uppercase(Locale.ROOT)) {
-                                            "METRIC" -> MaterialTheme.colorScheme.tertiary.copy(alpha = 0.2f)
-                                            "E2EE", "MLS" -> MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
-                                            "KEYSTORE" -> MaterialTheme.colorScheme.secondary.copy(alpha = 0.2f)
-                                            "GDPR" -> MaterialTheme.colorScheme.error.copy(alpha = 0.2f)
-                                            else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f)
-                                        }
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(14.dp),
+                                        contentAlignment = Alignment.Center
                                     ) {
                                         Text(
-                                            text = entry.tag,
-                                            modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = if (entry.isError) MaterialTheme.colorScheme.error
-                                            else when (entry.tag.uppercase(Locale.ROOT)) {
-                                                "METRIC" -> MaterialTheme.colorScheme.tertiary
-                                                "GDPR" -> MaterialTheme.colorScheme.error
-                                                else -> MaterialTheme.colorScheme.primary
-                                            }
+                                            text = if (selectedTagFilter == "ALL") {
+                                                "Δεν υπάρχουν ακόμη καταγραφές σε αυτή τη συνεδρία."
+                                            } else {
+                                                "Δεν υπάρχουν καταγραφές [$selectedTagFilter] στη Συνεδρία #${session.sessionNumber}."
+                                            },
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            textAlign = TextAlign.Center
                                         )
                                     }
-                                    entry.durationMs?.let { ms ->
-                                        Surface(
-                                            shape = RoundedCornerShape(4.dp),
-                                            color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f)
-                                        ) {
-                                            Text(
-                                                text = String.format(Locale.US, "%.1f ms", ms),
-                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
-                                                fontSize = 10.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                fontFamily = FontFamily.Monospace,
-                                                color = MaterialTheme.colorScheme.tertiary
-                                            )
-                                        }
-                                    }
                                 }
-                                Text(
-                                    text = entry.message,
-                                    fontSize = 12.sp,
-                                    color = if (entry.isError) MaterialTheme.colorScheme.error
-                                    else MaterialTheme.colorScheme.onSurface
+                            }
+                        } else {
+                            items(
+                                items = sessionFilteredEntries.asReversed(),
+                                key = { "${session.sessionId}_${it.id}" }
+                            ) { entry ->
+                                ActionLogEntryCard(
+                                    entry = entry,
+                                    sessionNumber = session.sessionNumber,
+                                    timeFormat = timeFormat,
+                                    onCopy = {
+                                        val logText = "${timeFormat.format(Date(entry.timestamp))} [S#${session.sessionNumber}][${entry.tag}] ${entry.message}" +
+                                            (entry.durationMs?.let { " (${String.format(Locale.US, "%.1f ms", it)})" } ?: "")
+                                        copyToClipboard(context, "Telemetry Log", logText)
+                                        Toast.makeText(context, "Αντιγράφηκε στο πρόχειρο", Toast.LENGTH_SHORT).show()
+                                    }
                                 )
                             }
                         }
@@ -513,6 +576,253 @@ internal fun LogsTelemetryScreen(
             }
         }
     }
+}
+
+@Composable
+private fun SessionHeaderCard(
+    session: ActionLogSession,
+    filteredCount: Int,
+    isCollapsed: Boolean,
+    sessionDateFormat: SimpleDateFormat,
+    timeFormat: SimpleDateFormat,
+    onToggleExpand: () -> Unit,
+    onCopySession: () -> Unit
+) {
+    val borderColor = when {
+        session.hasCrash -> MaterialTheme.colorScheme.error.copy(alpha = 0.7f)
+        session.isCurrent -> MaterialTheme.colorScheme.primary.copy(alpha = 0.65f)
+        else -> MaterialTheme.colorScheme.outlineVariant
+    }
+    val containerColor = when {
+        session.hasCrash -> MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.28f)
+        session.isCurrent -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+        else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+    }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggleExpand),
+        colors = CardDefaults.cardColors(containerColor = containerColor),
+        border = BorderStroke(1.dp, borderColor),
+        shape = RoundedCornerShape(10.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                FlowRow(
+                    modifier = Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(
+                        text = if (session.isCurrent) {
+                            "Τρέχουσα Συνεδρία #${session.sessionNumber}"
+                        } else {
+                            "Προηγούμενη Συνεδρία #${session.sessionNumber}"
+                        },
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = if (session.isCurrent) {
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
+                        } else {
+                            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)
+                        }
+                    ) {
+                        Text(
+                            text = if (session.isCurrent) "ACTIVE" else "SAVED",
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (session.isCurrent) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            }
+                        )
+                    }
+
+                    if (session.hasCrash) {
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = MaterialTheme.colorScheme.error.copy(alpha = 0.2f)
+                        ) {
+                            Text(
+                                text = "CRASH",
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    } else if (session.errorCount > 0) {
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = MaterialTheme.colorScheme.error.copy(alpha = 0.15f)
+                        ) {
+                            Text(
+                                text = "${session.errorCount} ERR",
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (session.entries.isNotEmpty()) {
+                        TextButton(
+                            onClick = onCopySession,
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Text("Copy", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                    Icon(
+                        imageVector = if (isCollapsed) Icons.Default.KeyboardArrowDown else Icons.Default.KeyboardArrowUp,
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            val startStr = if (session.startedAt > 0L) sessionDateFormat.format(Date(session.startedAt)) else "—"
+            val endStr = if (session.endedAt > 0L) timeFormat.format(Date(session.endedAt)) else "—"
+            Text(
+                text = "Έναρξη: $startStr • Τελευταίο: $endStr • $filteredCount/${session.entries.size} συμβάντα",
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun ActionLogEntryCard(
+    entry: ActionLogEntry,
+    sessionNumber: Int,
+    timeFormat: SimpleDateFormat,
+    onCopy: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onCopy),
+        colors = CardDefaults.cardColors(
+            containerColor = if (entry.isError) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.3f)
+            else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+        ),
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = timeFormat.format(Date(entry.timestamp)),
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Surface(
+                    shape = RoundedCornerShape(4.dp),
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
+                ) {
+                    Text(
+                        text = "S#$sessionNumber",
+                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Surface(
+                    shape = RoundedCornerShape(4.dp),
+                    color = when (entry.tag.uppercase(Locale.ROOT)) {
+                        "METRIC" -> MaterialTheme.colorScheme.tertiary.copy(alpha = 0.2f)
+                        "E2EE", "MLS" -> MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)
+                        "KEYSTORE" -> MaterialTheme.colorScheme.secondary.copy(alpha = 0.2f)
+                        "GDPR", "CRASH" -> MaterialTheme.colorScheme.error.copy(alpha = 0.2f)
+                        else -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.1f)
+                    }
+                ) {
+                    Text(
+                        text = entry.tag,
+                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp),
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (entry.isError) MaterialTheme.colorScheme.error
+                        else when (entry.tag.uppercase(Locale.ROOT)) {
+                            "METRIC" -> MaterialTheme.colorScheme.tertiary
+                            "GDPR", "CRASH" -> MaterialTheme.colorScheme.error
+                            else -> MaterialTheme.colorScheme.primary
+                        }
+                    )
+                }
+                entry.durationMs?.let { ms ->
+                    Surface(
+                        shape = RoundedCornerShape(4.dp),
+                        color = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.15f)
+                    ) {
+                        Text(
+                            text = String.format(Locale.US, "%.1f ms", ms),
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                            color = MaterialTheme.colorScheme.tertiary
+                        )
+                    }
+                }
+            }
+            Text(
+                text = entry.message,
+                fontSize = 12.sp,
+                color = if (entry.isError) MaterialTheme.colorScheme.error
+                else MaterialTheme.colorScheme.onSurface
+            )
+        }
+    }
+}
+
+private fun formatSessionText(
+    session: ActionLogSession,
+    entries: List<ActionLogEntry>,
+    sessionDateFormat: SimpleDateFormat,
+    timeFormat: SimpleDateFormat
+): String {
+    return buildString {
+        val status = if (session.isCurrent) "ACTIVE" else "SAVED"
+        val startStr = if (session.startedAt > 0L) sessionDateFormat.format(Date(session.startedAt)) else "—"
+        appendLine("=== Session #${session.sessionNumber} [$status] (Started: $startStr, Events: ${entries.size}) ===")
+        entries.forEach { entry ->
+            val durationPart = entry.durationMs?.let { String.format(Locale.US, " (%.1f ms)", it) }.orEmpty()
+            appendLine("${timeFormat.format(Date(entry.timestamp))} [${entry.tag}] ${entry.message}$durationPart")
+        }
+    }.trimEnd()
 }
 
 @Composable
