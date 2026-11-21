@@ -29,7 +29,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -59,7 +58,6 @@ import java.util.Locale
 
 @Composable
 internal fun NewConversationDialog(
-    isScreenProtectionEnabled: Boolean = true,
     onDismiss: () -> Unit,
     onStartConversation: (String, String?) -> Unit
 ) {
@@ -73,7 +71,7 @@ internal fun NewConversationDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        properties = ScreenSecurityManager.dialogProperties(isScreenProtectionEnabled),
+        properties = ScreenSecurityManager.dialogProperties(),
         title = { Text("Νέα Συνομιλία MLS") },
         text = {
             Column(
@@ -155,8 +153,6 @@ internal fun IdentityDetailsDialog(
     isCheckingUpdate: Boolean = false,
     notificationsEnabled: Boolean = true,
     isServiceNotificationVisible: Boolean = true,
-    isScreenProtectionEnabled: Boolean = true,
-    onToggleScreenProtection: (Boolean) -> Unit = {},
     onSaveMyNickname: (String) -> Unit = {},
     onCheckForUpdates: () -> Unit = {},
     onOpenNotificationSettings: () -> Unit = {},
@@ -168,7 +164,7 @@ internal fun IdentityDetailsDialog(
     var nicknameDraft by rememberSaveable(myNickname) { mutableStateOf(myNickname.orEmpty()) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        properties = ScreenSecurityManager.dialogProperties(isScreenProtectionEnabled),
+        properties = ScreenSecurityManager.dialogProperties(),
         title = { Text("Ταυτότητα και Ασφάλεια") },
         text = {
             Column(
@@ -312,26 +308,18 @@ internal fun IdentityDetailsDialog(
                     }
                 }
                 HorizontalDivider()
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Προστασία Οθόνης (Screenshot / Εγγραφή)",
-                            style = MaterialTheme.typography.labelMedium
-                        )
-                        Text(
-                            text = "Αποκλείει στιγμιότυπα, εγγραφή οθόνης και προεπισκόπηση στα Πρόσφατα (FLAG_SECURE).",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontSize = 11.sp
-                        )
-                    }
-                    Switch(
-                        checked = isScreenProtectionEnabled,
-                        onCheckedChange = onToggleScreenProtection
+                // Mostramos un estado informativo fijo porque FLAG_SECURE permanece siempre activo.
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "Προστασία Οθόνης: Μόνιμα Ενεργή (FLAG_SECURE)",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "Αποκλείει στιγμιότυπα, εγγραφή οθόνης και προεπισκόπηση στα Πρόσφατα.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 11.sp
                     )
                 }
             }
@@ -344,13 +332,12 @@ internal fun IdentityDetailsDialog(
 
 @Composable
 internal fun GDPRShredConfirmationDialog(
-    isScreenProtectionEnabled: Boolean = true,
     onDismiss: () -> Unit,
     onConfirmShred: () -> Unit
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        properties = ScreenSecurityManager.dialogProperties(isScreenProtectionEnabled),
+        properties = ScreenSecurityManager.dialogProperties(),
         title = { Text("Οριστική Διαγραφή (GDPR Art. 17)") },
         text = {
             Column(
@@ -380,14 +367,13 @@ internal fun MLSProtocolInspectorDialog(
     localInboxId: String,
     messageCount: Int,
     contactNickname: String? = null,
-    isScreenProtectionEnabled: Boolean = true,
     onEditContactNickname: (() -> Unit)? = null,
     onDismiss: () -> Unit,
     onCopyTopic: () -> Unit
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        properties = ScreenSecurityManager.dialogProperties(isScreenProtectionEnabled),
+        properties = ScreenSecurityManager.dialogProperties(),
         title = {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
@@ -496,7 +482,6 @@ internal fun EditContactNicknameDialog(
     targetLabel: String,
     currentLocalNickname: String?,
     sharedPeerNickname: String?,
-    isScreenProtectionEnabled: Boolean = true,
     onDismiss: () -> Unit,
     onSave: (String) -> Unit
 ) {
@@ -505,7 +490,7 @@ internal fun EditContactNicknameDialog(
     }
     AlertDialog(
         onDismissRequest = onDismiss,
-        properties = ScreenSecurityManager.dialogProperties(isScreenProtectionEnabled),
+        properties = ScreenSecurityManager.dialogProperties(),
         title = { Text("Ψευδώνυμο Επαφής") },
         text = {
             Column(
@@ -585,13 +570,12 @@ private fun InspectorParamRow(label: String, value: String) {
 internal fun AppUpdateDialog(
     updateStatus: UpdateStatus,
     canRequestInstall: Boolean,
-    isScreenProtectionEnabled: Boolean = true,
     onDownload: (AppUpdateInfo) -> Unit,
     onInstall: (File) -> Unit,
     onOpenSettings: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val dialogProperties = ScreenSecurityManager.dialogProperties(isScreenProtectionEnabled)
+    val dialogProperties = ScreenSecurityManager.dialogProperties()
     when (updateStatus) {
         is UpdateStatus.UpdateAvailable -> {
             val info = updateStatus.updateInfo
@@ -716,7 +700,6 @@ internal fun AppUpdateDialog(
             AlertDialog(
                 onDismissRequest = { /* Modal during active download */ },
                 properties = ScreenSecurityManager.dialogProperties(
-                    enabled = isScreenProtectionEnabled,
                     dismissOnBackPress = false,
                     dismissOnClickOutside = false
                 ),

@@ -293,7 +293,6 @@ internal fun QrDownloadFullDialog(
     currentVersion: String,
     updateStatus: UpdateStatus,
     downloadUrl: String = UpdateConfig.LATEST_APK_DOWNLOAD_URL,
-    isScreenProtectionEnabled: Boolean = true,
     onCopyUrl: () -> Unit,
     onOpenDownloadUrl: () -> Unit,
     onDismiss: () -> Unit
@@ -306,7 +305,7 @@ internal fun QrDownloadFullDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        properties = ScreenSecurityManager.dialogProperties(isScreenProtectionEnabled),
+        properties = ScreenSecurityManager.dialogProperties(),
         title = { Text("Λήψη Τελευταίας Έκδοσης (QR)") },
         text = {
             Column(

@@ -41,7 +41,6 @@ import kotlinx.coroutines.sync.withLock
 import java.util.UUID
 import org.xmtp.android.library.Conversation
 
-
 /**
  * Action log entry capturing runtime operations, security milestones, and benchmark latencies.
  */
@@ -70,7 +69,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     val unreadCounts: StateFlow<Map<String, Int>> = sessionContainer.unreadCounts
     val nicknameSnapshot: StateFlow<NicknameSnapshot> = sessionContainer.nicknameSnapshot
     val peerReadTimestamps: StateFlow<Map<String, Long>> = repository.peerReadTimestamps
-    val isScreenProtectionEnabled: StateFlow<Boolean> = sessionContainer.isScreenProtectionEnabled
 
     private val _isScreenRecordingActive = MutableStateFlow(false)
     val isScreenRecordingActive: StateFlow<Boolean> = _isScreenRecordingActive.asStateFlow()
@@ -481,23 +479,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 maybeSendReadReceipt(currentConv, currentMsgs)
             }
         }
-    }
-
-    fun setScreenProtectionEnabled(enabled: Boolean) {
-        sessionContainer.screenSecurityStore.setScreenProtectionEnabled(enabled)
-        _statusBanner.value = if (enabled) {
-            "Η προστασία οθόνης (FLAG_SECURE) ενεργοποιήθηκε."
-        } else {
-            "Η προστασία οθόνης απενεργοποιήθηκε προσωρινά."
-        }
-        logAction(
-            tag = "SECURITY",
-            message = if (enabled) {
-                "Screen protection enabled (FLAG_SECURE + Recents privacy)"
-            } else {
-                "Screen protection disabled by user override"
-            }
-        )
     }
 
     fun onScreenCaptureAttemptDetected() {
@@ -957,7 +938,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
-
 
     fun checkForUpdates(manual: Boolean = false) {
         viewModelScope.launch {

@@ -65,7 +65,6 @@ internal fun InboxDashboardScreen(
     conversations: List<Conversation>,
     unreadCounts: Map<String, Int> = emptyMap(),
     nicknameSnapshot: NicknameSnapshot = NicknameSnapshot(),
-    isScreenProtectionEnabled: Boolean = true,
     engineState: XmtpEngineState,
     isCreatingConversation: Boolean,
     isShredding: Boolean = false,
@@ -96,7 +95,6 @@ internal fun InboxDashboardScreen(
             item(key = "security_status") {
                 SecurityEngineStatusCard(
                     engineState = engineState,
-                    isScreenProtectionEnabled = isScreenProtectionEnabled
                 )
             }
 

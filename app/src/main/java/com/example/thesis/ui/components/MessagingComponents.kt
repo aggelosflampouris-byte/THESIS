@@ -303,7 +303,6 @@ internal fun MessagingNotice(title: String, text: String) {
 @Composable
 internal fun SecurityEngineStatusCard(
     engineState: XmtpEngineState,
-    isScreenProtectionEnabled: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     Card(
@@ -378,9 +377,8 @@ internal fun SecurityEngineStatusCard(
                 StatusBadge(icon = Icons.Default.Lock, text = "SQLCipher 4.6.1")
                 StatusBadge(icon = Icons.Default.Build, text = "Keystore KEK")
                 StatusBadge(icon = Icons.Default.Refresh, text = "MLS Ratchet")
-                if (isScreenProtectionEnabled) {
-                    StatusBadge(icon = Icons.Default.Lock, text = "Anti-Capture")
-                }
+                // Mostramos siempre el distintivo porque la proteccion anti-captura es permanente.
+                StatusBadge(icon = Icons.Default.Lock, text = "Anti-Capture")
             }
         }
     }
@@ -412,38 +410,6 @@ private fun StatusBadge(icon: ImageVector, text: String, modifier: Modifier = Mo
                 fontWeight = FontWeight.Medium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
-            )
-        }
-    }
-}
-
-@Composable
-internal fun ScreenRecordingWarningBanner(modifier: Modifier = Modifier) {
-    Surface(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 4.dp),
-        shape = RoundedCornerShape(10.dp),
-        color = MaterialTheme.colorScheme.errorContainer
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Icon(
-                imageVector = Icons.Default.Info,
-                contentDescription = null,
-                modifier = Modifier.size(16.dp),
-                tint = MaterialTheme.colorScheme.onErrorContainer
-            )
-            Text(
-                text = "Εντοπίστηκε εγγραφή οθόνης — η προστασία οθόνης είναι απενεργοποιημένη",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onErrorContainer,
-                fontWeight = FontWeight.SemiBold
             )
         }
     }
