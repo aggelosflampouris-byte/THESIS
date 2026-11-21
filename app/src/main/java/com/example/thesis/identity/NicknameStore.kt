@@ -18,6 +18,7 @@ interface NicknameStorage {
     fun setMyNickname(nickname: String?): String?
     fun setLocalContactNickname(key: String, nickname: String?): String?
     fun setSharedPeerNickname(peerInboxId: String, nickname: String?): String?
+    fun replaceAll(snapshot: NicknameSnapshot)
     fun clear()
 }
 
@@ -118,6 +119,17 @@ internal object NicknameStoreCodec {
         }
         return result
     }
+
+    // Reutilizamos un unico sanitizador al reemplazar todos los apodos tras importar una cuenta.
+    fun sanitizeSnapshot(snapshot: NicknameSnapshot): NicknameSnapshot {
+        fun cleanMap(raw: Map<String, String>): Map<String, String> =
+            deserializeMap(serializeMap(raw))
+        return NicknameSnapshot(
+            myNickname = NicknamePolicy.sanitize(snapshot.myNickname),
+            localNicknames = cleanMap(snapshot.localNicknames),
+            sharedNicknames = cleanMap(snapshot.sharedNicknames)
+        )
+    }
 }
 
 class InMemoryNicknameStorage : NicknameStorage {
@@ -166,6 +178,13 @@ class InMemoryNicknameStorage : NicknameStorage {
             }
         }
         return clean
+    }
+
+    override fun replaceAll(snapshot: NicknameSnapshot) {
+        val sanitized = NicknameStoreCodec.sanitizeSnapshot(snapshot)
+        synchronized(lock) {
+            _snapshot.value = sanitized
+        }
     }
 
     override fun clear() {
@@ -237,6 +256,19 @@ internal class SharedPrefsNicknameStore(context: Context) : NicknameStorage {
             _snapshot.update { it.copy(sharedNicknames = updatedMap) }
         }
         return clean
+    }
+
+    override fun replaceAll(snapshot: NicknameSnapshot) {
+        val sanitized = NicknameStoreCodec.sanitizeSnapshot(snapshot)
+        synchronized(lock) {
+            // Persistimos todo el mapa sanitizado de forma sincrona al completar la migracion.
+            prefs().edit().apply {
+                if (sanitized.myNickname != null) putString(KEY_MY_NICKNAME, sanitized.myNickname) else remove(KEY_MY_NICKNAME)
+                putString(KEY_LOCAL_NICKNAMES, NicknameStoreCodec.serializeMap(sanitized.localNicknames))
+                putString(KEY_SHARED_NICKNAMES, NicknameStoreCodec.serializeMap(sanitized.sharedNicknames))
+            }.commit()
+            _snapshot.value = sanitized
+        }
     }
 
     override fun clear() {

@@ -106,7 +106,7 @@ class ConversationRepositoryTest {
         every { mockConversation.id } returns testConvId
         coEvery { mockConversations.findConversation(testConvId) } returns mockConversation
         coEvery { mockConversations.list() } returns emptyList()
-        coEvery { mockConversations.list(null, null, null, any()) } returns emptyList()
+        coEvery { mockConversations.list(consentStates = any()) } returns emptyList()
 
         coEvery { mockClient.canMessage(any()) } returns mapOf(testPeerAddress to true)
 
@@ -146,7 +146,7 @@ class ConversationRepositoryTest {
         every { mockConv2.createdAt } returns date2
 
         coEvery { mockConversations.list() } returns listOf(mockConv1)
-        coEvery { mockConversations.list(null, null, null, any()) } returns listOf(mockConv1)
+        coEvery { mockConversations.list(consentStates = any()) } returns listOf(mockConv1)
         every { mockConversations.stream() } returns convStream.asSharedFlow()
 
         repository.observeConversations().test {
@@ -169,7 +169,7 @@ class ConversationRepositoryTest {
             cancelAndIgnoreRemainingEvents()
         }
 
-        coVerify(atLeast = 1) { mockConversations.list(null, null, null, any()) }
+        coVerify(atLeast = 1) { mockConversations.list(consentStates = any()) }
     }
 
     /**
@@ -254,7 +254,7 @@ class ConversationRepositoryTest {
         val messagePayload = "Encrypted MLS Ratchet Payload Content"
         val expectedPublishedId = "msg_published_ack_101"
 
-        every { mockConversation.prepareMessage(messagePayload) } returns expectedPublishedId
+        coEvery { mockConversation.prepareMessage(messagePayload) } returns expectedPublishedId
         coEvery { mockConversation.publishMessages() } returns Unit
         coEvery { mockConversation.send(messagePayload) } returns expectedPublishedId
 
@@ -388,7 +388,7 @@ class ConversationRepositoryTest {
     fun test_sendMessage_optimisticDispatch_successEmitsPendingThenPublished() = runTest(testDispatcher) {
         val publishedMessageId = "msg_published_999"
         coEvery { mockConversation.send("Hello XMTP MLS") } returns publishedMessageId
-        every { mockConversation.prepareMessage("Hello XMTP MLS") } returns publishedMessageId
+        coEvery { mockConversation.prepareMessage("Hello XMTP MLS") } returns publishedMessageId
         coEvery { mockConversation.publishMessages() } returns Unit
         every { mockConversation.streamMessages() } returns flowOf()
         coEvery { mockConversation.messages() } returns emptyList()
@@ -426,7 +426,7 @@ class ConversationRepositoryTest {
     @Test
     fun test_sendMessage_networkFailure_emitsPendingThenFailed() = runTest(testDispatcher) {
         val networkEx = IOException("gRPC connection reset")
-        every { mockConversation.prepareMessage("Failing Message") } returns "opt_fail_1"
+        coEvery { mockConversation.prepareMessage("Failing Message") } returns "opt_fail_1"
         coEvery { mockConversation.publishMessages() } throws networkEx
         coEvery { mockConversation.send("Failing Message") } throws networkEx
         every { mockConversation.streamMessages() } returns flowOf()
@@ -812,7 +812,7 @@ class ConversationRepositoryTest {
         every { newMsg.body } returns "Background message"
         every { newMsg.sentAt } returns Date(2000L)
 
-        coEvery { mockConversations.list(any(), any(), any(), any()) } returns listOf(mockConversation)
+        coEvery { mockConversations.list(consentStates = any()) } returns listOf(mockConversation)
         coEvery { mockConversation.messages() } returns listOf(oldMsg)
 
         val repoScope = CoroutineScope(SupervisorJob() + testDispatcher)
@@ -871,7 +871,7 @@ class ConversationRepositoryTest {
         every { missedMsg.sentAt } returns Date(2000L)
 
         val sharedStorage = InMemorySeenMessageStorage()
-        coEvery { mockConversations.list(any(), any(), any(), any()) } returns listOf(mockConversation)
+        coEvery { mockConversations.list(consentStates = any()) } returns listOf(mockConversation)
         coEvery { mockConversation.messages() } returns listOf(oldMsg)
 
         val scope1 = CoroutineScope(SupervisorJob() + testDispatcher)

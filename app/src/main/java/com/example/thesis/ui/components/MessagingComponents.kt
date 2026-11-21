@@ -60,6 +60,7 @@ import com.example.thesis.identity.NicknameSnapshot
 import com.example.thesis.xmtp.XmtpEngineState
 import org.xmtp.android.library.Conversation
 import java.util.Locale
+import com.example.thesis.xmtp.cachedGroupName
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -82,7 +83,7 @@ internal fun MessagingTopBar(
             if (selectedConversation != null) {
                 val isDm = selectedConversation is Conversation.Dm
                 val isLoopback = selectedConversation is Conversation.Group &&
-                    selectedConversation.group.name == "MLS Research Loopback"
+                    selectedConversation.group.cachedGroupName() == "MLS Research Loopback"
                 val contactKey = if (isDm) selectedConversation.dm.peerInboxId else selectedConversation.id
                 val maskedPeer = if (isDm) {
                     val peer = selectedConversation.dm.peerInboxId
@@ -90,7 +91,7 @@ internal fun MessagingTopBar(
                 } else {
                     selectedConversation.topic.take(16)
                 }
-                val groupName = (selectedConversation as? Conversation.Group)?.group?.name
+                val groupName = (selectedConversation as? Conversation.Group)?.group?.cachedGroupName()
                 val resolvedNick = NicknamePolicy.resolveContactNickname(contactKey, nicknameSnapshot)
                 val headerTitle = when {
                     resolvedNick != null -> resolvedNick

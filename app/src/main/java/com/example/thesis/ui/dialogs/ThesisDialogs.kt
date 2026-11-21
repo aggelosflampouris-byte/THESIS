@@ -157,6 +157,8 @@ internal fun IdentityDetailsDialog(
     onCheckForUpdates: () -> Unit = {},
     onOpenNotificationSettings: () -> Unit = {},
     onOpenServiceNotificationSettings: () -> Unit = {},
+    onTransferToNewDevice: () -> Unit = {},
+    onReceiveFromOldDevice: () -> Unit = {},
     onCopyAddress: () -> Unit,
     onCopyInboxId: () -> Unit,
     onDismiss: () -> Unit
@@ -305,6 +307,26 @@ internal fun IdentityDetailsDialog(
                     )
                     TextButton(onClick = onOpenServiceNotificationSettings) {
                         Text(if (isServiceNotificationVisible) "Απόκρυψη" else "Κανάλι", fontSize = 12.sp)
+                    }
+                }
+                HorizontalDivider()
+                Text("Μεταφορά Συσκευής (Wi-Fi / QR)", style = MaterialTheme.typography.labelMedium)
+                Text(
+                    text = "Άμεση κρυπτογραφημένη μεταφορά ταυτότητας, ιστορικού MLS και ψευδωνύμων σε νέα συσκευή.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 11.sp
+                )
+                FlowRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    OutlinedButton(onClick = onTransferToNewDevice) {
+                        Text("Εξαγωγή σε Νέα Συσκευή", fontSize = 12.sp)
+                    }
+                    OutlinedButton(onClick = onReceiveFromOldDevice) {
+                        Text("Εισαγωγή από Παλιά", fontSize = 12.sp)
                     }
                 }
                 HorizontalDivider()

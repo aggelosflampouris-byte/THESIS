@@ -5,7 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import androidx.activity.ComponentActivity
+import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -65,8 +65,15 @@ import com.example.thesis.updater.UpdateStatus
 import com.example.thesis.xmtp.XmtpEngineState
 import kotlinx.coroutines.launch
 import java.util.function.Consumer
+import com.example.thesis.xmtp.cachedGroupName
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import com.example.thesis.security.DeviceAuthHelper
+import com.example.thesis.ui.DeviceTransferState
+import com.example.thesis.ui.dialogs.DeviceTransferDialog
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
 
     private val viewModel: ChatViewModel by viewModels()
     // Almacenamos como Any? para evitar verificacion de clases de API 34+ al cargar la actividad en Android antiguo.
@@ -152,6 +159,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     val nicknameSnapshot by viewModel.nicknameSnapshot.collectAsState()
     val peerReadTimestamps by viewModel.peerReadTimestamps.collectAsState()
     val isScreenRecordingActive by viewModel.isScreenRecordingActive.collectAsState()
+    val deviceTransferState by viewModel.deviceTransferState.collectAsState()
 
     val updateStatus by viewModel.updateStatus.collectAsState()
     var showUpdateDialog by rememberSaveable { mutableStateOf(false) }
@@ -161,6 +169,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     var showLogsScreen by rememberSaveable { mutableStateOf(false) }
     var showProtocolInspectorDialog by rememberSaveable { mutableStateOf(false) }
     var showQrDownloadDialog by rememberSaveable { mutableStateOf(false) }
+    var showExportNoLockConfirmDialog by rememberSaveable { mutableStateOf(false) }
     var nicknameEditTarget by remember { mutableStateOf<Conversation?>(null) }
 
     var draft by rememberSaveable(selectedConversation?.id) { mutableStateOf("") }
@@ -212,6 +221,29 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
         )
         scope.launch {
             snackbarHostState.showSnackbar("Ο σύνδεσμος λήψης αντιγράφηκε στο πρόχειρο")
+        }
+    }
+
+    val requestDeviceTransferSend: () -> Unit = {
+        val hostActivity = context as? FragmentActivity
+        if (hostActivity == null) {
+            scope.launch {
+                snackbarHostState.showSnackbar("Αδύνατη η επαλήθευση συσκευής.")
+            }
+        } else {
+            DeviceAuthHelper.authenticateForSensitiveExport(
+                activity = hostActivity,
+                onAuthenticated = {
+                    showIdentityDialog = false
+                    viewModel.openSenderTransfer()
+                },
+                onRequiresManualFallback = {
+                    showExportNoLockConfirmDialog = true
+                },
+                onError = { err ->
+                    scope.launch { snackbarHostState.showSnackbar("Σφάλμα επαλήθευσης: $err") }
+                }
+            )
         }
     }
 
@@ -306,6 +338,11 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
             onCheckForUpdates = { viewModel.checkForUpdates(manual = true) },
             onOpenNotificationSettings = { viewModel.openNotificationSettings() },
             onOpenServiceNotificationSettings = { viewModel.openBackgroundServiceChannelSettings() },
+            onTransferToNewDevice = requestDeviceTransferSend,
+            onReceiveFromOldDevice = {
+                showIdentityDialog = false
+                viewModel.startReceiverTransfer()
+            },
             onCopyAddress = {
                 walletAddress?.let { addr ->
                     copyToClipboard(context, "Ethereum Address", addr)
@@ -336,6 +373,46 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
         )
     }
 
+    if (deviceTransferState !is DeviceTransferState.Idle) {
+        DeviceTransferDialog(
+            state = deviceTransferState,
+            onPairingUriSubmitted = { uri -> viewModel.startSendingToPairingUri(uri) },
+            onToggleRevokeOldDevice = { enabled -> viewModel.setRevokeOldDeviceAfterImport(enabled) },
+            onCancel = { viewModel.cancelDeviceTransfer() },
+            onWipeOldDeviceAfterTransfer = {
+                viewModel.cancelDeviceTransfer()
+                viewModel.performCryptoShredding()
+            }
+        )
+    }
+
+    if (showExportNoLockConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showExportNoLockConfirmDialog = false },
+            properties = ScreenSecurityManager.dialogProperties(dismissOnClickOutside = false),
+            title = { Text("Επιβεβαίωση Εξαγωγής Ταυτότητας") },
+            text = {
+                Text("Η συσκευή δεν διαθέτει ενεργό κλείδωμα οθόνης (PIN/βιομετρικά). Θέλετε να προχωρήσετε στη μεταφορά του ιδιωτικού κλειδιού;")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showExportNoLockConfirmDialog = false
+                        showIdentityDialog = false
+                        viewModel.openSenderTransfer()
+                    }
+                ) {
+                    Text("Συνέχεια Εξαγωγής")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showExportNoLockConfirmDialog = false }) {
+                    Text("Ακύρωση")
+                }
+            }
+        )
+    }
+
     if (showQrDownloadDialog) {
         QrDownloadFullDialog(
             currentVersion = viewModel.getCurrentVersionName(),
@@ -361,7 +438,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     val inspectorReadyState = engineState as? XmtpEngineState.Ready
     if (showProtocolInspectorDialog && inspectorConv != null && inspectorReadyState != null) {
         val inspectorKey = if (inspectorConv is Conversation.Dm) inspectorConv.dm.peerInboxId else inspectorConv.id
-        val isLoopbackConv = inspectorConv is Conversation.Group && inspectorConv.group.name == "MLS Research Loopback"
+        val isLoopbackConv = inspectorConv is Conversation.Group && inspectorConv.group.cachedGroupName() == "MLS Research Loopback"
         MLSProtocolInspectorDialog(
             conversation = inspectorConv,
             localInboxId = inspectorReadyState.client.inboxId,
@@ -442,6 +519,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                         is XmtpEngineState.Idle -> {
                             MessagingStartScreen(
                                 onStart = { viewModel.initializeSession() },
+                                onReceiveFromOldDevice = { viewModel.startReceiverTransfer() },
                                 onOpenQrDownload = { showQrDownloadDialog = true },
                                 lastShredProof = lastShredProof,
                                 onCopyShredProof = { proof ->

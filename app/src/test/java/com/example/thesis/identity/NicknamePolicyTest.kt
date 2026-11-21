@@ -87,4 +87,24 @@ class NicknamePolicyTest {
             NicknamePolicy.resolveNotificationSenderTitle("peer_unknown", "conv_3", null, snap)
         )
     }
+
+    @Test
+    fun test_inMemoryStorage_replaceAllSanitizesAndReplacesSnapshot() {
+        val store = InMemoryNicknameStorage()
+        store.setMyNickname("Old Self")
+        store.setLocalContactNickname("old_peer", "Old Peer")
+
+        store.replaceAll(
+            NicknameSnapshot(
+                myNickname = "  New\tSelf  ",
+                localNicknames = mapOf("0xABC" to " Alice ", "" to "Ignored"),
+                sharedNicknames = mapOf("INBOX_2" to "Bob\nTwo", "blank" to "  ")
+            )
+        )
+
+        val updated = store.snapshot.value
+        assertEquals("New Self", updated.myNickname)
+        assertEquals(mapOf("0xabc" to "Alice"), updated.localNicknames)
+        assertEquals(mapOf("inbox_2" to "Bob Two"), updated.sharedNicknames)
+    }
 }

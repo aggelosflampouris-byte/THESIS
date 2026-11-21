@@ -223,6 +223,83 @@ class KeystoreManager(context: Context) {
      *
      * @return [KeystoreResult.Success] with [Unit] on success, or a typed [KeystoreResult.Failure].
      */
+    // Envolvemos bajo el KeyStore local la clave privada importada durante una migracion segura.
+    fun importIdentityPrivateKey(rawPrivateKey: ByteArray): KeystoreResult<Unit> = synchronized(KEYSTORE_LOCK) {
+        var ivBytes: ByteArray? = null
+        var ctBytes: ByteArray? = null
+        return try {
+            if (rawPrivateKey.size != IDENTITY_KEY_SIZE_BYTES) {
+                return KeystoreResult.Failure.IntegrityViolation(
+                    message = "Invalid secp256k1 identity key size: ${rawPrivateKey.size} bytes.",
+                    cause = IllegalArgumentException("Expected $IDENTITY_KEY_SIZE_BYTES-byte secp256k1 private key")
+                )
+            }
+            try {
+                com.example.thesis.identity.ThesisSigner.fromPrivateKey(rawPrivateKey).close()
+            } catch (e: Exception) {
+                return KeystoreResult.Failure.IntegrityViolation(
+                    message = "Imported identity private key failed secp256k1 curve validation: ${e.message}",
+                    cause = e
+                )
+            }
+
+            val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE_PROVIDER).apply { load(null) }
+            val kek: SecretKey = (keyStore.getKey(KEK_ALIAS, null) as? SecretKey)
+                ?: generateHardwareKey(keyStore)
+
+            val prefs = openEncryptedPreferences()
+            val (iv, ciphertext) = encryptPayload(kek = kek, payload = rawPrivateKey)
+            ivBytes = iv
+            ctBytes = ciphertext
+
+            val ivBase64 = Base64.encodeToString(iv, Base64.NO_WRAP)
+            val ctBase64 = Base64.encodeToString(ciphertext, Base64.NO_WRAP)
+
+            val committed = prefs.edit()
+                .putString(PREF_IDENTITY_KEY_IV, ivBase64)
+                .putString(PREF_ENCRYPTED_IDENTITY_KEY, ctBase64)
+                .commit()
+
+            if (!committed) {
+                KeystoreResult.Failure.StorageError(
+                    message = "Synchronous SharedPreferences commit failed while persisting imported identity key.",
+                    cause = IOException("SharedPreferences.commit() returned false")
+                )
+            } else {
+                ThesisTelemetry.recordMetric("KEYSTORE: IDENTITY_IMPORTED", 0.0, true)
+                KeystoreResult.Success(Unit)
+            }
+        } catch (e: UserNotAuthenticatedException) {
+            KeystoreResult.Failure.UserNotAuthenticated(
+                message = "Device authentication is required to access hardware KeyStore.",
+                cause = e
+            )
+        } catch (e: KeyStoreException) {
+            KeystoreResult.Failure.KeystoreError(
+                message = "Android KeyStore failure during identity key import: ${e.message}",
+                cause = e
+            )
+        } catch (e: GeneralSecurityException) {
+            KeystoreResult.Failure.KeystoreError(
+                message = "Cryptographic failure during identity key import: ${e.message}",
+                cause = e
+            )
+        } catch (e: IOException) {
+            KeystoreResult.Failure.StorageError(
+                message = "I/O failure accessing encrypted preferences storage: ${e.message}",
+                cause = e
+            )
+        } catch (e: Exception) {
+            KeystoreResult.Failure.Unknown(
+                message = "Unexpected failure during identity key import: ${e.message}",
+                cause = e
+            )
+        } finally {
+            ivBytes?.fill(0)
+            ctBytes?.fill(0)
+        }
+    }
+
     fun deleteKeystoreEntry(): KeystoreResult<Unit> = synchronized(KEYSTORE_LOCK) {
         return try {
             val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE_PROVIDER).apply { load(null) }

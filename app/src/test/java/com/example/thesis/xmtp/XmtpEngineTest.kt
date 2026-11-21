@@ -90,7 +90,7 @@ class XmtpEngineTest {
 
         mockClient = mockk(relaxed = true)
         every { mockClient.inboxId } returns "inbox_test_12345"
-        every { mockClient.dropLocalDatabaseConnection() } returns Unit
+        coEvery { mockClient.dropLocalDatabaseConnection() } returns Unit
 
         coEvery { Client.create(any(), any()) } returns mockClient
 
@@ -248,7 +248,7 @@ class XmtpEngineTest {
         testScheduler.advanceUntilIdle()
 
         // Verify native cleanup was dispatched
-        verify(exactly = 1) { mockClient.dropLocalDatabaseConnection() }
+        coVerify(exactly = 1) { mockClient.dropLocalDatabaseConnection() }
 
         // Assert all background coroutine jobs have terminated
         assertFalse("Background engine scope children must terminate after shutdown", engine.hasActiveJobs)
@@ -362,7 +362,7 @@ class XmtpEngineTest {
 
         assertEquals("State must reset to Idle", XmtpEngineState.Idle, engine.state.value)
         assertNull("Client must be cleared", engine.client)
-        verify(exactly = 1) { mockClient.dropLocalDatabaseConnection() }
+        coVerify(exactly = 1) { mockClient.dropLocalDatabaseConnection() }
         assertFalse("Background engine jobs must be stopped before returning", engine.hasActiveJobs)
     }
 }

@@ -28,6 +28,8 @@ import org.xmtp.android.library.Conversation
 import org.xmtp.android.library.XMTPEnvironment
 import org.xmtp.android.library.libxmtp.DecodedMessage
 import java.util.Collections
+import com.example.thesis.xmtp.cachedGroupName
+import com.example.thesis.transfer.TransferFileHygiene
 
 internal class ThesisSessionContainer(context: Context) {
 
@@ -82,6 +84,7 @@ internal class ThesisSessionContainer(context: Context) {
         notificationManager.ensureChannelCreated()
         // Purgamos preferencias heredadas al iniciar para garantizar proteccion inmutable.
         ScreenSecurityManager.purgeLegacyPreference(appContext)
+        TransferFileHygiene.purgeTransferCache(appContext.cacheDir)
         appScope.launch {
             repository.incomingMessages.collect { incoming ->
                 handleIncomingMessage(incoming)
@@ -141,7 +144,7 @@ internal class ThesisSessionContainer(context: Context) {
         notificationManager.cancelConversationNotification(conversationId)
     }
 
-    fun resetOnGdprShred() {
+    fun resetOnGdprShred(purgeTransferCache: Boolean = true) {
         synchronized(notifiedMessageIds) {
             notifiedMessageIds.clear()
         }
@@ -151,6 +154,10 @@ internal class ThesisSessionContainer(context: Context) {
         repository.resetNotificationBaseline()
         nicknameStore.clear()
         ScreenSecurityManager.purgeLegacyPreference(appContext)
+        // Conservamos el archivo de transferencia entrante cuando reseteamos sesion previa justo antes de importarlo.
+        if (purgeTransferCache) {
+            TransferFileHygiene.purgeTransferCache(appContext.cacheDir)
+        }
         XmtpMessagingService.stop(appContext)
         BackgroundSyncScheduler.cancelAll(appContext)
         notificationManager.cancelAllNotifications()
@@ -246,7 +253,7 @@ internal class ThesisSessionContainer(context: Context) {
         val conv = conversationsSnapshot.firstOrNull { it.id == msg.conversationId }
         val explicitName = when (conv) {
             is Conversation.Group -> {
-                val name = conv.group.name
+                val name = conv.group.cachedGroupName()
                 when {
                     name == "MLS Research Loopback" -> "Loopback MLS"
                     name.isNotBlank() -> name

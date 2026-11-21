@@ -50,6 +50,7 @@ import com.example.thesis.xmtp.XmtpInitError
 @Composable
 internal fun MessagingStartScreen(
     onStart: () -> Unit,
+    onReceiveFromOldDevice: () -> Unit = {},
     onOpenQrDownload: () -> Unit = {},
     lastShredProof: ShredAuditProof? = null,
     onCopyShredProof: (ShredAuditProof) -> Unit = {},
@@ -112,6 +113,18 @@ internal fun MessagingStartScreen(
             ) {
                 Text(
                     text = "Εκκίνηση Hardware Keystore & XMTP MLS",
+                    textAlign = TextAlign.Center
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            OutlinedButton(
+                onClick = onReceiveFromOldDevice,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+            ) {
+                Text(
+                    text = "Μεταφορά από Παλιά Συσκευή (QR)",
                     textAlign = TextAlign.Center
                 )
             }

@@ -59,6 +59,7 @@ import com.example.thesis.ui.components.SecurityEngineStatusCard
 import com.example.thesis.updater.UpdateStatus
 import com.example.thesis.xmtp.XmtpEngineState
 import org.xmtp.android.library.Conversation
+import com.example.thesis.xmtp.cachedGroupName
 
 @Composable
 internal fun InboxDashboardScreen(
@@ -323,7 +324,7 @@ private fun ConversationItemCard(
     modifier: Modifier = Modifier
 ) {
     val isDm = conversation is Conversation.Dm
-    val isLoopback = conversation is Conversation.Group && conversation.group.name == "MLS Research Loopback"
+    val isLoopback = conversation is Conversation.Group && conversation.group.cachedGroupName() == "MLS Research Loopback"
     val contactKey = if (isDm) conversation.dm.peerInboxId else conversation.id
     val maskedPeer = when {
         isDm -> {
@@ -333,7 +334,7 @@ private fun ConversationItemCard(
         conversation is Conversation.Group -> "Ομάδα MLS: ${conversation.id.take(8)}..."
         else -> "Συνομιλία $index: ${conversation.topic.take(18)}..."
     }
-    val groupName = (conversation as? Conversation.Group)?.group?.name
+    val groupName = (conversation as? Conversation.Group)?.group?.cachedGroupName()
     val title = NicknamePolicy.resolveConversationTitle(
         conversationKey = contactKey,
         isDm = isDm,

@@ -40,6 +40,19 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.withLock
 import java.util.UUID
 import org.xmtp.android.library.Conversation
+import com.example.thesis.xmtp.cachedGroupName
+import com.example.thesis.security.KeystoreResult
+import com.example.thesis.transfer.DeviceTransferClient
+import com.example.thesis.transfer.DeviceTransferCrypto
+import com.example.thesis.transfer.DeviceTransferProtocol
+import com.example.thesis.transfer.DeviceTransferServer
+import com.example.thesis.transfer.LocalNetworkAddressResolver
+import com.example.thesis.transfer.ReceivedTransferBundle
+import com.example.thesis.transfer.TransferFileHygiene
+import com.example.thesis.transfer.TransferImportResult
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 
 /**
  * Action log entry capturing runtime operations, security milestones, and benchmark latencies.
@@ -52,6 +65,33 @@ data class ActionLogEntry(
     val durationMs: Double? = null,
     val isError: Boolean = false
 )
+
+sealed interface DeviceTransferState {
+    data object Idle : DeviceTransferState
+    data class AwaitingScan(val walletAddress: String) : DeviceTransferState
+    data class Sending(val progress: Float, val statusMessage: String) : DeviceTransferState
+    data class SendCompleted(
+        val newInstallationId: String?,
+        val importedHistory: Boolean,
+        val revokedOldInstallations: Boolean
+    ) : DeviceTransferState
+    data class WaitingForSender(
+        val pairingUri: String,
+        val sasCode: String,
+        val hostDisplay: String,
+        val port: Int,
+        val revokeOldDevice: Boolean,
+        val hasExistingSessionToReplace: Boolean
+    ) : DeviceTransferState
+    data class Receiving(val progress: Float, val statusMessage: String) : DeviceTransferState
+    data class ApplyingImport(val statusMessage: String) : DeviceTransferState
+    data class ReceiveCompleted(
+        val walletAddress: String,
+        val importedHistory: Boolean,
+        val revokedOldInstallations: Boolean
+    ) : DeviceTransferState
+    data class Error(val message: String, val isSender: Boolean) : DeviceTransferState
+}
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -72,6 +112,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _isScreenRecordingActive = MutableStateFlow(false)
     val isScreenRecordingActive: StateFlow<Boolean> = _isScreenRecordingActive.asStateFlow()
+
+    private val _deviceTransferState = MutableStateFlow<DeviceTransferState>(DeviceTransferState.Idle)
+    val deviceTransferState: StateFlow<DeviceTransferState> = _deviceTransferState.asStateFlow()
+
+    private var transferJob: Job? = null
+
+    @Volatile
+    private var activeTransferServer: DeviceTransferServer? = null
+
+    @Volatile
+    private var revokeOldAfterImport: Boolean = true
 
     private var messagesJob: Job? = null
 
@@ -221,7 +272,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val convType = when (conv) {
                     is Conversation.Dm -> "DM"
                     is Conversation.Group -> {
-                        val name = conv.group.name
+                        val name = conv.group.cachedGroupName()
                         if (name == "MLS Research Loopback") "Loopback Group"
                         else if (name.isNotBlank()) "Group ($name)"
                         else "Group (MLS)"
@@ -292,7 +343,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     val peer = when (conv) {
                         is Conversation.Dm -> "DM (Peer: `${conv.dm.peerInboxId.take(16)}...`)"
                         is Conversation.Group -> {
-                            val name = conv.group.name
+                            val name = conv.group.cachedGroupName()
                             if (name == "MLS Research Loopback") "Loopback Group"
                             else if (name.isNotBlank()) "Group: `$name`"
                             else "Group: `MLS`"
@@ -578,7 +629,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun isLoopbackConversation(conversation: Conversation): Boolean =
-        conversation is Conversation.Group && conversation.group.name == "MLS Research Loopback"
+        conversation is Conversation.Group && conversation.group.cachedGroupName() == "MLS Research Loopback"
 
     private fun maybeSendReadReceipt(conversation: Conversation, messages: List<DecodedMessage>) {
         val localInboxId = (engine.state.value as? XmtpEngineState.Ready)?.client?.inboxId ?: return
@@ -781,21 +832,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 sessionStateMutex.withLock {
-                    messagesJob?.cancel()
-                    _selectedConversation.value = null
-                    _messages.value = emptyList()
-                    _conversations.value = emptyList()
-
                     // Limpiamos los registros de la sesion anterior antes de medir el borrado para conservar las metricas y el certificado GDPR.
-                    committedProofMap.clear()
-                    _verifiedMessageCount.value = 0
-                    loggedMessageIds.clear()
-                    lastSentReceiptPeerMsgId.clear()
-                    lastAnnouncedNicknameByConv.clear()
-                    _pendingNotificationConversationId.value = null
-                    _actionLogs.value = emptyList()
-                    ThesisTelemetry.clearTelemetryData()
-                    ReportExporter.purgeCachedReports(appContext.cacheDir)
+                    clearLocalConversationUiState(clearLogsAndTelemetry = true)
 
                     logAction("GDPR", "Executing GDPR Art. 17 cryptographic wipe...")
 
@@ -874,7 +912,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 try {
                     // Aislamos el benchmark al grupo loopback para nunca enviar sondas de prueba a un DM con otro dispositivo.
                     var activeConv: Conversation? = _conversations.value.firstOrNull { conv ->
-                        conv is Conversation.Group && conv.group.name == "MLS Research Loopback"
+                        conv is Conversation.Group && conv.group.cachedGroupName() == "MLS Research Loopback"
                     }
                     if (activeConv == null) {
                         logAction("BENCHMARK", "Establishing dedicated MLS loopback ratchet...")
@@ -989,7 +1027,365 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openInstallPermissionSettings() = appUpdateManager.openInstallPermissionSettings()
 
+    private fun clearLocalConversationUiState(clearLogsAndTelemetry: Boolean) {
+        messagesJob?.cancel()
+        _selectedConversation.value = null
+        _messages.value = emptyList()
+        _conversations.value = emptyList()
+        committedProofMap.clear()
+        _verifiedMessageCount.value = 0
+        loggedMessageIds.clear()
+        lastSentReceiptPeerMsgId.clear()
+        lastAnnouncedNicknameByConv.clear()
+        _pendingNotificationConversationId.value = null
+        if (clearLogsAndTelemetry) {
+            _actionLogs.value = emptyList()
+            ThesisTelemetry.clearTelemetryData()
+            ReportExporter.purgeCachedReports(appContext.cacheDir)
+        }
+    }
+
+    fun openSenderTransfer() {
+        val currentAddress = walletAddress.value
+        if (engine.state.value !is XmtpEngineState.Ready || currentAddress.isNullOrBlank()) {
+            _deviceTransferState.value = DeviceTransferState.Error(
+                message = "Απαιτείται ενεργή συνεδρία XMTP για εξαγωγή.",
+                isSender = true
+            )
+            return
+        }
+        cancelTransferBackgroundWorkOnly()
+        _deviceTransferState.value = DeviceTransferState.AwaitingScan(currentAddress)
+    }
+
+    fun startSendingToPairingUri(rawUri: String) {
+        val pairingInfo = DeviceTransferProtocol.parsePairingUri(rawUri)
+        if (pairingInfo == null) {
+            _deviceTransferState.value = DeviceTransferState.Error(
+                message = "Μη έγκυρος κωδικός ζεύξης QR συσκευής.",
+                isSender = true
+            )
+            return
+        }
+        val currentAddress = walletAddress.value
+        if (engine.state.value !is XmtpEngineState.Ready || currentAddress.isNullOrBlank()) {
+            pairingInfo.wipe()
+            _deviceTransferState.value = DeviceTransferState.Error(
+                message = "Η συνεδρία XMTP δεν είναι ενεργή.",
+                isSender = true
+            )
+            return
+        }
+
+        cancelTransferBackgroundWorkOnly()
+        transferJob = viewModelScope.launch {
+            var archiveKey: ByteArray? = null
+            var identityPrivKey: ByteArray? = null
+            var tempArchiveFile: File? = null
+            try {
+                _deviceTransferState.value = DeviceTransferState.Sending(
+                    progress = 0.05f,
+                    statusMessage = "Εξαγωγή κρυπτογραφημένου ιστορικού MLS..."
+                )
+                archiveKey = DeviceTransferCrypto.deriveSubkey(
+                    pairingInfo.sessionKey,
+                    DeviceTransferProtocol.LABEL_ARCHIVE
+                )
+                tempArchiveFile = withContext(Dispatchers.IO) {
+                    TransferFileHygiene.createTempTransferFile(appContext.cacheDir, "outgoing_archive")
+                }
+                val exportRes = engine.exportEncryptedArchive(tempArchiveFile, archiveKey)
+                if (exportRes.isFailure) {
+                    val err = exportRes.exceptionOrNull()?.message ?: "Άγνωστο σφάλμα εξαγωγής"
+                    _deviceTransferState.value = DeviceTransferState.Error(
+                        message = "Αποτυχία εξαγωγής ιστορικού MLS: $err",
+                        isSender = true
+                    )
+                    logAction("TRANSFER", "Export archive failed: $err", isError = true)
+                    return@launch
+                }
+
+                val privRes = withContext(Dispatchers.IO) {
+                    keystoreManager.getOrCreateIdentityPrivateKey()
+                }
+                identityPrivKey = privRes.getOrNull()
+                if (identityPrivKey == null) {
+                    val err = (privRes as? KeystoreResult.Failure)?.message ?: "Keystore unwrap failed"
+                    _deviceTransferState.value = DeviceTransferState.Error(
+                        message = "Αποτυχία ανάκτησης ιδιωτικού κλειδιού: $err",
+                        isSender = true
+                    )
+                    return@launch
+                }
+
+                val nicknames = sessionContainer.nicknameStore.snapshot.value
+                val seenIds = withContext(Dispatchers.IO) {
+                    sessionContainer.notificationStateStore.loadSeenIds()
+                }
+                val baseline = withContext(Dispatchers.IO) {
+                    sessionContainer.notificationStateStore.isBaselineEstablished()
+                }
+
+                val ack = DeviceTransferClient().send(
+                    pairingInfo = pairingInfo,
+                    walletAddress = currentAddress,
+                    identityPrivateKey = identityPrivKey,
+                    nicknames = nicknames,
+                    seenMessageIds = seenIds,
+                    baselineEstablished = baseline,
+                    archiveFile = tempArchiveFile,
+                    onProgress = { progress, label ->
+                        _deviceTransferState.value = DeviceTransferState.Sending(progress, label)
+                    }
+                )
+
+                if (ack.ok) {
+                    _deviceTransferState.value = DeviceTransferState.SendCompleted(
+                        newInstallationId = ack.newInstallationId,
+                        importedHistory = ack.importedHistory,
+                        revokedOldInstallations = ack.revokedOldInstallations
+                    )
+                    logAction(
+                        tag = "TRANSFER",
+                        message = "Device migration sent & confirmed [history=${ack.importedHistory}, revokedOld=${ack.revokedOldInstallations}]"
+                    )
+                } else {
+                    val msg = ack.errorMessage ?: "Η νέα συσκευή απέρριψε την εισαγωγή."
+                    _deviceTransferState.value = DeviceTransferState.Error(msg, isSender = true)
+                    logAction("TRANSFER", "Receiver reported failure: $msg", isError = true)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (isActive && _deviceTransferState.value !is DeviceTransferState.Idle) {
+                    val msg = e.message ?: "Σφάλμα μεταφοράς Wi-Fi"
+                    _deviceTransferState.value = DeviceTransferState.Error(
+                        message = "Αποτυχία αποστολής: $msg",
+                        isSender = true
+                    )
+                    logAction("TRANSFER", "Sender transfer failed: ${e::class.java.simpleName}: $msg", isError = true)
+                }
+            } finally {
+                archiveKey?.fill(0x00)
+                identityPrivKey?.fill(0x00)
+                pairingInfo.wipe()
+                TransferFileHygiene.shredAndDelete(tempArchiveFile)
+            }
+        }
+    }
+
+    fun startReceiverTransfer(revokeOldDevice: Boolean = true) {
+        cancelTransferBackgroundWorkOnly()
+        revokeOldAfterImport = revokeOldDevice
+        val hasExisting = walletAddress.value != null || keystoreManager.hasPersistedSession()
+
+        transferJob = viewModelScope.launch {
+            var server: DeviceTransferServer? = null
+            try {
+                val hosts = withContext(Dispatchers.IO) {
+                    LocalNetworkAddressResolver.resolveLocalIpv4Hosts()
+                }
+                if (hosts.isEmpty()) {
+                    _deviceTransferState.value = DeviceTransferState.Error(
+                        message = "Δεν βρέθηκε ενεργή σύνδεση Wi-Fi ή Hotspot.",
+                        isSender = false
+                    )
+                    return@launch
+                }
+
+                server = withContext(Dispatchers.IO) {
+                    DeviceTransferServer(hosts = hosts)
+                }
+                activeTransferServer = server
+                val pairing = server.pairingInfo
+                _deviceTransferState.value = DeviceTransferState.WaitingForSender(
+                    pairingUri = pairing.uri,
+                    sasCode = pairing.sasCode,
+                    hostDisplay = pairing.hosts.firstOrNull().orEmpty(),
+                    port = pairing.port,
+                    revokeOldDevice = revokeOldAfterImport,
+                    hasExistingSessionToReplace = hasExisting
+                )
+
+                val result = server.acceptAndReceive(
+                    tempDir = appContext.cacheDir,
+                    onProgress = { progress, status ->
+                        if (_deviceTransferState.value !is DeviceTransferState.ApplyingImport) {
+                            _deviceTransferState.value = DeviceTransferState.Receiving(progress, status)
+                        }
+                    },
+                    onApplyImport = { bundle ->
+                        applyReceivedTransferBundle(bundle)
+                    }
+                )
+
+                if (result.ok) {
+                    _deviceTransferState.value = DeviceTransferState.ReceiveCompleted(
+                        walletAddress = walletAddress.value.orEmpty(),
+                        importedHistory = result.importedHistory,
+                        revokedOldInstallations = result.revokedOldInstallations
+                    )
+                    logAction(
+                        tag = "TRANSFER",
+                        message = "Device migration completed on receiver [history=${result.importedHistory}, revokedOld=${result.revokedOldInstallations}]"
+                    )
+                } else if (_deviceTransferState.value !is DeviceTransferState.Idle) {
+                    _deviceTransferState.value = DeviceTransferState.Error(
+                        message = result.errorMessage ?: "Αποτυχία εισαγωγής δεδομένων.",
+                        isSender = false
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (isActive && _deviceTransferState.value !is DeviceTransferState.Idle) {
+                    val msg = e.message ?: "Λήξη αναμονής ή σφάλμα δικτύου"
+                    _deviceTransferState.value = DeviceTransferState.Error(
+                        message = "Αποτυχία λήψης: $msg",
+                        isSender = false
+                    )
+                    logAction("TRANSFER", "Receiver transfer failed: ${e::class.java.simpleName}: $msg", isError = true)
+                }
+            } finally {
+                server?.cancel()
+                if (activeTransferServer === server) {
+                    activeTransferServer = null
+                }
+            }
+        }
+    }
+
+    fun setRevokeOldDeviceAfterImport(enabled: Boolean) {
+        revokeOldAfterImport = enabled
+        _deviceTransferState.update { current ->
+            if (current is DeviceTransferState.WaitingForSender) {
+                current.copy(revokeOldDevice = enabled)
+            } else {
+                current
+            }
+        }
+    }
+
+    fun cancelDeviceTransfer() {
+        cancelTransferBackgroundWorkOnly()
+        _deviceTransferState.value = DeviceTransferState.Idle
+    }
+
+    private fun cancelTransferBackgroundWorkOnly() {
+        activeTransferServer?.cancel()
+        activeTransferServer = null
+        transferJob?.cancel()
+        transferJob = null
+        TransferFileHygiene.purgeTransferCache(appContext.cacheDir)
+    }
+
+    private suspend fun applyReceivedTransferBundle(bundle: ReceivedTransferBundle): TransferImportResult =
+        sessionStateMutex.withLock {
+            var dekBytes: ByteArray? = null
+            try {
+                _deviceTransferState.value = DeviceTransferState.ApplyingImport(
+                    "Προετοιμασία νέας hardware ταυτότητας..."
+                )
+                val oldAddress = walletAddress.value
+                val hadPriorSession = oldAddress != null || keystoreManager.hasPersistedSession()
+                if (hadPriorSession || engine.state.value !is XmtpEngineState.Idle) {
+                    clearLocalConversationUiState(clearLogsAndTelemetry = false)
+                    engine.shutdownAndAwait()
+                    sessionContainer.resetOnGdprShred(purgeTransferCache = false)
+                    if (!oldAddress.isNullOrBlank()) {
+                        cryptoShredder.shredAccountData(oldAddress)
+                    } else {
+                        withContext(Dispatchers.IO) { keystoreManager.deleteKeystoreEntry() }
+                    }
+                }
+
+                val importKeyRes = withContext(Dispatchers.IO) {
+                    keystoreManager.importIdentityPrivateKey(bundle.identityPrivateKey)
+                }
+                if (importKeyRes is KeystoreResult.Failure) {
+                    return@withLock TransferImportResult(
+                        ok = false,
+                        errorMessage = "Σφάλμα KeyStore: ${importKeyRes.message}"
+                    )
+                }
+
+                val dekRes = withContext(Dispatchers.IO) { keystoreManager.getOrCreateDatabaseKey() }
+                if (dekRes is KeystoreResult.Failure) {
+                    return@withLock TransferImportResult(
+                        ok = false,
+                        errorMessage = "Αποτυχία δημιουργίας τοπικού DEK: ${dekRes.message}"
+                    )
+                }
+                dekBytes = dekRes.getOrThrow()
+
+                withContext(Dispatchers.IO) {
+                    sessionContainer.nicknameStore.replaceAll(bundle.nicknames)
+                    sessionContainer.notificationStateStore.saveSeenIds(bundle.seenMessageIds)
+                    sessionContainer.notificationStateStore.setBaselineEstablished(bundle.baselineEstablished)
+                }
+                repository.reloadNotificationBaselineFromStorage()
+
+                val signer = withContext(Dispatchers.Default) {
+                    ThesisSigner.fromPrivateKey(bundle.identityPrivateKey)
+                }
+                sessionContainer.activeSigner = signer
+                sessionContainer.setWalletAddress(signer.address)
+
+                val dbDirectory = withContext(Dispatchers.IO) {
+                    databaseFactory.resolveAccountDatabaseDirectory(signer.address)
+                }
+                val initState = engine.initialiseAndAwait(
+                    signer = signer,
+                    dbDirectory = dbDirectory,
+                    dbEncryptionKey = dekBytes
+                )
+                if (initState !is XmtpEngineState.Ready) {
+                    val err = (initState as? XmtpEngineState.Error)?.error?.message ?: "Initialization failed"
+                    return@withLock TransferImportResult(ok = false, errorMessage = "Σφάλμα XMTP: $err")
+                }
+
+                var importedHistory = false
+                val archiveFile = bundle.archiveFile
+                val archiveKey = bundle.archiveKey
+                if (archiveFile != null && archiveKey != null) {
+                    _deviceTransferState.value = DeviceTransferState.ApplyingImport(
+                        "Εισαγωγή ιστορικού συνομιλιών MLS..."
+                    )
+                    val archiveRes = engine.importEncryptedArchive(archiveFile, archiveKey)
+                    if (archiveRes.isFailure) {
+                        val err = archiveRes.exceptionOrNull()?.message ?: "Archive import error"
+                        return@withLock TransferImportResult(
+                            ok = false,
+                            errorMessage = "Αποτυχία εισαγωγής ιστορικού MLS: $err"
+                        )
+                    }
+                    importedHistory = true
+                }
+
+                var revokedOld = false
+                if (revokeOldAfterImport) {
+                    _deviceTransferState.value = DeviceTransferState.ApplyingImport(
+                        "Ανάκληση παλιάς εγκατάστασης MLS..."
+                    )
+                    revokedOld = engine.revokeOtherInstallations(signer).isSuccess
+                }
+
+                repository.syncConversations()
+                sessionContainer.scheduleBackgroundSync()
+
+                TransferImportResult(
+                    ok = true,
+                    newInstallationId = initState.client.installationId,
+                    importedHistory = importedHistory,
+                    revokedOldInstallations = revokedOld
+                )
+            } finally {
+                dekBytes?.fill(0x00)
+            }
+        }
+
     override fun onCleared() {
+        cancelDeviceTransfer()
         // Desvinculamos el callback de UI pero mantenemos el motor vivo para notificaciones fuera de la app.
         sessionContainer.onNotificationDispatched = null
     }

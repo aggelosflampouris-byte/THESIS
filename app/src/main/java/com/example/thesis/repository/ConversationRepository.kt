@@ -668,6 +668,13 @@ class ConversationRepository(
         _localReadTimestamps.value = emptyMap()
     }
 
+    // Recargamos la linea base desde almacenamiento tras restaurar mensajes vistos en una migracion.
+    fun reloadNotificationBaselineFromStorage() {
+        seenMessageIds.clear()
+        seenMessageIds.addAll(seenMessageStorage.loadSeenIds())
+        hasSeededMessageBaseline = seenMessageStorage.isBaselineEstablished()
+    }
+
     suspend fun syncConversation(conversation: Conversation): Result<Unit> = withContext(ioDispatcher) {
         runCatching {
             conversation.sync()
@@ -1002,7 +1009,7 @@ class ConversationRepository(
         }
     }
 
-    private fun preparePendingMessage(
+    private suspend fun preparePendingMessage(
         conversation: Conversation,
         conversationId: String,
         senderAddress: String,

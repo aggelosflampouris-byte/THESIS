@@ -12,8 +12,8 @@ android {
         applicationId = "com.example.thesis"
         minSdk = 26
         targetSdk = 35
-        versionCode = 21
-        versionName = "1.0.24"
+        versionCode = 22
+        versionName = "1.0.25"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -33,6 +33,8 @@ android {
 
     packaging {
         jniLibs {
+            // Comprimimos las librerias .so dentro del APK para mantener el binario bajo el limite de 100 MB de GitHub.
+            useLegacyPackaging = true
             // ================================================================
             // JNI Native Library Duplicate Resolution:
             // - libjnidispatch.so: Packaged by net.java.dev.jna:jna (AAR) and
@@ -140,7 +142,12 @@ dependencies {
     // - net.java.dev.jna:jna:5.14.0 (AAR JNI dispatch)
     // - io.grpc:grpc-okhttp:1.62.2 (mobile gRPC transport)
     // ------------------------------------------------------------------------
-    implementation("org.xmtp:android:4.0.3")
+    implementation("org.xmtp:android:4.11.0")
+    implementation("androidx.biometric:biometric:1.1.0")
+    implementation("androidx.camera:camera-core:1.4.2")
+    implementation("androidx.camera:camera-camera2:1.4.2")
+    implementation("androidx.camera:camera-lifecycle:1.4.2")
+    implementation("androidx.camera:camera-view:1.4.2")
 
     // ------------------------------------------------------------------------
     // Web3j Cryptography: EIP-191 & SECP256K1 Key Derivation

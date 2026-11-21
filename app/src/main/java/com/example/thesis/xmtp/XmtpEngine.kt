@@ -33,6 +33,8 @@ import uniffi.xmtpv3.InternalException
 import java.io.File
 import com.example.thesis.util.CryptoUtils
 import java.util.Locale
+import org.xmtp.android.library.libxmtp.ArchiveElement
+import org.xmtp.android.library.libxmtp.ArchiveOptions
 
 /**
  * Engine responsible for the full lifecycle of the XMTP v4 (libxmtp / MLS) client.
@@ -269,8 +271,67 @@ class XmtpEngine(
         shutdown()
     }
 
+    // Exportamos mensajes y consentimiento MLS cifrados localmente sin depender de servidores externos.
+    suspend fun exportEncryptedArchive(outputFile: File, encryptionKey: ByteArray): Result<Unit> =
+        withContext(ioDispatcher) {
+            val keyCopy = encryptionKey.copyOf()
+            try {
+                val currentClient = activeClient
+                    ?: return@withContext Result.failure(IllegalStateException("XMTP client is not ready"))
+                outputFile.parentFile?.let { parent ->
+                    if (!parent.exists()) parent.mkdirs()
+                }
+                val archiveOptions = ArchiveOptions(
+                    archiveElements = listOf(ArchiveElement.MESSAGES, ArchiveElement.CONSENT)
+                )
+                currentClient.createArchive(outputFile.absolutePath, keyCopy, archiveOptions)
+                Result.success(Unit)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Result.failure(e)
+            } finally {
+                keyCopy.fill(0x00)
+            }
+        }
+
+    // Importamos el archivo cifrado MLS en la base SQLCipher local del nuevo dispositivo.
+    suspend fun importEncryptedArchive(inputFile: File, encryptionKey: ByteArray): Result<Unit> =
+        withContext(ioDispatcher) {
+            val keyCopy = encryptionKey.copyOf()
+            try {
+                val currentClient = activeClient
+                    ?: return@withContext Result.failure(IllegalStateException("XMTP client is not ready"))
+                require(inputFile.exists() && inputFile.isFile) {
+                    "Archive file does not exist: ${inputFile.absolutePath}"
+                }
+                currentClient.importArchive(inputFile.absolutePath, keyCopy)
+                Result.success(Unit)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Result.failure(e)
+            } finally {
+                keyCopy.fill(0x00)
+            }
+        }
+
+    suspend fun revokeOtherInstallations(signer: SigningKey): Result<Unit> =
+        withContext(ioDispatcher) {
+            try {
+                val currentClient = activeClient
+                    ?: return@withContext Result.failure(IllegalStateException("XMTP client is not ready"))
+                currentClient.revokeAllOtherInstallations(signer)
+                Result.success(Unit)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+
     @OptIn(DelicateApi::class)
-    private fun cleanupNativeClient(targetClient: Client?) {
+    private suspend fun cleanupNativeClient(targetClient: Client?) {
         if (targetClient == null) return
         try {
             Log.i(TAG, "Releasing native XMTP client resources and database connection")
@@ -321,7 +382,9 @@ class XmtpEngine(
                 ),
                 appContext = this@XmtpEngine.appContext,
                 dbDirectory = dbDirectory.absolutePath,
-                dbEncryptionKey = dekBytes
+                dbEncryptionKey = dekBytes,
+                // Desactivamos Device Sync remoto para usar solo transferencia directa telefono a telefono.
+                deviceSyncEnabled = false
             )
 
             Log.i(TAG, "Initializing XMTP client for env=$environment")
@@ -542,3 +605,7 @@ sealed interface XmtpInitError {
  */
 internal class XmtpSignatureException(message: String, cause: Throwable? = null) :
     Exception(message, cause)
+
+// Leemos el nombre sincrono del grupo para UI y notificaciones sin convertir composables en suspend.
+@Suppress("DEPRECATION")
+internal fun org.xmtp.android.library.Group.cachedGroupName(): String = name
