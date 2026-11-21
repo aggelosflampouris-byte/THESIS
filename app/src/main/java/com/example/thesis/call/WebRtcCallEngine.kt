@@ -11,6 +11,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
 import org.webrtc.CandidatePairChangeEvent
@@ -26,7 +27,7 @@ import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
 import org.webrtc.audio.JavaAudioDeviceModule
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.RejectedExecutionException
 
 interface WebRtcCallListener {
     fun onLocalOfferCreated(callId: String, sdp: String)
@@ -67,9 +68,9 @@ internal class WebRtcCallEngine(
     private var iceFlushJob: Job? = null
 
     fun startOutgoingOffer(callId: String) {
-        webrtcExecutor.execute {
-            if (!prepareSessionOnExecutor(callId)) return@execute
-            val pc = peerConnection ?: return@execute
+        runOnWebRtc {
+            if (!prepareSessionOnExecutor(callId)) return@runOnWebRtc
+            val pc = peerConnection ?: return@runOnWebRtc
             val constraints = buildOfferAnswerConstraints()
             pc.createOffer(object : SdpObserver {
                 override fun onCreateSuccess(sdp: SessionDescription?) {
@@ -96,9 +97,9 @@ internal class WebRtcCallEngine(
         remoteOfferSdp: String,
         initialRemoteIce: List<CallIceCandidate> = emptyList()
     ) {
-        webrtcExecutor.execute {
-            if (!prepareSessionOnExecutor(callId)) return@execute
-            val pc = peerConnection ?: return@execute
+        runOnWebRtc {
+            if (!prepareSessionOnExecutor(callId)) return@runOnWebRtc
+            val pc = peerConnection ?: return@runOnWebRtc
             if (initialRemoteIce.isNotEmpty()) {
                 pendingRemoteIce.addAll(initialRemoteIce)
             }
@@ -107,8 +108,8 @@ internal class WebRtcCallEngine(
                 override fun onCreateSuccess(sdp: SessionDescription?) = Unit
 
                 override fun onSetSuccess() {
-                    webrtcExecutor.execute {
-                        if (activeCallId != callId) return@execute
+                    runOnWebRtc {
+                        if (activeCallId != callId) return@runOnWebRtc
                         hasRemoteDescription = true
                         remoteFingerprint = CallSignalingPolicy.extractDtlsSha256Fingerprint(remoteOfferSdp)
                         listener.onFingerprintsUpdated(callId, localFingerprint, remoteFingerprint)
@@ -127,16 +128,16 @@ internal class WebRtcCallEngine(
     }
 
     fun applyRemoteAnswer(callId: String, remoteAnswerSdp: String) {
-        webrtcExecutor.execute {
-            if (activeCallId != callId) return@execute
-            val pc = peerConnection ?: return@execute
+        runOnWebRtc {
+            if (activeCallId != callId) return@runOnWebRtc
+            val pc = peerConnection ?: return@runOnWebRtc
             val remoteDesc = SessionDescription(SessionDescription.Type.ANSWER, remoteAnswerSdp)
             pc.setRemoteDescription(object : SdpObserver {
                 override fun onCreateSuccess(sdp: SessionDescription?) = Unit
 
                 override fun onSetSuccess() {
-                    webrtcExecutor.execute {
-                        if (activeCallId != callId) return@execute
+                    runOnWebRtc {
+                        if (activeCallId != callId) return@runOnWebRtc
                         hasRemoteDescription = true
                         remoteFingerprint = CallSignalingPolicy.extractDtlsSha256Fingerprint(remoteAnswerSdp)
                         listener.onFingerprintsUpdated(callId, localFingerprint, remoteFingerprint)
@@ -155,11 +156,11 @@ internal class WebRtcCallEngine(
 
     fun addRemoteIceCandidates(callId: String, candidates: List<CallIceCandidate>) {
         if (candidates.isEmpty()) return
-        webrtcExecutor.execute {
-            if (activeCallId != callId) return@execute
+        runOnWebRtc {
+            if (activeCallId != callId) return@runOnWebRtc
             if (!hasRemoteDescription || peerConnection == null) {
                 pendingRemoteIce.addAll(candidates)
-                return@execute
+                return@runOnWebRtc
             }
             for (cand in candidates) {
                 runCatching {
@@ -174,16 +175,16 @@ internal class WebRtcCallEngine(
     }
 
     fun setMicrophoneMuted(muted: Boolean) {
-        webrtcExecutor.execute {
+        runOnWebRtc {
             runCatching { localAudioTrack?.setEnabled(!muted) }
             runCatching { audioDeviceModule?.setMicrophoneMute(muted) }
         }
     }
 
     fun disposeSession(callId: String? = null) {
-        webrtcExecutor.execute {
+        runOnWebRtc {
             if (callId != null && activeCallId != null && activeCallId != callId) {
-                return@execute
+                return@runOnWebRtc
             }
             disposeSessionOnExecutor()
         }
@@ -191,7 +192,7 @@ internal class WebRtcCallEngine(
 
     suspend fun disposeSessionAndAwait(callId: String? = null) {
         val done = CompletableDeferred<Unit>()
-        webrtcExecutor.execute {
+        runOnWebRtc {
             try {
                 if (callId == null || activeCallId == null || activeCallId == callId) {
                     disposeSessionOnExecutor()
@@ -200,7 +201,7 @@ internal class WebRtcCallEngine(
                 done.complete(Unit)
             }
         }
-        done.await()
+        withTimeoutOrNull(3_000L) { done.await() }
     }
 
     fun shutdown() {
@@ -210,9 +211,28 @@ internal class WebRtcCallEngine(
         webrtcExecutor.shutdown()
     }
 
+    // Capturamos cualquier Throwable (incluido UnsatisfiedLinkError) para que un fallo nativo no cierre el proceso.
+    private fun runOnWebRtc(block: () -> Unit) {
+        try {
+            webrtcExecutor.execute {
+                try {
+                    block()
+                } catch (t: Throwable) {
+                    Log.e(TAG, "WebRTC task failed: ${t::class.java.simpleName}", t)
+                    val failedCallId = activeCallId
+                    runCatching { disposeSessionOnExecutor() }
+                    if (failedCallId != null) {
+                        listener.onEngineError(failedCallId, "${t::class.java.simpleName}: ${t.message ?: "unknown"}")
+                    }
+                }
+            }
+        } catch (e: RejectedExecutionException) {
+            Log.w(TAG, "WebRTC executor rejected task after shutdown")
+        }
+    }
+
     private fun prepareSessionOnExecutor(callId: String): Boolean {
         disposeSessionOnExecutor()
-        ensureFactoryInitialized(appContext)
 
         activeCallId = callId
         localFingerprint = null
@@ -222,6 +242,7 @@ internal class WebRtcCallEngine(
         outboundIceBuffer.clear()
 
         return try {
+            ensureFactoryInitialized(appContext)
             val adm = JavaAudioDeviceModule.builder(appContext)
                 .setUseHardwareAcousticEchoCanceler(true)
                 .setUseHardwareNoiseSuppressor(true)
@@ -294,7 +315,7 @@ internal class WebRtcCallEngine(
             localAudioTrack = track
             pc.addTrack(track, listOf(LOCAL_MEDIA_STREAM_ID))
             true
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e(TAG, "WebRTC initialization failed: ${e::class.java.simpleName}", e)
             disposeSessionOnExecutor()
             listener.onEngineError(callId, "WebRTC init failed: ${e.message ?: e::class.java.simpleName}")
@@ -324,15 +345,15 @@ internal class WebRtcCallEngine(
     }
 
     private fun setLocalSdpAndNotify(callId: String, sdp: SessionDescription, isOffer: Boolean) {
-        webrtcExecutor.execute {
-            if (activeCallId != callId) return@execute
-            val pc = peerConnection ?: return@execute
+        runOnWebRtc {
+            if (activeCallId != callId) return@runOnWebRtc
+            val pc = peerConnection ?: return@runOnWebRtc
             pc.setLocalDescription(object : SdpObserver {
                 override fun onCreateSuccess(ignored: SessionDescription?) = Unit
 
                 override fun onSetSuccess() {
-                    webrtcExecutor.execute {
-                        if (activeCallId != callId) return@execute
+                    runOnWebRtc {
+                        if (activeCallId != callId) return@runOnWebRtc
                         localFingerprint = CallSignalingPolicy.extractDtlsSha256Fingerprint(sdp.description)
                         listener.onFingerprintsUpdated(callId, localFingerprint, remoteFingerprint)
                         if (isOffer) {
@@ -392,7 +413,7 @@ internal class WebRtcCallEngine(
 
         override fun onIceGatheringChange(newState: PeerConnection.IceGatheringState?) {
             if (newState == PeerConnection.IceGatheringState.COMPLETE) {
-                webrtcExecutor.execute {
+                runOnWebRtc {
                     flushOutboundIceOnExecutor(callId)
                 }
             }
@@ -405,8 +426,8 @@ internal class WebRtcCallEngine(
                 sdpMLineIndex = candidate.sdpMLineIndex,
                 candidate = candidate.sdp ?: return
             )
-            webrtcExecutor.execute {
-                if (activeCallId != callId) return@execute
+            runOnWebRtc {
+                if (activeCallId != callId) return@runOnWebRtc
                 outboundIceBuffer.add(wireCand)
                 scheduleDebouncedIceFlush(callId)
             }
@@ -443,7 +464,7 @@ internal class WebRtcCallEngine(
         // Agrupamos candidatos ICE durante 300 ms para no saturar la rafaga de mensajes MLS.
         iceFlushJob = engineScope.launch {
             delay(CallSignalingPolicy.ICE_BATCH_DEBOUNCE_MS)
-            webrtcExecutor.execute {
+            runOnWebRtc {
                 flushOutboundIceOnExecutor(callId)
             }
         }
@@ -496,16 +517,23 @@ internal class WebRtcCallEngine(
         private const val TAG = "WebRtcCallEngine"
         private const val LOCAL_AUDIO_TRACK_ID = "THESIS_VOICE_TRACK_0"
         private const val LOCAL_MEDIA_STREAM_ID = "THESIS_VOICE_STREAM"
-        private val webrtcInitialized = AtomicBoolean(false)
+        private val initLock = Any()
 
+        @Volatile
+        private var webrtcInitialized = false
+
+        // Marcamos la inicializacion solo tras exito para poder reintentar si la carga nativa falla.
         private fun ensureFactoryInitialized(appContext: Context) {
-            if (webrtcInitialized.compareAndSet(false, true)) {
+            if (webrtcInitialized) return
+            synchronized(initLock) {
+                if (webrtcInitialized) return
                 PeerConnectionFactory.initialize(
                     PeerConnectionFactory.InitializationOptions
                         .builder(appContext.applicationContext)
                         .setEnableInternalTracer(false)
                         .createInitializationOptions()
                 )
+                webrtcInitialized = true
             }
         }
     }

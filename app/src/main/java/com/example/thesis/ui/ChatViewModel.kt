@@ -169,8 +169,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val _statusBanner = MutableStateFlow<String?>(null)
     val statusBanner: StateFlow<String?> = _statusBanner.asStateFlow()
 
-    private val _actionLogs = MutableStateFlow<List<ActionLogEntry>>(emptyList())
-    val actionLogs: StateFlow<List<ActionLogEntry>> = _actionLogs.asStateFlow()
+    // Los registros se cargan del disco para que sobrevivan al cierre de la app y a los fallos.
+    private val actionLogStore = sessionContainer.actionLogStore
+    val actionLogs: StateFlow<List<ActionLogEntry>> = actionLogStore.entries
 
     private val _isSending = MutableStateFlow(false)
     val isSending: StateFlow<Boolean> = _isSending.asStateFlow()
@@ -217,7 +218,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             durationMs = durationMs,
             isError = isError
         )
-        _actionLogs.value = (_actionLogs.value + entry).takeLast(100)
+        actionLogStore.append(entry)
     }
 
     /**
@@ -316,7 +317,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun clearActionLogs() {
         committedProofMap.clear()
         _verifiedMessageCount.value = 0
-        _actionLogs.value = emptyList()
+        actionLogStore.clear()
         ThesisTelemetry.clearTelemetryData()
     }
 
@@ -1044,7 +1045,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         lastAnnouncedNicknameByConv.clear()
         _pendingNotificationConversationId.value = null
         if (clearLogsAndTelemetry) {
-            _actionLogs.value = emptyList()
+            actionLogStore.clear()
             ThesisTelemetry.clearTelemetryData()
             ReportExporter.purgeCachedReports(appContext.cacheDir)
         }

@@ -944,11 +944,10 @@ class ConversationRepository(
                 ?: return@withContext Result.failure(
                     IllegalStateException("XMTP engine is not ready (current state: ${xmtpEngine.state.value})")
                 )
-            val conversation = client.conversations.findConversation(conversationId)
-                ?: return@withContext Result.failure(
-                    NoSuchElementException("Conversation not found for ID: $conversationId")
-                )
+            // Buscamos la conversacion dentro de runCatching para que un fallo de red no escape a la corrutina de llamada.
             runCatching {
+                val conversation = client.conversations.findConversation(conversationId)
+                    ?: throw NoSuchElementException("Conversation not found for ID: $conversationId")
                 val msgId = conversation.send(
                     signal,
                     SendOptions(contentType = ContentTypeCallSignal)

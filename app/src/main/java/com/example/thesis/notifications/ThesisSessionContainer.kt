@@ -14,6 +14,8 @@ import com.example.thesis.updater.AppUpdateManager
 import com.example.thesis.xmtp.XmtpEngine
 import com.example.thesis.call.CallNotificationManager
 import com.example.thesis.call.CallSessionManager
+import com.example.thesis.diagnostics.ActionLogStore
+import com.example.thesis.ui.ActionLogEntry
 import com.example.thesis.xmtp.XmtpEngineState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -54,6 +56,8 @@ internal class ThesisSessionContainer(context: Context) {
     )
     val appUpdateManager = AppUpdateManager(appContext)
     val notificationManager = MessageNotificationManager(appContext)
+    // Registro persistente compartido por la UI y los componentes en segundo plano (llamadas, fallos).
+    val actionLogStore = ActionLogStore(ActionLogStore.defaultFile(appContext))
     val callNotificationManager = CallNotificationManager(appContext)
     val callSessionManager = CallSessionManager(
         appContext = appContext,
@@ -61,7 +65,10 @@ internal class ThesisSessionContainer(context: Context) {
         repository = repository,
         nicknameSnapshot = nicknameSnapshot,
         notificationManager = callNotificationManager,
-        conversationsSnapshotProvider = { conversationsSnapshot }
+        conversationsSnapshotProvider = { conversationsSnapshot },
+        diagnosticsLogger = { tag, message, isError ->
+            actionLogStore.append(ActionLogEntry(tag = tag, message = message, isError = isError))
+        }
     )
     val sessionMutex = Mutex()
 

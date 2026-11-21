@@ -11,6 +11,7 @@ import com.example.thesis.xmtp.CallIceCandidate
 import com.example.thesis.xmtp.CallSignal
 import com.example.thesis.xmtp.CallSignalType
 import com.example.thesis.xmtp.XmtpEngine
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -92,7 +93,8 @@ internal class CallSessionManager(
     private val repository: ConversationRepository,
     private val nicknameSnapshot: StateFlow<NicknameSnapshot>,
     private val notificationManager: CallNotificationManager,
-    private val conversationsSnapshotProvider: () -> List<Conversation>
+    private val conversationsSnapshotProvider: () -> List<Conversation>,
+    private val diagnosticsLogger: (tag: String, message: String, isError: Boolean) -> Unit = { _, _, _ -> }
 ) : WebRtcCallListener {
 
     private data class ActiveSession(
@@ -123,8 +125,12 @@ internal class CallSessionManager(
     }
 
     private val stateDispatcher = Dispatchers.Default.limitedParallelism(1)
-    private val managerScope = CoroutineScope(SupervisorJob() + stateDispatcher)
-    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // Sin este manejador cualquier excepcion en una corrutina de llamada cerraria toda la aplicacion.
+    private val callExceptionHandler = CoroutineExceptionHandler { _, throwable ->
+        emergencyReset(throwable)
+    }
+    private val managerScope = CoroutineScope(SupervisorJob() + stateDispatcher + callExceptionHandler)
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO + callExceptionHandler)
 
     private val audioController = CallAudioController(appContext)
     private val webrtcEngine = WebRtcCallEngine(appContext = appContext, listener = this)
@@ -183,6 +189,7 @@ internal class CallSessionManager(
             )
             audioController.startInCallAudio(speakerOn = false)
             scheduleRingTimeoutLocked(callId, isOutgoing = true)
+            diagnosticsLogger("CALL", "Εξερχόμενη κλήση [call=${callId.take(8)}]", false)
             webrtcEngine.startOutgoingOffer(callId)
         }
     }
@@ -468,6 +475,7 @@ internal class CallSessionManager(
 
     override fun onEngineError(callId: String, reason: String) {
         Log.e(TAG, "WebRTC error on call=$callId: $reason")
+        diagnosticsLogger("CALL", "Σφάλμα WebRTC [call=${callId.take(8)}]: $reason", true)
         managerScope.launch {
             val session = activeSession ?: return@launch
             if (session.callId != callId) return@launch
@@ -684,6 +692,9 @@ internal class CallSessionManager(
     ) {
         val session = activeSession
         activeSession = null
+        if (!endReasonText.isNullOrBlank()) {
+            diagnosticsLogger("CALL", "Τερματισμός κλήσης: $endReasonText", false)
+        }
         ringTimeoutJob?.cancel()
         connectTimeoutJob?.cancel()
 
@@ -772,6 +783,32 @@ internal class CallSessionManager(
             "${peerInboxId.take(6)}...${peerInboxId.takeLast(4)}"
         } else {
             peerInboxId
+        }
+    }
+
+    private fun emergencyReset(throwable: Throwable) {
+        Log.e(TAG, "Unhandled call coroutine failure", throwable)
+        diagnosticsLogger(
+            "CALL",
+            "Μη αναμενόμενο σφάλμα κλήσης: ${throwable::class.java.simpleName}: ${throwable.message}",
+            true
+        )
+        // Liberamos recursos de forma defensiva; cada paso aislado para que un fallo no impida los siguientes.
+        runCatching { ringTimeoutJob?.cancel() }
+        runCatching { connectTimeoutJob?.cancel() }
+        runCatching { audioController.release() }
+        runCatching { notificationManager.cancelAllCallNotifications() }
+        runCatching { CallForegroundService.stop(appContext) }
+        runCatching { webrtcEngine.disposeSession(null) }
+        _callState.value = CallUiState.Idle
+        runCatching {
+            managerScope.launch {
+                activeSession?.let { old ->
+                    old.outboundSignalChannel.close()
+                    old.signalSenderJob?.cancel()
+                }
+                activeSession = null
+            }
         }
     }
 

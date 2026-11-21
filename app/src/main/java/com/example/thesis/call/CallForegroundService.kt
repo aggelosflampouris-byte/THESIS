@@ -1,6 +1,7 @@
 package com.example.thesis.call
 
 import android.Manifest
+import android.app.Notification
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -9,8 +10,10 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
+import com.example.thesis.R
 import com.example.thesis.ThesisApplication
 
 // Servicio en primer plano tipo microphone iniciado solo tras concederse RECORD_AUDIO (requisito API 34+).
@@ -19,63 +22,86 @@ internal class CallForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            stopForegroundAndSelf()
-            return START_NOT_STICKY
-        }
-
-        if (!hasRecordAudioPermission(this)) {
-            Log.w(TAG, "Missing RECORD_AUDIO permission; stopping CallForegroundService")
-            stopSelf()
-            return START_NOT_STICKY
-        }
-
-        val container = (applicationContext as? ThesisApplication)?.sessionContainer
-        if (container == null) {
-            stopSelf()
-            return START_NOT_STICKY
-        }
-
-        val callId = intent?.getStringExtra(EXTRA_CALL_ID).orEmpty()
-        val conversationId = intent?.getStringExtra(EXTRA_CONVERSATION_ID).orEmpty()
-        val peerName = intent?.getStringExtra(EXTRA_PEER_NAME).orEmpty().ifBlank { "Επαφή XMTP" }
-        val statusLabel = intent?.getStringExtra(EXTRA_STATUS_LABEL).orEmpty().ifBlank { "Κλήση φωνής σε εξέλιξη" }
-
-        val notification = container.callNotificationManager.buildOngoingCallNotification(
-            callId = callId,
-            conversationId = conversationId,
-            peerName = peerName,
-            statusLabel = statusLabel
-        )
-        val fgsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-        } else {
-            0
-        }
-
-        val started = runCatching {
-            ServiceCompat.startForeground(
-                this,
-                CallNotificationManager.NOTIFICATION_ID_ONGOING,
-                notification,
-                fgsType
-            )
-        }.isSuccess
-
+        // Android exige startForeground() tras startForegroundService(); lo llamamos siempre primero
+        // para evitar ForegroundServiceDidNotStartInTimeException si la llamada termina enseguida.
+        val notification = buildNotificationSafely(intent)
+        val started = enterForeground(notification)
         if (!started) {
             Log.e(TAG, "Failed to enter microphone foreground service")
+            startPending = false
             stopSelf()
             return START_NOT_STICKY
+        }
+        isForegroundActive = true
+        startPending = false
+
+        if (intent?.action == ACTION_STOP || stopRequested) {
+            stopRequested = false
+            stopForegroundAndSelf()
         }
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
+        isForegroundActive = false
+        startPending = false
+        stopRequested = false
         super.onDestroy()
+    }
+
+    private fun enterForeground(notification: Notification): Boolean {
+        val fgsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && hasRecordAudioPermission(this)) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        } else {
+            0
+        }
+        val primary = runCatching {
+            ServiceCompat.startForeground(this, CallNotificationManager.NOTIFICATION_ID_ONGOING, notification, fgsType)
+        }
+        if (primary.isSuccess) return true
+        Log.w(TAG, "startForeground with call notification failed: ${primary.exceptionOrNull()}")
+        // Reintentamos con una notificacion basica por si el estilo CallStyle es rechazado por el sistema.
+        return runCatching {
+            ServiceCompat.startForeground(
+                this,
+                CallNotificationManager.NOTIFICATION_ID_ONGOING,
+                buildFallbackNotification(),
+                fgsType
+            )
+        }.isSuccess
+    }
+
+    private fun buildNotificationSafely(intent: Intent?): Notification {
+        val container = (applicationContext as? ThesisApplication)?.sessionContainer
+        val callId = intent?.getStringExtra(EXTRA_CALL_ID).orEmpty()
+        val conversationId = intent?.getStringExtra(EXTRA_CONVERSATION_ID).orEmpty()
+        val peerName = intent?.getStringExtra(EXTRA_PEER_NAME).orEmpty().ifBlank { "Επαφή XMTP" }
+        val statusLabel = intent?.getStringExtra(EXTRA_STATUS_LABEL).orEmpty().ifBlank { "Κλήση φωνής σε εξέλιξη" }
+        return runCatching {
+            requireNotNull(container).callNotificationManager.buildOngoingCallNotification(
+                callId = callId,
+                conversationId = conversationId,
+                peerName = peerName,
+                statusLabel = statusLabel
+            )
+        }.getOrElse { buildFallbackNotification() }
+    }
+
+    private fun buildFallbackNotification(): Notification {
+        val container = (applicationContext as? ThesisApplication)?.sessionContainer
+        runCatching { container?.callNotificationManager?.ensureChannelCreated() }
+        return NotificationCompat.Builder(this, CallNotificationManager.CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_call_phone)
+            .setContentTitle("Κλήση φωνής")
+            .setContentText("Κλήση φωνής σε εξέλιξη")
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setOngoing(true)
+            .build()
     }
 
     private fun stopForegroundAndSelf() {
         runCatching { ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE) }
+        isForegroundActive = false
         stopSelf()
     }
 
@@ -87,6 +113,15 @@ internal class CallForegroundService : Service() {
         private const val EXTRA_CONVERSATION_ID = "extra_conversation_id"
         private const val EXTRA_PEER_NAME = "extra_peer_name"
         private const val EXTRA_STATUS_LABEL = "extra_status_label"
+
+        @Volatile
+        private var startPending: Boolean = false
+
+        @Volatile
+        private var isForegroundActive: Boolean = false
+
+        @Volatile
+        private var stopRequested: Boolean = false
 
         fun hasRecordAudioPermission(context: Context): Boolean {
             return ContextCompat.checkSelfPermission(
@@ -111,16 +146,23 @@ internal class CallForegroundService : Service() {
                 putExtra(EXTRA_PEER_NAME, peerName)
                 putExtra(EXTRA_STATUS_LABEL, statusLabel)
             }
-            return runCatching {
+            stopRequested = false
+            startPending = true
+            val launched = runCatching {
                 ContextCompat.startForegroundService(appCtx, intent)
             }.isSuccess
+            if (!launched) startPending = false
+            return launched
         }
 
         fun stop(context: Context) {
-            val appCtx = context.applicationContext
-            val intent = Intent(appCtx, CallForegroundService::class.java).apply {
-                action = ACTION_STOP
+            if (startPending && !isForegroundActive) {
+                // Detener antes de startForeground() provoca un cierre forzado; diferimos la parada al servicio.
+                stopRequested = true
+                return
             }
+            val appCtx = context.applicationContext
+            val intent = Intent(appCtx, CallForegroundService::class.java)
             runCatching { appCtx.stopService(intent) }
         }
     }
