@@ -48,3 +48,6 @@
 # ─── WebRTC JNI Rules (evita ofuscacion de callbacks nativos de libjingle) ────
 -keep class org.webrtc.** { *; }
 -dontwarn org.webrtc.**
+
+# ─── Conservamos archivo fuente y lineas para diagnostico claro en CrashLogger ──
+-keepattributes SourceFile,LineNumberTable

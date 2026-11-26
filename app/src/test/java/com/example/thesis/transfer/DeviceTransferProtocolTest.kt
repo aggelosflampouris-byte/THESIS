@@ -17,7 +17,7 @@ import javax.crypto.AEADBadTagException
 class DeviceTransferProtocolTest {
 
     @Test
-    fun test_buildAndParsePairingUri_roundtripsPrivateHostsPortKeyAndSas() {
+    fun test_buildAndParsePairingUri_roundtripsPrivateHostsPortAndKey() {
         val sessionKey = ByteArray(DeviceTransferProtocol.SESSION_KEY_BYTES) { (it + 7).toByte() }
         val built = DeviceTransferProtocol.buildPairingUri(
             hosts = listOf("192.168.43.1", "10.0.0.5"),
@@ -30,8 +30,6 @@ class DeviceTransferProtocolTest {
         assertEquals(listOf("192.168.43.1", "10.0.0.5"), parsed!!.hosts)
         assertEquals(45678, parsed.port)
         assertArrayEquals(sessionKey, parsed.sessionKey)
-        assertEquals(DeviceTransferProtocol.computeSasCode(sessionKey), parsed.sasCode)
-        assertTrue(parsed.sasCode.matches(Regex("^\\d{3} \\d{3}$")))
 
         parsed.wipe()
         assertTrue(parsed.sessionKey.all { it == 0.toByte() })

@@ -10,9 +10,7 @@ import java.io.File
 import java.io.RandomAccessFile
 import java.net.URI
 import java.net.URLDecoder
-import java.security.MessageDigest
 import java.util.Base64
-import java.util.Locale
 import java.util.UUID
 import javax.crypto.Cipher
 import javax.crypto.Mac
@@ -23,7 +21,6 @@ data class DeviceTransferPairingInfo(
     val hosts: List<String>,
     val port: Int,
     val sessionKey: ByteArray,
-    val sasCode: String,
     val uri: String
 ) {
     fun wipe() {
@@ -36,7 +33,6 @@ data class DeviceTransferPairingInfo(
         return hosts == other.hosts &&
             port == other.port &&
             sessionKey.contentEquals(other.sessionKey) &&
-            sasCode == other.sasCode &&
             uri == other.uri
     }
 
@@ -44,7 +40,6 @@ data class DeviceTransferPairingInfo(
         var result = hosts.hashCode()
         result = 31 * result + port
         result = 31 * result + sessionKey.contentHashCode()
-        result = 31 * result + sasCode.hashCode()
         result = 31 * result + uri.hashCode()
         return result
     }
@@ -309,7 +304,6 @@ object DeviceTransferProtocol {
             hosts = cleanHosts,
             port = port,
             sessionKey = sessionKey.copyOf(),
-            sasCode = computeSasCode(sessionKey),
             uri = uri
         )
     }
@@ -351,23 +345,8 @@ object DeviceTransferProtocol {
             hosts = cleanHosts,
             port = port,
             sessionKey = sessionKey,
-            sasCode = computeSasCode(sessionKey),
             uri = trimmed
         )
-    }
-
-    fun computeSasCode(sessionKey: ByteArray): String {
-        val prefix = "thesis-xfer-v1-sas|".toByteArray(Charsets.UTF_8)
-        val digest = MessageDigest.getInstance("SHA-256").apply {
-            update(prefix)
-            update(sessionKey)
-        }.digest()
-        val u32 = ((digest[0].toLong() and 0xFFL) shl 24) or
-            ((digest[1].toLong() and 0xFFL) shl 16) or
-            ((digest[2].toLong() and 0xFFL) shl 8) or
-            (digest[3].toLong() and 0xFFL)
-        val sixDigit = (u32 % 1_000_000L).toInt()
-        return String.format(Locale.US, "%03d %03d", sixDigit / 1000, sixDigit % 1000)
     }
 
     fun isPrivateRfc1918Ipv4(host: String): Boolean {

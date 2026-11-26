@@ -176,7 +176,7 @@ internal fun IdentityDetailsDialog(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text("Κατάσταση: Δοκιμαστική ταυτότητα SECP256K1")
-                Text("Δίκτυο: XMTP DEV Network (MLS Protocol)", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Δίκτυο: XMTP Production Network (MLS Protocol)", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 address?.let {
                     Text("Διεύθυνση Πορτοφολιού (Ethereum)", style = MaterialTheme.typography.labelMedium)
                     Surface(

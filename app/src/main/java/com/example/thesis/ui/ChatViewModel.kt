@@ -21,6 +21,8 @@ import com.example.thesis.updater.UpdateStatus
 import java.io.File
 import org.xmtp.android.library.libxmtp.DecodedMessage
 import org.xmtp.android.library.libxmtp.IdentityKind
+import com.example.thesis.security.CryptoAuditReport
+import com.example.thesis.security.CryptoAuditVerifier
 import com.example.thesis.security.ShredAuditProof
 import com.example.thesis.security.ShredResult
 import com.example.thesis.security.ThesisTelemetry
@@ -48,7 +50,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.UUID
-import java.util.concurrent.atomic.AtomicInteger
 import org.xmtp.android.library.Conversation
 import com.example.thesis.xmtp.cachedGroupName
 import com.example.thesis.security.KeystoreResult
@@ -91,7 +92,6 @@ sealed interface DeviceTransferState {
     ) : DeviceTransferState
     data class WaitingForSender(
         val pairingUri: String,
-        val sasCode: String,
         val hostDisplay: String,
         val port: Int,
         val revokeOldDevice: Boolean,
@@ -189,16 +189,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     val actionLogs: StateFlow<List<ActionLogEntry>> = actionLogStore.entries
     val actionLogSessions: StateFlow<List<ActionLogSession>> = actionLogStore.sessions
 
-    private val _isSending = MutableStateFlow(false)
-    val isSending: StateFlow<Boolean> = _isSending.asStateFlow()
     private val sendMutex = Mutex()
-    private val pendingSendCount = AtomicInteger(0)
 
     private val _isSyncing = MutableStateFlow(false)
     val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
 
     private val _isBenchmarking = MutableStateFlow(false)
     val isBenchmarking: StateFlow<Boolean> = _isBenchmarking.asStateFlow()
+
+    private val _cryptoAuditReport = MutableStateFlow<CryptoAuditReport?>(null)
+    val cryptoAuditReport: StateFlow<CryptoAuditReport?> = _cryptoAuditReport.asStateFlow()
+
+    private val _isRunningCryptoAudit = MutableStateFlow(false)
+    val isRunningCryptoAudit: StateFlow<Boolean> = _isRunningCryptoAudit.asStateFlow()
 
     private data class CommittedMessageProof(
         val msgId: String,
@@ -335,8 +338,53 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun clearActionLogs() {
         committedProofMap.clear()
         _verifiedMessageCount.value = 0
+        _cryptoAuditReport.value = null
         actionLogStore.clear()
         ThesisTelemetry.clearTelemetryData()
+    }
+
+    // Ejecuta verificaciones reales sobre Keystore, AEAD, EIP-191, SQLCipher y la red XMTP Production.
+    fun runCryptoAudit() {
+        if (_isRunningCryptoAudit.value || _isShredding.value) return
+        _isRunningCryptoAudit.value = true
+        viewModelScope.launch {
+            try {
+                logAction("AUDIT", "Starting live cryptographic & XMTP Production verification suite...")
+                val client = (engine.state.value as? XmtpEngineState.Ready)?.client
+                val report = ThesisTelemetry.measureSuspendOperation("7. Full Crypto & Network Self-Audit") {
+                    CryptoAuditVerifier.runFullAudit(
+                        keystoreManager = keystoreManager,
+                        databaseFactory = databaseFactory,
+                        signer = sessionContainer.activeSigner,
+                        client = client
+                    )
+                }
+                _cryptoAuditReport.value = report
+                report.checks.forEach { check ->
+                    val statusLabel = if (check.passed) "PASS" else "FAIL"
+                    logAction(
+                        tag = "AUDIT",
+                        message = "[$statusLabel] ${check.title}: ${check.details}",
+                        durationMs = check.durationMs,
+                        isError = !check.passed
+                    )
+                }
+                report.eip191Proof?.let { proof ->
+                    logAction(
+                        tag = "AUDIT",
+                        message = "[EIP191_PROOF] Addr=${proof.walletAddress} | LowS=${proof.isLowS} | Sig=${proof.signatureHex}"
+                    )
+                }
+                _statusBanner.value = "Έλεγχος ασφάλειας: ${report.passedCount}/${report.totalCount} PASS (${report.environmentName})"
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                logAction("AUDIT", "Verification suite error: ${e.message}", isError = true)
+                _statusBanner.value = "Αποτυχία ελέγχου κρυπτογράφησης: ${e.message}"
+            } finally {
+                _isRunningCryptoAudit.value = false
+            }
+        }
     }
 
     fun exportBenchmarkReport(): String {
@@ -429,7 +477,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
         }
-        return pocHeader + ThesisTelemetry.exportFullReport() + sessionLogsSection
+        val auditSection = _cryptoAuditReport.value?.let {
+            CryptoAuditVerifier.formatAuditReportMarkdown(it)
+        }.orEmpty()
+        return pocHeader + auditSection + ThesisTelemetry.exportFullReport() + sessionLogsSection
     }
 
     init {
@@ -781,7 +832,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _isSyncing.value = true
         viewModelScope.launch {
             try {
-                logAction("SYNC", "Syncing with XMTP DEV network...")
+                logAction("SYNC", "Syncing with XMTP PRODUCTION network...")
                 if (activeConv != null) {
                     ThesisTelemetry.measureSuspendOperation("MLS Conversation Sync") {
                         repository.syncConversation(activeConv)
@@ -836,40 +887,31 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun sendMessage(text: String, onFailureRestore: (() -> Unit)? = null) {
         if (_isShredding.value || _isBenchmarking.value) return
         val conv = _selectedConversation.value ?: return
-        pendingSendCount.incrementAndGet()
-        _isSending.value = true
         viewModelScope.launch {
-            try {
-                // Serializamos envios consecutivos en orden FIFO sin descartar mensajes rapidos ni bloquear la UI.
-                sendMutex.withLock {
-                    if (_isShredding.value) return@withLock
-                    logAction("E2EE", "Dispatching encrypted MLS payload...")
-                    ThesisTelemetry.measureSuspendOperation("5. MLS E2EE Message Dispatch") {
-                        repository.sendMessage(conv, text)
-                    }
-                    .onSuccess { msgId ->
-                        val sender0x = walletAddress.value ?: "0x..."
-                        val clientInbox = (engine.state.value as? XmtpEngineState.Ready)?.client?.inboxId ?: "N/A"
-                        recordCommittedMessage(
-                            msgId = msgId,
-                            sender = if (clientInbox != "N/A") clientInbox else sender0x,
-                            topic = conv.topic
-                        )
-                        logAction(
-                            "MLS",
-                            "TX COMMITTED | MsgID: $msgId | ConvID: ${conv.id} | Topic: ${conv.topic} | Sender0x: $sender0x | SenderInbox: $clientInbox"
-                        )
-                    }
-                    .onFailure { err ->
-                        _statusBanner.value = "Αποτυχία αποστολής: ${err.message}"
-                        logAction("E2EE", "Dispatch failed: ${err.message}", isError = true)
-                        onFailureRestore?.invoke()
-                    }
+            // Serializamos envios consecutivos en orden FIFO sin descartar mensajes rapidos ni bloquear la UI.
+            sendMutex.withLock {
+                if (_isShredding.value) return@withLock
+                logAction("E2EE", "Dispatching encrypted MLS payload...")
+                ThesisTelemetry.measureSuspendOperation("5. MLS E2EE Message Dispatch") {
+                    repository.sendMessage(conv, text)
                 }
-            } finally {
-                if (pendingSendCount.decrementAndGet() <= 0) {
-                    pendingSendCount.set(0)
-                    _isSending.value = false
+                .onSuccess { msgId ->
+                    val sender0x = walletAddress.value ?: "0x..."
+                    val clientInbox = (engine.state.value as? XmtpEngineState.Ready)?.client?.inboxId ?: "N/A"
+                    recordCommittedMessage(
+                        msgId = msgId,
+                        sender = if (clientInbox != "N/A") clientInbox else sender0x,
+                        topic = conv.topic
+                    )
+                    logAction(
+                        "MLS",
+                        "TX COMMITTED | MsgID: $msgId | ConvID: ${conv.id} | Topic: ${conv.topic} | Sender0x: $sender0x | SenderInbox: $clientInbox"
+                    )
+                }
+                .onFailure { err ->
+                    _statusBanner.value = "Αποτυχία αποστολής: ${err.message}"
+                    logAction("E2EE", "Dispatch failed: ${err.message}", isError = true)
+                    onFailureRestore?.invoke()
                 }
             }
         }
@@ -1097,6 +1139,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         lastAnnouncedNicknameByConv.clear()
         _pendingNotificationConversationId.value = null
         if (clearLogsAndTelemetry) {
+            _cryptoAuditReport.value = null
             actionLogStore.clear()
             ThesisTelemetry.clearTelemetryData()
             ReportExporter.purgeCachedReports(appContext.cacheDir)
@@ -1258,7 +1301,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 val pairing = server.pairingInfo
                 _deviceTransferState.value = DeviceTransferState.WaitingForSender(
                     pairingUri = pairing.uri,
-                    sasCode = pairing.sasCode,
                     hostDisplay = pairing.hosts.firstOrNull().orEmpty(),
                     port = pairing.port,
                     revokeOldDevice = revokeOldAfterImport,
@@ -1528,37 +1570,28 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private fun dispatchVoiceNote(voiceNote: VoiceNote) {
         if (_isShredding.value || _isBenchmarking.value) return
         val conv = _selectedConversation.value ?: return
-        pendingSendCount.incrementAndGet()
-        _isSending.value = true
         viewModelScope.launch {
-            try {
-                sendMutex.withLock {
-                    if (_isShredding.value) return@withLock
-                    logAction("VOICE", "Dispatching MLS E2EE voice note (${VoiceNoteCodec.formatDuration(voiceNote.durationMs)}, ${voiceNote.audioBytes.size / 1024} KB)...")
-                    ThesisTelemetry.measureSuspendOperation("5b. MLS E2EE Voice Note Dispatch") {
-                        repository.sendVoiceNote(conv, voiceNote)
-                    }
-                    .onSuccess { msgId ->
-                        val clientInbox = (engine.state.value as? XmtpEngineState.Ready)?.client?.inboxId ?: "N/A"
-                        recordCommittedMessage(
-                            msgId = msgId,
-                            sender = if (clientInbox != "N/A") clientInbox else (walletAddress.value ?: "0x..."),
-                            topic = conv.topic
-                        )
-                        logAction(
-                            tag = "VOICE",
-                            message = "TX VOICE COMMITTED | MsgID: $msgId | Duration: ${VoiceNoteCodec.formatDuration(voiceNote.durationMs)} | Bytes: ${voiceNote.audioBytes.size}"
-                        )
-                    }
-                    .onFailure { err ->
-                        _statusBanner.value = "Αποτυχία αποστολής φωνητικού: ${err.message}"
-                        logAction("VOICE", "Voice dispatch failed: ${err.message}", isError = true)
-                    }
+            sendMutex.withLock {
+                if (_isShredding.value) return@withLock
+                logAction("VOICE", "Dispatching MLS E2EE voice note (${VoiceNoteCodec.formatDuration(voiceNote.durationMs)}, ${voiceNote.audioBytes.size / 1024} KB)...")
+                ThesisTelemetry.measureSuspendOperation("5b. MLS E2EE Voice Note Dispatch") {
+                    repository.sendVoiceNote(conv, voiceNote)
                 }
-            } finally {
-                if (pendingSendCount.decrementAndGet() <= 0) {
-                    pendingSendCount.set(0)
-                    _isSending.value = false
+                .onSuccess { msgId ->
+                    val clientInbox = (engine.state.value as? XmtpEngineState.Ready)?.client?.inboxId ?: "N/A"
+                    recordCommittedMessage(
+                        msgId = msgId,
+                        sender = if (clientInbox != "N/A") clientInbox else (walletAddress.value ?: "0x..."),
+                        topic = conv.topic
+                    )
+                    logAction(
+                        tag = "VOICE",
+                        message = "TX VOICE COMMITTED | MsgID: $msgId | Duration: ${VoiceNoteCodec.formatDuration(voiceNote.durationMs)} | Bytes: ${voiceNote.audioBytes.size}"
+                    )
+                }
+                .onFailure { err ->
+                    _statusBanner.value = "Αποτυχία αποστολής φωνητικού: ${err.message}"
+                    logAction("VOICE", "Voice dispatch failed: ${err.message}", isError = true)
                 }
             }
         }

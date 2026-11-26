@@ -270,7 +270,7 @@ internal fun MessagingLoadingScreen() {
             )
             Spacer(Modifier.height(6.dp))
             Text(
-                text = "Συνδεόμαστε στο δίκτυο XMTP DEV και προετοιμάζουμε την κρυπτογραφημένη βάση SQLCipher.",
+                text = "Συνδεόμαστε στο δίκτυο XMTP Production και προετοιμάζουμε την κρυπτογραφημένη βάση SQLCipher.",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
             )

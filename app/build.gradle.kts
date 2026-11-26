@@ -12,23 +12,10 @@ android {
         applicationId = "com.example.thesis"
         minSdk = 26
         targetSdk = 35
-        versionCode = 31
-        versionName = "1.0.34"
+        versionCode = 32
+        versionName = "1.0.35"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-
-        // ====================================================================
-        // ABI Filter Integrity:
-        // Restricts JNI architectures strictly to modern 64-bit platforms:
-        // - arm64-v8a: Physical modern Android hardware (mandated by Google Play).
-        // - x86_64: Official Android Studio emulator virtual devices.
-        // Strips legacy 32-bit binaries (armeabi, armeabi-v7a, x86, mips, mips64):
-        // 1. Cuts ~40MB of redundant uncompressed .so bloat from XMTP (30.3MB) and SQLCipher (9.4MB).
-        // 2. Eliminates mixed 32/64-bit UnsatisfiedLinkError crashes when loading native libraries.
-        // ====================================================================
-        ndk {
-            abiFilters += listOf("arm64-v8a", "x86_64")
-        }
     }
 
     packaging {
@@ -94,9 +81,20 @@ android {
     }
 
     buildTypes {
+        debug {
+            ndk {
+                abiFilters += listOf("arm64-v8a", "x86_64")
+            }
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            // Reutilizamos debug.keystore para permitir actualizaciones directas sin desinstalar ni perder el historial MLS.
+            signingConfig = signingConfigs.getByName("debug")
+            // Mantenemos solo arm64-v8a en release para eliminar binarios x86_64 de emulador y reducir el APK.
+            ndk {
+                abiFilters += listOf("arm64-v8a")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

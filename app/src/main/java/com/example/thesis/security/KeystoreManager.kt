@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
 import android.security.keystore.UserNotAuthenticatedException
@@ -25,6 +26,7 @@ import javax.crypto.Cipher
 import javax.crypto.IllegalBlockSizeException
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
+import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
 
 /**
@@ -636,6 +638,51 @@ class KeystoreManager(context: Context) {
         }.getOrDefault(false)
     }
 
+    // Inspeccionamos el estado real de aislamiento hardware del KEK sin extraer material de clave.
+    fun inspectHardwareKeystore(): HardwareKeystoreAuditInfo {
+        return runCatching {
+            val keyStore = KeyStore.getInstance(ANDROID_KEYSTORE_PROVIDER).apply { load(null) }
+            val kek = keyStore.getKey(KEK_ALIAS, null) as? SecretKey
+                ?: return HardwareKeystoreAuditInfo(
+                    kekExists = false,
+                    isNonExportable = true,
+                    securityLevel = "MISSING",
+                    dekEnvelopePresent = false
+                )
+            val nonExportable = kek.encoded == null
+            val level = runCatching {
+                val factory = SecretKeyFactory.getInstance(kek.algorithm, ANDROID_KEYSTORE_PROVIDER)
+                val keyInfo = factory.getKeySpec(kek, KeyInfo::class.java) as KeyInfo
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    when (keyInfo.securityLevel) {
+                        KeyProperties.SECURITY_LEVEL_STRONGBOX -> "STRONGBOX"
+                        KeyProperties.SECURITY_LEVEL_TRUSTED_ENVIRONMENT -> "TRUSTED_ENVIRONMENT"
+                        KeyProperties.SECURITY_LEVEL_SOFTWARE -> "SOFTWARE"
+                        KeyProperties.SECURITY_LEVEL_UNKNOWN_SECURE -> "UNKNOWN_SECURE"
+                        else -> "UNKNOWN(${keyInfo.securityLevel})"
+                    }
+                } else {
+                    @Suppress("DEPRECATION")
+                    if (keyInfo.isInsideSecureHardware) "TRUSTED_ENVIRONMENT" else "SOFTWARE"
+                }
+            }.getOrDefault("UNAVAILABLE")
+
+            HardwareKeystoreAuditInfo(
+                kekExists = true,
+                isNonExportable = nonExportable,
+                securityLevel = level,
+                dekEnvelopePresent = hasPersistedSession()
+            )
+        }.getOrElse { err ->
+            HardwareKeystoreAuditInfo(
+                kekExists = false,
+                isNonExportable = true,
+                securityLevel = "ERROR:${err::class.java.simpleName}",
+                dekEnvelopePresent = false
+            )
+        }
+    }
+
     private fun openEncryptedPreferences(): SharedPreferences {
         cachedPreferences?.let { return it }
         return synchronized(KEYSTORE_LOCK) {
@@ -732,3 +779,10 @@ sealed class KeystoreResult<out T> {
         return this
     }
 }
+
+data class HardwareKeystoreAuditInfo(
+    val kekExists: Boolean,
+    val isNonExportable: Boolean,
+    val securityLevel: String,
+    val dekEnvelopePresent: Boolean
+)

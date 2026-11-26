@@ -47,7 +47,6 @@ interface WebRtcCallListener {
     fun onIceConnected(callId: String)
     fun onIceDisconnected(callId: String, reason: String)
     fun onTransportTypeChanged(callId: String, transportType: CallTransportType)
-    fun onFingerprintsUpdated(callId: String, localFingerprint: String?, remoteFingerprint: String?)
     fun onEngineError(callId: String, reason: String)
     fun onCallDiagnostic(callId: String, message: String) = Unit
     fun onRemoteVideoAvailable(callId: String, available: Boolean) = Unit
@@ -57,8 +56,7 @@ interface WebRtcCallListener {
 // Motor WebRTC de voz y video P2P con serializacion en hilo unico para evitar condiciones de carrera JNI y EGL.
 internal class WebRtcCallEngine(
     private val appContext: Context,
-    private val listener: WebRtcCallListener,
-    private val turnServersProvider: () -> List<IceEndpoint> = { emptyList() }
+    private val listener: WebRtcCallListener
 ) {
     private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val webrtcExecutor = Executors.newSingleThreadExecutor { runnable ->
@@ -89,8 +87,6 @@ internal class WebRtcCallEngine(
     private var isFrontCamera: Boolean = true
     private var isCapturing: Boolean = false
 
-    private var localFingerprint: String? = null
-    private var remoteFingerprint: String? = null
     private var hasRemoteDescription: Boolean = false
     private val pendingRemoteIce = mutableListOf<CallIceCandidate>()
     private val outboundIceBuffer = mutableListOf<CallIceCandidate>()
@@ -156,8 +152,6 @@ internal class WebRtcCallEngine(
                     runOnWebRtc {
                         if (activeCallId != callId) return@runOnWebRtc
                         hasRemoteDescription = true
-                        remoteFingerprint = CallSignalingPolicy.extractDtlsSha256Fingerprint(remoteOfferSdp)
-                        listener.onFingerprintsUpdated(callId, localFingerprint, remoteFingerprint)
                         drainPendingRemoteIceOnExecutor()
                         createLocalAnswerOnExecutor(callId, isVideo = isVideo)
                     }
@@ -184,8 +178,6 @@ internal class WebRtcCallEngine(
                     runOnWebRtc {
                         if (activeCallId != callId) return@runOnWebRtc
                         hasRemoteDescription = true
-                        remoteFingerprint = CallSignalingPolicy.extractDtlsSha256Fingerprint(remoteAnswerSdp)
-                        listener.onFingerprintsUpdated(callId, localFingerprint, remoteFingerprint)
                         drainPendingRemoteIceOnExecutor()
                     }
                 }
@@ -357,8 +349,6 @@ internal class WebRtcCallEngine(
         isVideoSession = isVideo
         isFrontCamera = true
         isCapturing = false
-        localFingerprint = null
-        remoteFingerprint = null
         hasRemoteDescription = false
         pendingRemoteIce.clear()
         outboundIceBuffer.clear()
@@ -414,7 +404,7 @@ internal class WebRtcCallEngine(
             val factory = factoryBuilder.createPeerConnectionFactory()
             peerConnectionFactory = factory
 
-            val iceServers = IceServerConfig.buildIceServerList(turnServersProvider())
+            val iceServers = IceServerConfig.buildIceServerList()
             val rtcConfig = PeerConnection.RTCConfiguration(iceServers).apply {
                 sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
                 bundlePolicy = PeerConnection.BundlePolicy.MAXBUNDLE
@@ -541,8 +531,6 @@ internal class WebRtcCallEngine(
                 override fun onSetSuccess() {
                     runOnWebRtc {
                         if (activeCallId != callId) return@runOnWebRtc
-                        localFingerprint = CallSignalingPolicy.extractDtlsSha256Fingerprint(sdp.description)
-                        listener.onFingerprintsUpdated(callId, localFingerprint, remoteFingerprint)
                         if (isOffer) {
                             listener.onLocalOfferCreated(callId, sdp.description)
                         } else {
@@ -629,8 +617,6 @@ internal class WebRtcCallEngine(
             val localType = CallSignalingPolicy.classifyIceCandidateType(event.local?.sdp)
             val remoteType = CallSignalingPolicy.classifyIceCandidateType(event.remote?.sdp)
             val resolved = when {
-                localType == CallTransportType.RELAYED_TURN ||
-                    remoteType == CallTransportType.RELAYED_TURN -> CallTransportType.RELAYED_TURN
                 localType == CallTransportType.DIRECT_P2P ||
                     remoteType == CallTransportType.DIRECT_P2P -> CallTransportType.DIRECT_P2P
                 else -> CallTransportType.UNKNOWN
@@ -684,12 +670,9 @@ internal class WebRtcCallEngine(
         outboundIceBuffer.clear()
         val hostCount = batch.count { it.candidate.contains(" typ host", ignoreCase = true) }
         val srflxCount = batch.count { it.candidate.contains(" typ srflx", ignoreCase = true) }
-        val relayCount = batch.count {
-            CallSignalingPolicy.classifyIceCandidateType(it.candidate) == CallTransportType.RELAYED_TURN
-        }
         listener.onCallDiagnostic(
             callId,
-            "ICE batch sent: ${batch.size} (host=$hostCount, srflx=$srflxCount, relay=$relayCount)"
+            "ICE batch sent: ${batch.size} (host=$hostCount, srflx=$srflxCount)"
         )
         listener.onIceCandidateBatchReady(callId, batch)
     }
@@ -723,8 +706,6 @@ internal class WebRtcCallEngine(
         hasRemoteDescription = false
         isVideoSession = false
         isFrontCamera = true
-        localFingerprint = null
-        remoteFingerprint = null
         pendingRemoteIce.clear()
         outboundIceBuffer.clear()
 

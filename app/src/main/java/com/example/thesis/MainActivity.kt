@@ -41,6 +41,7 @@ import com.example.thesis.ui.components.ScreenRecordingShieldOverlay
 import com.example.thesis.ui.components.UpdateAvailableBanner
 import com.example.thesis.ui.components.messagingStatusText
 import com.example.thesis.identity.NicknamePolicy
+import com.example.thesis.identity.NicknameSnapshot
 import com.example.thesis.security.ScreenSecurityManager
 import com.example.thesis.security.ScreenSecurityPolicy
 import com.example.thesis.ui.dialogs.AppUpdateDialog
@@ -163,25 +164,12 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     val engineState by viewModel.engineState.collectAsState()
     val walletAddress by viewModel.walletAddress.collectAsState()
     val inboxId by viewModel.inboxId.collectAsState()
-    val installationId by viewModel.installationId.collectAsState()
-    val verifiedMsgCount by viewModel.verifiedMessageCount.collectAsState()
-    val conversations by viewModel.conversations.collectAsState()
     val selectedConversation by viewModel.selectedConversation.collectAsState()
-    val messages by viewModel.messages.collectAsState()
     val statusBanner by viewModel.statusBanner.collectAsState()
-    val actionLogs by viewModel.actionLogs.collectAsState()
-    val actionLogSessions by viewModel.actionLogSessions.collectAsState()
     val isSyncing by viewModel.isSyncing.collectAsState()
-    val isBenchmarking by viewModel.isBenchmarking.collectAsState()
-    val isCreatingConversation by viewModel.isCreatingConversation.collectAsState()
     val isShredding by viewModel.isShredding.collectAsState()
     val lastShredProof by viewModel.lastShredProof.collectAsState()
-    val unreadCounts by viewModel.unreadCounts.collectAsState()
     val nicknameSnapshot by viewModel.nicknameSnapshot.collectAsState()
-    val peerReadTimestamps by viewModel.peerReadTimestamps.collectAsState()
-    val callEventsByConversation by viewModel.callEventsByConversation.collectAsState()
-    val voiceRecordingState by viewModel.voiceRecordingState.collectAsState()
-    val voicePlaybackState by viewModel.voicePlaybackState.collectAsState()
     val isScreenRecordingActive by viewModel.isScreenRecordingActive.collectAsState()
     val deviceTransferState by viewModel.deviceTransferState.collectAsState()
     val callState by viewModel.callState.collectAsState()
@@ -235,6 +223,25 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
             .onFailure {
                 scope.launch {
                     snackbarHostState.showSnackbar("Αποτυχία εξαγωγής αρχείου αναφοράς")
+                }
+            }
+    }
+
+    val onSharePdfReport: () -> Unit = {
+        val report = viewModel.exportBenchmarkReport()
+        ReportExporter.sharePdfReport(
+            context = context,
+            reportTitle = "THESIS XMTP Crypto & Benchmark Report (v${viewModel.getCurrentVersionName()})",
+            reportMarkdown = report
+        )
+            .onSuccess {
+                scope.launch {
+                    snackbarHostState.showSnackbar("Έτοιμη εκτύπωση / κοινοποίηση PDF (.pdf)")
+                }
+            }
+            .onFailure {
+                scope.launch {
+                    snackbarHostState.showSnackbar("Αποτυχία δημιουργίας αρχείου PDF")
                 }
             }
     }
@@ -552,18 +559,14 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     val inspectorConv = selectedConversation
     val inspectorReadyState = engineState as? XmtpEngineState.Ready
     if (showProtocolInspectorDialog && inspectorConv != null && inspectorReadyState != null) {
-        val inspectorKey = if (inspectorConv is Conversation.Dm) inspectorConv.dm.peerInboxId else inspectorConv.id
-        val isLoopbackConv = inspectorConv is Conversation.Group && inspectorConv.group.cachedGroupName() == "MLS Research Loopback"
-        MLSProtocolInspectorDialog(
+        MLSProtocolInspectorDialogHost(
+            viewModel = viewModel,
             conversation = inspectorConv,
             localInboxId = inspectorReadyState.client.inboxId,
-            messageCount = messages.size,
-            contactNickname = NicknamePolicy.resolveContactNickname(inspectorKey, nicknameSnapshot),
-            onEditContactNickname = if (isLoopbackConv) null else {
-                {
-                    showProtocolInspectorDialog = false
-                    nicknameEditTarget = inspectorConv
-                }
+            nicknameSnapshot = nicknameSnapshot,
+            onEditContactNickname = {
+                showProtocolInspectorDialog = false
+                nicknameEditTarget = inspectorConv
             },
             onDismiss = { showProtocolInspectorDialog = false },
             onCopyTopic = {
@@ -575,21 +578,15 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
 
     Box(modifier = Modifier.fillMaxSize()) {
         if (showLogsScreen) {
-            LogsTelemetryScreen(
-                logs = actionLogs,
-                sessions = actionLogSessions,
+            LogsTelemetryScreenHost(
+                viewModel = viewModel,
                 walletAddress = walletAddress,
                 inboxId = inboxId,
-                installationId = installationId,
-                verifiedMsgCount = verifiedMsgCount,
-                isBenchmarking = isBenchmarking,
                 snackbarHostState = snackbarHostState,
                 onBack = { showLogsScreen = false },
-                onClear = { viewModel.clearActionLogs() },
                 onExport = onExportLogs,
                 onShareReport = onShareReport,
-                onRunBatchBenchmark = { viewModel.runBatchBenchmark(10) },
-                onEmitBlockchainPoC = { viewModel.emitBlockchainPoCProof() }
+                onSharePdfReport = onSharePdfReport
             )
         } else {
             Scaffold(
@@ -706,44 +703,15 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                         is XmtpEngineState.Ready -> {
                             val activeConv = selectedConversation
                             if (activeConv != null) {
-                                val peerDisplayName = remember(activeConv, nicknameSnapshot) {
-                                    if (activeConv is Conversation.Dm) {
-                                        val peerId = activeConv.dm.peerInboxId
-                                        NicknamePolicy.resolveContactNickname(peerId, nicknameSnapshot)
-                                            ?: NicknamePolicy.resolveContactNickname(activeConv.id, nicknameSnapshot)
-                                            ?: if (peerId.length > 14) "${peerId.take(6)}...${peerId.takeLast(4)}" else peerId
-                                    } else {
-                                        "Επαφή"
-                                    }
-                                }
-                                MessagingChatScreen(
-                                    messages = messages,
-                                    callEvents = callEventsByConversation[activeConv.id].orEmpty(),
-                                    peerDisplayName = peerDisplayName,
+                                MessagingChatScreenHost(
+                                    viewModel = viewModel,
+                                    activeConv = activeConv,
                                     localInboxId = state.client.inboxId,
-                                    peerLastReadTimestampMs = peerReadTimestamps[activeConv.id],
-                                    draft = draft,
+                                    nicknameSnapshot = nicknameSnapshot,
                                     isSyncing = isSyncing,
                                     isShredding = isShredding,
-                                    voiceRecordingState = voiceRecordingState,
-                                    voicePlaybackState = voicePlaybackState,
-                                    onSync = { viewModel.syncConversations() },
-                                    onStartVoiceCall = if (activeConv is Conversation.Dm && callState is CallUiState.Idle) {
-                                        {
-                                            runWithRecordAudioPermission {
-                                                viewModel.startVoiceCall(activeConv)
-                                            }
-                                        }
-                                    } else null,
-                                    onStartVoiceRecording = {
-                                        runWithRecordAudioPermission {
-                                            viewModel.startVoiceRecording()
-                                        }
-                                    },
-                                    onCancelVoiceRecording = { viewModel.cancelVoiceRecording() },
-                                    onStopAndSendVoiceRecording = { viewModel.stopAndSendVoiceRecording() },
-                                    onToggleVoicePlayback = { msgId, note -> viewModel.toggleVoicePlayback(msgId, note) },
-                                    onSeekVoicePlayback = { msgId, fraction -> viewModel.seekVoicePlayback(msgId, fraction) },
+                                    isCallIdle = callState is CallUiState.Idle,
+                                    draft = draft,
                                     onDraftChange = { draft = it },
                                     onSendMessage = { text ->
                                         draft = ""
@@ -754,25 +722,26 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                                             }
                                         )
                                     },
-                                    onRetryMessage = { body ->
-                                        viewModel.sendMessage(body)
+                                    onStartVoiceCall = { dm ->
+                                        runWithRecordAudioPermission {
+                                            viewModel.startVoiceCall(dm)
+                                        }
+                                    },
+                                    onStartVoiceRecording = {
+                                        runWithRecordAudioPermission {
+                                            viewModel.startVoiceRecording()
+                                        }
                                     }
                                 )
                             } else {
-                                InboxDashboardScreen(
-                                    conversations = conversations,
-                                    unreadCounts = unreadCounts,
-                                    nicknameSnapshot = nicknameSnapshot,
+                                InboxDashboardScreenHost(
+                                    viewModel = viewModel,
                                     engineState = engineState,
-                                    isCreatingConversation = isCreatingConversation,
+                                    nicknameSnapshot = nicknameSnapshot,
                                     isShredding = isShredding,
-                                    actionLogs = actionLogs,
-                                    currentVersion = viewModel.getCurrentVersionName(),
                                     updateStatus = updateStatus,
                                     onOpenLogs = { showLogsScreen = true },
                                     onNewConversation = { showNewConversationDialog = true },
-                                    onStartLoopback = { viewModel.startSelfConversation() },
-                                    onSelectConversation = { conv -> viewModel.selectConversation(conv) },
                                     onEditContactNickname = { conv -> nicknameEditTarget = conv },
                                     onCopyDownloadUrl = onCopyDownloadUrl,
                                     onOpenDownloadUrl = onOpenDownloadUrl,
@@ -820,4 +789,171 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
             ScreenRecordingShieldOverlay()
         }
     }
+}
+
+@Composable
+private fun LogsTelemetryScreenHost(
+    viewModel: ChatViewModel,
+    walletAddress: String?,
+    inboxId: String?,
+    snackbarHostState: SnackbarHostState,
+    onBack: () -> Unit,
+    onExport: () -> Unit,
+    onShareReport: () -> Unit,
+    onSharePdfReport: () -> Unit
+) {
+    // Recolectamos registros y metricas locales solo al mostrar la pantalla de diagnostico.
+    val actionLogs by viewModel.actionLogs.collectAsState()
+    val actionLogSessions by viewModel.actionLogSessions.collectAsState()
+    val installationId by viewModel.installationId.collectAsState()
+    val verifiedMsgCount by viewModel.verifiedMessageCount.collectAsState()
+    val isBenchmarking by viewModel.isBenchmarking.collectAsState()
+    val cryptoAuditReport by viewModel.cryptoAuditReport.collectAsState()
+    val isRunningCryptoAudit by viewModel.isRunningCryptoAudit.collectAsState()
+
+    LogsTelemetryScreen(
+        logs = actionLogs,
+        sessions = actionLogSessions,
+        walletAddress = walletAddress,
+        inboxId = inboxId,
+        installationId = installationId,
+        verifiedMsgCount = verifiedMsgCount,
+        isBenchmarking = isBenchmarking,
+        cryptoAuditReport = cryptoAuditReport,
+        isRunningCryptoAudit = isRunningCryptoAudit,
+        snackbarHostState = snackbarHostState,
+        onBack = onBack,
+        onClear = { viewModel.clearActionLogs() },
+        onExport = onExport,
+        onShareReport = onShareReport,
+        onSharePdfReport = onSharePdfReport,
+        onRunCryptoAudit = { viewModel.runCryptoAudit() },
+        onRunBatchBenchmark = { viewModel.runBatchBenchmark(10) },
+        onEmitBlockchainPoC = { viewModel.emitBlockchainPoCProof() }
+    )
+}
+
+@Composable
+private fun MessagingChatScreenHost(
+    viewModel: ChatViewModel,
+    activeConv: Conversation,
+    localInboxId: String,
+    nicknameSnapshot: NicknameSnapshot,
+    isSyncing: Boolean,
+    isShredding: Boolean,
+    isCallIdle: Boolean,
+    draft: String,
+    onDraftChange: (String) -> Unit,
+    onSendMessage: (String) -> Unit,
+    onStartVoiceCall: (Conversation.Dm) -> Unit,
+    onStartVoiceRecording: () -> Unit
+) {
+    // Limitamos mensajes y estado de audio de voz a esta vista para evitar recomposiciones en la raiz.
+    val messages by viewModel.messages.collectAsState()
+    val callEventsByConversation by viewModel.callEventsByConversation.collectAsState()
+    val peerReadTimestamps by viewModel.peerReadTimestamps.collectAsState()
+    val voiceRecordingState by viewModel.voiceRecordingState.collectAsState()
+    val voicePlaybackState by viewModel.voicePlaybackState.collectAsState()
+
+    val peerDisplayName = remember(activeConv, nicknameSnapshot) {
+        if (activeConv is Conversation.Dm) {
+            val peerId = activeConv.dm.peerInboxId
+            NicknamePolicy.resolveContactNickname(peerId, nicknameSnapshot)
+                ?: NicknamePolicy.resolveContactNickname(activeConv.id, nicknameSnapshot)
+                ?: if (peerId.length > 14) "${peerId.take(6)}...${peerId.takeLast(4)}" else peerId
+        } else {
+            "Επαφή"
+        }
+    }
+
+    MessagingChatScreen(
+        messages = messages,
+        callEvents = callEventsByConversation[activeConv.id].orEmpty(),
+        peerDisplayName = peerDisplayName,
+        localInboxId = localInboxId,
+        peerLastReadTimestampMs = peerReadTimestamps[activeConv.id],
+        draft = draft,
+        isSyncing = isSyncing,
+        isShredding = isShredding,
+        voiceRecordingState = voiceRecordingState,
+        voicePlaybackState = voicePlaybackState,
+        onSync = { viewModel.syncConversations() },
+        onStartVoiceCall = if (activeConv is Conversation.Dm && isCallIdle) {
+            { onStartVoiceCall(activeConv) }
+        } else null,
+        onStartVoiceRecording = onStartVoiceRecording,
+        onCancelVoiceRecording = { viewModel.cancelVoiceRecording() },
+        onStopAndSendVoiceRecording = { viewModel.stopAndSendVoiceRecording() },
+        onToggleVoicePlayback = { msgId, note -> viewModel.toggleVoicePlayback(msgId, note) },
+        onSeekVoicePlayback = { msgId, fraction -> viewModel.seekVoicePlayback(msgId, fraction) },
+        onDraftChange = onDraftChange,
+        onSendMessage = onSendMessage,
+        onRetryMessage = { body -> viewModel.sendMessage(body) }
+    )
+}
+
+@Composable
+private fun InboxDashboardScreenHost(
+    viewModel: ChatViewModel,
+    engineState: XmtpEngineState,
+    nicknameSnapshot: NicknameSnapshot,
+    isShredding: Boolean,
+    updateStatus: UpdateStatus,
+    onOpenLogs: () -> Unit,
+    onNewConversation: () -> Unit,
+    onEditContactNickname: (Conversation) -> Unit,
+    onCopyDownloadUrl: () -> Unit,
+    onOpenDownloadUrl: () -> Unit,
+    onExpandQr: () -> Unit
+) {
+    // Recolectamos la lista de conversaciones y contador de registros solo cuando el panel es visible.
+    val conversations by viewModel.conversations.collectAsState()
+    val unreadCounts by viewModel.unreadCounts.collectAsState()
+    val isCreatingConversation by viewModel.isCreatingConversation.collectAsState()
+    val actionLogs by viewModel.actionLogs.collectAsState()
+
+    InboxDashboardScreen(
+        conversations = conversations,
+        unreadCounts = unreadCounts,
+        nicknameSnapshot = nicknameSnapshot,
+        engineState = engineState,
+        isCreatingConversation = isCreatingConversation,
+        isShredding = isShredding,
+        actionLogs = actionLogs,
+        currentVersion = viewModel.getCurrentVersionName(),
+        updateStatus = updateStatus,
+        onOpenLogs = onOpenLogs,
+        onNewConversation = onNewConversation,
+        onStartLoopback = { viewModel.startSelfConversation() },
+        onSelectConversation = { conv -> viewModel.selectConversation(conv) },
+        onEditContactNickname = onEditContactNickname,
+        onCopyDownloadUrl = onCopyDownloadUrl,
+        onOpenDownloadUrl = onOpenDownloadUrl,
+        onExpandQr = onExpandQr
+    )
+}
+
+@Composable
+private fun MLSProtocolInspectorDialogHost(
+    viewModel: ChatViewModel,
+    conversation: Conversation,
+    localInboxId: String,
+    nicknameSnapshot: NicknameSnapshot,
+    onEditContactNickname: () -> Unit,
+    onDismiss: () -> Unit,
+    onCopyTopic: () -> Unit
+) {
+    // Observamos el flujo de mensajes solo mientras el inspector de protocolo esta abierto.
+    val messages by viewModel.messages.collectAsState()
+    val inspectorKey = if (conversation is Conversation.Dm) conversation.dm.peerInboxId else conversation.id
+    val isLoopbackConv = conversation is Conversation.Group && conversation.group.cachedGroupName() == "MLS Research Loopback"
+    MLSProtocolInspectorDialog(
+        conversation = conversation,
+        localInboxId = localInboxId,
+        messageCount = messages.size,
+        contactNickname = NicknamePolicy.resolveContactNickname(inspectorKey, nicknameSnapshot),
+        onEditContactNickname = if (isLoopbackConv) null else onEditContactNickname,
+        onDismiss = onDismiss,
+        onCopyTopic = onCopyTopic
+    )
 }

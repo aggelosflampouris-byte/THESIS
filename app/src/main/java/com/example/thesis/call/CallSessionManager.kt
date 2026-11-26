@@ -71,7 +71,6 @@ sealed interface CallUiState {
         val isOutgoing: Boolean,
         override val peerInboxId: String,
         override val peerDisplayName: String,
-        val sasCode: String? = null,
         override val isVideo: Boolean = false,
         val isCameraEnabled: Boolean = false,
         val isFrontCamera: Boolean = true
@@ -85,7 +84,6 @@ sealed interface CallUiState {
         val connectedAtElapsedMs: Long,
         val isMuted: Boolean = false,
         val isSpeakerOn: Boolean = false,
-        val sasCode: String? = null,
         val transportType: CallTransportType = CallTransportType.UNKNOWN,
         override val isVideo: Boolean = false,
         val isCameraEnabled: Boolean = false,
@@ -125,9 +123,6 @@ internal class CallSessionManager(
         var phase: SessionPhase,
         var remoteOfferSdp: String? = null,
         val bufferedRemoteIce: MutableList<CallIceCandidate> = mutableListOf(),
-        var localFingerprint: String? = null,
-        var remoteFingerprint: String? = null,
-        var sasCode: String? = null,
         var transportType: CallTransportType = CallTransportType.UNKNOWN,
         var connectedAtElapsedMs: Long? = null,
         var isMuted: Boolean = false,
@@ -273,7 +268,6 @@ internal class CallSessionManager(
                 isOutgoing = false,
                 peerInboxId = currentUi.peerInboxId,
                 peerDisplayName = currentUi.peerDisplayName,
-                sasCode = null,
                 isVideo = currentUi.isVideo,
                 isCameraEnabled = canUseCamera,
                 isFrontCamera = true
@@ -312,7 +306,6 @@ internal class CallSessionManager(
                 isOutgoing = false,
                 peerInboxId = session.peerInboxId,
                 peerDisplayName = session.peerDisplayName,
-                sasCode = session.sasCode,
                 isVideo = session.isVideo,
                 isCameraEnabled = enableCamera,
                 isFrontCamera = session.isFrontCamera
@@ -510,7 +503,6 @@ internal class CallSessionManager(
         managerScope.launch {
             val session = activeSession ?: return@launch
             if (session.callId != callId) return@launch
-            session.localFingerprint = CallSignalingPolicy.extractDtlsSha256Fingerprint(sdp)
             session.outboundSignalChannel.trySend(
                 CallSignal(
                     callId = callId,
@@ -527,7 +519,6 @@ internal class CallSessionManager(
         managerScope.launch {
             val session = activeSession ?: return@launch
             if (session.callId != callId) return@launch
-            session.localFingerprint = CallSignalingPolicy.extractDtlsSha256Fingerprint(sdp)
             session.outboundSignalChannel.trySend(
                 CallSignal(
                     callId = callId,
@@ -574,7 +565,6 @@ internal class CallSessionManager(
                 connectedAtElapsedMs = startedAt,
                 isMuted = session.isMuted,
                 isSpeakerOn = session.isSpeakerOn,
-                sasCode = session.sasCode,
                 transportType = session.transportType,
                 isVideo = session.isVideo,
                 isCameraEnabled = session.isCameraEnabled,
@@ -614,37 +604,6 @@ internal class CallSessionManager(
             val current = _callState.value
             if (current is CallUiState.Active && current.callId == callId) {
                 _callState.value = current.copy(transportType = transportType)
-            }
-        }
-    }
-
-    override fun onFingerprintsUpdated(
-        callId: String,
-        localFingerprint: String?,
-        remoteFingerprint: String?
-    ) {
-        managerScope.launch {
-            val session = activeSession ?: return@launch
-            if (session.callId != callId) return@launch
-            if (!localFingerprint.isNullOrBlank()) session.localFingerprint = localFingerprint
-            if (!remoteFingerprint.isNullOrBlank()) session.remoteFingerprint = remoteFingerprint
-            val localInboxId = engine.client?.inboxId.orEmpty()
-            val derived = CallSignalingPolicy.deriveVoiceSasCode(
-                callId = callId,
-                localFingerprint = session.localFingerprint,
-                remoteFingerprint = session.remoteFingerprint,
-                localInboxId = localInboxId,
-                remoteInboxId = session.peerInboxId
-            ) ?: return@launch
-            session.sasCode = derived
-            when (val current = _callState.value) {
-                is CallUiState.Connecting -> if (current.callId == callId) {
-                    _callState.value = current.copy(sasCode = derived)
-                }
-                is CallUiState.Active -> if (current.callId == callId) {
-                    _callState.value = current.copy(sasCode = derived)
-                }
-                else -> Unit
             }
         }
     }
@@ -811,7 +770,6 @@ internal class CallSessionManager(
             isVideo = isVideo,
             phase = SessionPhase.INCOMING_RINGING,
             remoteOfferSdp = offerSdp,
-            remoteFingerprint = CallSignalingPolicy.extractDtlsSha256Fingerprint(offerSdp),
             isSpeakerOn = isVideo,
             isCameraEnabled = isVideo
         )
@@ -854,7 +812,6 @@ internal class CallSessionManager(
             isOutgoing = true,
             peerInboxId = session.peerInboxId,
             peerDisplayName = session.peerDisplayName,
-            sasCode = session.sasCode,
             isVideo = session.isVideo,
             isCameraEnabled = session.isCameraEnabled,
             isFrontCamera = session.isFrontCamera

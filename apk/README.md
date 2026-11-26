@@ -6,22 +6,28 @@ This directory contains the ready-to-install Android package (`.apk`) for physic
 
 | Attribute | Specification |
 | :--- | :--- |
-| **File Name** | `thesis-app-debug.apk` |
+| **File Name** | `thesis-app-release.apk` |
 | **Package Name** | `com.example.thesis` |
-| **Version** | `1.0.5 (versionCode 2)` |
-| **Min SDK / Target SDK** | `26` (Android 8.0) / `34` (Android 14) |
-| **Size** | `67 MB` (`69,552,950 bytes`) |
-| **SHA-256 Checksum** | `c7b7378752fa15cace205156cd57aa6ea81b0fe6327f555ad2d1065e80fb0353` |
-| **Signer Verification** | `APK Signature Scheme v2 (Signed)` |
-| **Supported ABIs** | `arm64-v8a` (Physical 64-bit ARM Phones) & `x86_64` (Emulators) |
+| **Min SDK / Target SDK** | `26` (Android 8.0) / `35` (Android 15) |
+| **XMTP Environment** | `PRODUCTION` (MLS RFC 9420 + gRPC TLS) |
+| **Build Profile** | `release` (R8 Minified, Resource Shrunk, Non-Debuggable) |
+| **Size** | `28.7 MB` (`28,715,869 bytes`) |
+| **SHA-256 Checksum** | `3dbb7153855faf73c00005fcb0a47d8199b33c85f382e4ece3d05c4d6656239d` |
+| **Signer Verification** | `APK Signature Scheme v2 (Verified)` |
+| **Supported ABIs** | `arm64-v8a` (Physical 64-bit ARM Phones) |
 
-## What's New in v1.0.5
+## Cryptographic & Network Self-Verification
 
-- **Multi-Device Message Synchronization**: Fixed issue where incoming conversations from peers were omitted by querying both `ALLOWED` and `UNKNOWN` consent states and automatically syncing welcomes from the XMTP network.
-- **Dual Identity Peer Resolution**: Added support for connecting via either Ethereum Address (`0x...`) or XMTP Inbox ID (64-character hexadecimal).
-- **Identity Details Dialog**: Exposes both Ethereum Wallet Address and XMTP Inbox ID with 1-tap copy buttons and 2-device pairing instructions.
-- **Live Stream Reconnection**: Implemented automatic reconnection loop for incoming message streams and instant local UI dispatch.
-- **Visual Separation**: Clearly badges Direct Messages (👤), Loopback tests (🔄), and Group chats (👥) to prevent isolated self-chatting.
+Open **Action & Telemetry Log** inside the app and tap **Verify Crypto & Network (7 Checks)** to run live empirical checks on:
+1. Hardware Keystore KEK isolation (`encoded == null`, StrongBox / TEE hardware level)
+2. DEK unwrap & AES-256-GCM AEAD tamper rejection (`AEADBadTagException`)
+3. Ethereum EIP-191 secp256k1 signature + independent `ecrecover` & BIP-62 low-S proof
+4. XMTP MLS installation Ed25519 signature & tamper verification
+5. On-disk SQLCipher ciphertext verification (confirms plaintext `"SQLite format 3"` header is absent)
+6. Live XMTP `PRODUCTION` network registration & ledger check (`inboxState(refreshFromNetwork = true)`, `canMessage`, `inboxIdFromIdentity`)
+7. Release binary & production network posture
+
+Tap **.md** or **.pdf** in the top bar (or **Export PDF** / **Export .md** on the audit card) to print or share the full verification and benchmark report.
 
 ## Embedded Native Libraries
 
@@ -33,10 +39,10 @@ This directory contains the ready-to-install Android package (`.apk`) for physic
 
 ### Option 1: Via In-App Updater
 
-If running v1.0.4, tap the **🚀 v1.0.5** button in the TopBar or tap **Ταυτότητα** -> **Έλεγχος Ενημερώσεων** to download and install automatically.
+If running an older build (`thesis-app-release.apk`-enabled releases), open **Ταυτότητα** -> **Έλεγχος Ενημερώσεων** to download and install automatically.
 
 ### Option 2: Direct Device Sideloading
 
-1. Download `thesis-app-debug.apk` directly to your Android device.
-2. Tap `thesis-app-debug.apk` and confirm installation.
+1. Download `thesis-app-release.apk` directly to your Android device.
+2. Tap `thesis-app-release.apk` and confirm installation.
 3. Launch **THESIS** from the app launcher.

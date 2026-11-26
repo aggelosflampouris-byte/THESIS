@@ -2,8 +2,6 @@ package com.example.thesis.call
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -36,44 +34,7 @@ class CallSignalingPolicyTest {
     }
 
     @Test
-    fun extractDtlsSha256Fingerprint_parsesAndNormalizesCase() {
-        val sdp = listOf(
-            "v=0",
-            "o=- 1 2 IN IP4 127.0.0.1",
-            "a=fingerprint:SHA-256 AA:BB:CC:DD:EE:FF:00:11",
-            "a=setup:actpass"
-        ).joinToString("\r\n")
-
-        assertEquals(
-            "aa:bb:cc:dd:ee:ff:00:11",
-            CallSignalingPolicy.extractDtlsSha256Fingerprint(sdp)
-        )
-        assertNull(CallSignalingPolicy.extractDtlsSha256Fingerprint("v=0\r\na=fingerprint:sha-1 AA:BB"))
-        assertNull(CallSignalingPolicy.extractDtlsSha256Fingerprint(null))
-    }
-
-    @Test
-    fun deriveVoiceSasCode_isSymmetricAndBoundToCallAndFingerprints() {
-        val callId = "550e8400-e29b-41d4-a716-446655440000"
-        val fpA = "AA:11:22:33:44:55:66:77"
-        val fpB = "bb:99:88:77:66:55:44:33"
-
-        val sasFromA = CallSignalingPolicy.deriveVoiceSasCode(callId, fpA, fpB, "inboxA", "inboxB")
-        val sasFromB = CallSignalingPolicy.deriveVoiceSasCode(callId, fpB, fpA, "INBOXB", "INBOXA")
-
-        requireNotNull(sasFromA)
-        assertTrue(sasFromA.matches(Regex("^\\d{6}$")))
-        assertEquals(sasFromA, sasFromB)
-
-        val differentCallSas = CallSignalingPolicy.deriveVoiceSasCode("other-call", fpA, fpB, "inboxA", "inboxB")
-        assertNotEquals(sasFromA, differentCallSas)
-
-        val mitmFpSas = CallSignalingPolicy.deriveVoiceSasCode(callId, fpA, "ff:ff:ff:ff:ff:ff:ff:ff", "inboxA", "inboxB")
-        assertNotEquals(sasFromA, mitmFpSas)
-    }
-
-    @Test
-    fun classifyIceCandidateType_distinguishesDirectP2pFromTurnRelay() {
+    fun classifyIceCandidateType_acceptsDirectP2pCandidatesOnly() {
         assertEquals(
             CallTransportType.DIRECT_P2P,
             CallSignalingPolicy.classifyIceCandidateType("candidate:1 1 udp 2122260223 192.168.1.2 5000 typ host")
@@ -83,12 +44,12 @@ class CallSignalingPolicyTest {
             CallSignalingPolicy.classifyIceCandidateType("candidate:2 1 udp 1686052607 198.51.100.3 61000 typ srflx raddr 192.168.1.2")
         )
         assertEquals(
-            CallTransportType.RELAYED_TURN,
+            CallTransportType.UNKNOWN,
             CallSignalingPolicy.classifyIceCandidateType("candidate:3 1 tcp 41885439 203.0.113.99 443 typ relay raddr 0.0.0.0")
         )
         assertEquals(
-            CallTransportType.RELAYED_TURN,
-            CallSignalingPolicy.classifySelectedCandidatePair("host", "relay")
+            CallTransportType.UNKNOWN,
+            CallSignalingPolicy.classifySelectedCandidatePair("relay", "relay")
         )
         assertEquals(
             CallTransportType.DIRECT_P2P,

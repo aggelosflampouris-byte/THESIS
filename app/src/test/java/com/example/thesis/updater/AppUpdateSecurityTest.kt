@@ -28,6 +28,7 @@ class AppUpdateSecurityTest {
         val urls = listOf(
             "https://api.github.com/repos/aggelosflampouris-byte/THESIS/releases/latest",
             "https://github.com/aggelosflampouris-byte/THESIS/releases/download/v1.0.14/thesis-app-debug.apk",
+            "https://github.com/aggelosflampouris-byte/THESIS/releases/download/v1.0.35/thesis-app-release.apk",
             "https://objects.githubusercontent.com/github-production-release-asset/app.apk",
             "https://release-assets.githubusercontent.com/foo/bar.apk"
         )

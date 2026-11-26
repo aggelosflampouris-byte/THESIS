@@ -26,12 +26,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -67,6 +68,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.thesis.diagnostics.ActionLogSession
 import com.example.thesis.diagnostics.ActionLogStore
+import com.example.thesis.security.CryptoAuditReport
 import com.example.thesis.ui.ActionLogEntry
 import com.example.thesis.ui.util.copyToClipboard
 import java.text.SimpleDateFormat
@@ -83,11 +85,15 @@ internal fun LogsTelemetryScreen(
     installationId: String? = null,
     verifiedMsgCount: Int = 0,
     isBenchmarking: Boolean = false,
+    cryptoAuditReport: CryptoAuditReport? = null,
+    isRunningCryptoAudit: Boolean = false,
     snackbarHostState: SnackbarHostState = remember { SnackbarHostState() },
     onBack: () -> Unit,
     onClear: () -> Unit,
     onExport: () -> Unit = {},
     onShareReport: () -> Unit = {},
+    onSharePdfReport: () -> Unit = {},
+    onRunCryptoAudit: () -> Unit = {},
     onRunBatchBenchmark: () -> Unit = {},
     onEmitBlockchainPoC: () -> Unit = {},
     modifier: Modifier = Modifier
@@ -128,7 +134,7 @@ internal fun LogsTelemetryScreen(
     val timeFormat = remember { SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()) }
     val sessionDateFormat = remember { SimpleDateFormat("dd/MM HH:mm:ss", Locale.getDefault()) }
     val filterTags = listOf(
-        "ALL", "CRASH", "CALL", "NOTIF", "METRIC", "E2EE",
+        "ALL", "AUDIT", "CRASH", "CALL", "NOTIF", "METRIC", "E2EE",
         "MLS", "KEYSTORE", "SYNC", "BENCHMARK", "GDPR", "UPDATE"
     )
 
@@ -161,11 +167,17 @@ internal fun LogsTelemetryScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = onShareReport) {
-                        Icon(
-                            imageVector = Icons.Default.Share,
-                            contentDescription = "Κοινοποίηση (.md)"
-                        )
+                    TextButton(
+                        onClick = onShareReport,
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
+                    ) {
+                        Text(".md", fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                    }
+                    TextButton(
+                        onClick = onSharePdfReport,
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp)
+                    ) {
+                        Text(".pdf", fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
                     }
                     TextButton(
                         onClick = onExport,
@@ -395,7 +407,7 @@ internal fun LogsTelemetryScreen(
 
                                 Button(
                                     onClick = onRunBatchBenchmark,
-                                    enabled = !isBenchmarking,
+                                    enabled = !isBenchmarking && !isRunningCryptoAudit,
                                     modifier = Modifier
                                         .weight(1f)
                                         .heightIn(min = 40.dp),
@@ -417,6 +429,169 @@ internal fun LogsTelemetryScreen(
                                         )
                                         Spacer(Modifier.width(4.dp))
                                         Text("Batch (10x)", fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            OutlinedButton(
+                                onClick = onRunCryptoAudit,
+                                enabled = !isRunningCryptoAudit && !isBenchmarking,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 40.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                            ) {
+                                if (isRunningCryptoAudit) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(14.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Εκτέλεση ελέγχων...", fontSize = 11.sp, maxLines = 1)
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.Lock,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Verify Crypto & Network (7 Checks)", fontSize = 11.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (cryptoAuditReport != null) {
+                    item(key = "crypto_audit_card") {
+                        val isAllPass = cryptoAuditReport.allPassed
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (isAllPass) {
+                                    MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)
+                                } else {
+                                    MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f)
+                                }
+                            ),
+                            border = BorderStroke(
+                                1.dp,
+                                if (isAllPass) MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                                else MaterialTheme.colorScheme.error.copy(alpha = 0.6f)
+                            ),
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Icon(
+                                            imageVector = if (isAllPass) Icons.Default.CheckCircle else Icons.Default.Warning,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp),
+                                            tint = if (isAllPass) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                                        )
+                                        Spacer(Modifier.width(6.dp))
+                                        Text(
+                                            text = "Crypto & Network Audit (${cryptoAuditReport.passedCount}/${cryptoAuditReport.totalCount} PASS)",
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                    Surface(
+                                        shape = RoundedCornerShape(4.dp),
+                                        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.7f)
+                                    ) {
+                                        Text(
+                                            text = "${cryptoAuditReport.environmentName} • ${if (cryptoAuditReport.isDebugBuild) "DEBUG" else "RELEASE"}",
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+                                }
+
+                                cryptoAuditReport.checks.forEach { check ->
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 2.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = "${if (check.passed) "[PASS]" else "[FAIL]"} ${check.title}",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = if (check.passed) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                                                modifier = Modifier.weight(1f),
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis
+                                            )
+                                            Text(
+                                                text = String.format(Locale.US, "%.1f ms", check.durationMs),
+                                                fontSize = 10.sp,
+                                                fontFamily = FontFamily.Monospace,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        Text(
+                                            text = check.details,
+                                            fontSize = 10.sp,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+
+                                FlowRow(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    cryptoAuditReport.eip191Proof?.let { proof ->
+                                        OutlinedButton(
+                                            onClick = {
+                                                val proofText = buildString {
+                                                    appendLine("Address: ${proof.walletAddress}")
+                                                    appendLine("Challenge: ${proof.challenge}")
+                                                    appendLine("Signature: ${proof.signatureHex}")
+                                                }.trimEnd()
+                                                copyToClipboard(context, "EIP-191 Proof", proofText, sensitive = false)
+                                                Toast.makeText(context, "Το EIP-191 proof αντιγράφηκε", Toast.LENGTH_SHORT).show()
+                                            },
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                                        ) {
+                                            Text("Copy EIP-191 Proof", fontSize = 10.sp)
+                                        }
+                                    }
+                                    OutlinedButton(
+                                        onClick = onSharePdfReport,
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                                    ) {
+                                        Text("Export PDF", fontSize = 10.sp)
+                                    }
+                                    OutlinedButton(
+                                        onClick = onShareReport,
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                                    ) {
+                                        Text("Export .md", fontSize = 10.sp)
                                     }
                                 }
                             }

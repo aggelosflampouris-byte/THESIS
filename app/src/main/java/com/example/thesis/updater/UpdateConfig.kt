@@ -20,7 +20,7 @@ object UpdateConfig {
     /**
      * Target APK asset name matching release artifacts created by GitHub Actions.
      */
-    const val TARGET_ASSET_NAME = "thesis-app-debug.apk"
+    const val TARGET_ASSET_NAME = "thesis-app-release.apk"
 
     /**
      * Canonical HTTPS web page for the latest GitHub Release.

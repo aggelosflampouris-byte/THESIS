@@ -105,16 +105,9 @@ internal fun ActiveCallOverlay(
         CallUiState.Idle -> ""
     }
 
-    val sasCode = when (callState) {
-        is CallUiState.Connecting -> callState.sasCode
-        is CallUiState.Active -> callState.sasCode
-        else -> null
-    }
-
     val transportLabel = when (callState) {
         is CallUiState.Active -> when (callState.transportType) {
             CallTransportType.DIRECT_P2P -> "P2P • DTLS-SRTP"
-            CallTransportType.RELAYED_TURN -> "TURN Relay • DTLS-SRTP"
             CallTransportType.UNKNOWN -> "WebRTC • DTLS-SRTP"
         }
         else -> "MLS + DTLS-SRTP"
@@ -319,41 +312,7 @@ internal fun ActiveCallOverlay(
                     }
                 }
 
-                if (!sasCode.isNullOrBlank()) {
-                    Surface(
-                        shape = RoundedCornerShape(16.dp),
-                        color = Color(0xCC16222C),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Text(
-                                text = "Επαλήθευση κρυπτογράφησης (SAS)",
-                                fontSize = 12.sp,
-                                color = Color(0xFF9BB0BE),
-                                textAlign = TextAlign.Center
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            val groupedSas = if (sasCode.length == 6) {
-                                "${sasCode.substring(0, 3)} ${sasCode.substring(3, 6)}"
-                            } else {
-                                sasCode
-                            }
-                            Text(
-                                text = groupedSas,
-                                fontSize = 24.sp,
-                                fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace,
-                                letterSpacing = 3.sp,
-                                color = Color(0xFF8BE9FD)
-                            )
-                        }
-                    }
-                } else {
-                    Spacer(modifier = Modifier.height(16.dp))
-                }
+                Spacer(modifier = Modifier.height(16.dp))
 
                 when (callState) {
                     is CallUiState.IncomingRinging -> {

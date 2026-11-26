@@ -296,12 +296,6 @@ private fun ReceiverWaitStep(
             quietZone = 12.dp
         )
         Text(
-            text = "Κωδικός Επαλήθευσης (SAS): ${state.sasCode}",
-            style = MaterialTheme.typography.titleSmall.copy(fontFamily = FontFamily.Monospace),
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.primary
-        )
-        Text(
             text = "Τοπικό δίκτυο: ${state.hostDisplay}:${state.port}",
             style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
             color = MaterialTheme.colorScheme.onSurfaceVariant

@@ -45,7 +45,7 @@ internal class ThesisSessionContainer(context: Context) {
     val keystoreManager = KeystoreManager(appContext)
     val databaseFactory = DatabaseFactory(appContext)
     val cryptoShredder = CryptoShredder(appContext, keystoreManager, databaseFactory)
-    val engine = XmtpEngine(appContext, XMTPEnvironment.DEV)
+    val engine = XmtpEngine(appContext, XMTPEnvironment.PRODUCTION)
 
     // El alcance de aplicacion mantiene viva la escucha gRPC y las notificaciones aunque se cierre la UI.
     val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
