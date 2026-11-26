@@ -45,8 +45,10 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 import org.xmtp.android.library.Conversation
 import com.example.thesis.xmtp.cachedGroupName
 import com.example.thesis.security.KeystoreResult
@@ -189,6 +191,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _isSending = MutableStateFlow(false)
     val isSending: StateFlow<Boolean> = _isSending.asStateFlow()
+    private val sendMutex = Mutex()
+    private val pendingSendCount = AtomicInteger(0)
 
     private val _isSyncing = MutableStateFlow(false)
     val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
@@ -830,35 +834,43 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun sendMessage(text: String, onFailureRestore: (() -> Unit)? = null) {
-        if (_isSending.value || _isShredding.value || _isBenchmarking.value) return
+        if (_isShredding.value || _isBenchmarking.value) return
         val conv = _selectedConversation.value ?: return
+        pendingSendCount.incrementAndGet()
         _isSending.value = true
         viewModelScope.launch {
             try {
-                logAction("E2EE", "Dispatching encrypted MLS payload...")
-                ThesisTelemetry.measureSuspendOperation("5. MLS E2EE Message Dispatch") {
-                    repository.sendMessage(conv, text)
-                }
-                .onSuccess { msgId ->
-                    val sender0x = walletAddress.value ?: "0x..."
-                    val clientInbox = (engine.state.value as? XmtpEngineState.Ready)?.client?.inboxId ?: "N/A"
-                    recordCommittedMessage(
-                        msgId = msgId,
-                        sender = if (clientInbox != "N/A") clientInbox else sender0x,
-                        topic = conv.topic
-                    )
-                    logAction(
-                        "MLS",
-                        "TX COMMITTED | MsgID: $msgId | ConvID: ${conv.id} | Topic: ${conv.topic} | Sender0x: $sender0x | SenderInbox: $clientInbox"
-                    )
-                }
-                .onFailure { err ->
-                    _statusBanner.value = "Αποτυχία αποστολής: ${err.message}"
-                    logAction("E2EE", "Dispatch failed: ${err.message}", isError = true)
-                    onFailureRestore?.invoke()
+                // Serializamos envios consecutivos en orden FIFO sin descartar mensajes rapidos ni bloquear la UI.
+                sendMutex.withLock {
+                    if (_isShredding.value) return@withLock
+                    logAction("E2EE", "Dispatching encrypted MLS payload...")
+                    ThesisTelemetry.measureSuspendOperation("5. MLS E2EE Message Dispatch") {
+                        repository.sendMessage(conv, text)
+                    }
+                    .onSuccess { msgId ->
+                        val sender0x = walletAddress.value ?: "0x..."
+                        val clientInbox = (engine.state.value as? XmtpEngineState.Ready)?.client?.inboxId ?: "N/A"
+                        recordCommittedMessage(
+                            msgId = msgId,
+                            sender = if (clientInbox != "N/A") clientInbox else sender0x,
+                            topic = conv.topic
+                        )
+                        logAction(
+                            "MLS",
+                            "TX COMMITTED | MsgID: $msgId | ConvID: ${conv.id} | Topic: ${conv.topic} | Sender0x: $sender0x | SenderInbox: $clientInbox"
+                        )
+                    }
+                    .onFailure { err ->
+                        _statusBanner.value = "Αποτυχία αποστολής: ${err.message}"
+                        logAction("E2EE", "Dispatch failed: ${err.message}", isError = true)
+                        onFailureRestore?.invoke()
+                    }
                 }
             } finally {
-                _isSending.value = false
+                if (pendingSendCount.decrementAndGet() <= 0) {
+                    pendingSendCount.set(0)
+                    _isSending.value = false
+                }
             }
         }
     }
@@ -1475,7 +1487,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startVoiceRecording() {
-        if (_isSending.value || _isShredding.value || _selectedConversation.value == null) return
+        if (_isShredding.value || _selectedConversation.value == null) return
         if (!hasRecordAudioPermission()) return
         if (callState.value !is CallUiState.Idle) {
             _statusBanner.value = "Τερματίστε την κλήση πριν την εγγραφή φωνητικού μηνύματος."
@@ -1514,33 +1526,40 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun dispatchVoiceNote(voiceNote: VoiceNote) {
-        if (_isSending.value || _isShredding.value || _isBenchmarking.value) return
+        if (_isShredding.value || _isBenchmarking.value) return
         val conv = _selectedConversation.value ?: return
+        pendingSendCount.incrementAndGet()
         _isSending.value = true
         viewModelScope.launch {
             try {
-                logAction("VOICE", "Dispatching MLS E2EE voice note (${VoiceNoteCodec.formatDuration(voiceNote.durationMs)}, ${voiceNote.audioBytes.size / 1024} KB)...")
-                ThesisTelemetry.measureSuspendOperation("5b. MLS E2EE Voice Note Dispatch") {
-                    repository.sendVoiceNote(conv, voiceNote)
-                }
-                .onSuccess { msgId ->
-                    val clientInbox = (engine.state.value as? XmtpEngineState.Ready)?.client?.inboxId ?: "N/A"
-                    recordCommittedMessage(
-                        msgId = msgId,
-                        sender = if (clientInbox != "N/A") clientInbox else (walletAddress.value ?: "0x..."),
-                        topic = conv.topic
-                    )
-                    logAction(
-                        tag = "VOICE",
-                        message = "TX VOICE COMMITTED | MsgID: $msgId | Duration: ${VoiceNoteCodec.formatDuration(voiceNote.durationMs)} | Bytes: ${voiceNote.audioBytes.size}"
-                    )
-                }
-                .onFailure { err ->
-                    _statusBanner.value = "Αποτυχία αποστολής φωνητικού: ${err.message}"
-                    logAction("VOICE", "Voice dispatch failed: ${err.message}", isError = true)
+                sendMutex.withLock {
+                    if (_isShredding.value) return@withLock
+                    logAction("VOICE", "Dispatching MLS E2EE voice note (${VoiceNoteCodec.formatDuration(voiceNote.durationMs)}, ${voiceNote.audioBytes.size / 1024} KB)...")
+                    ThesisTelemetry.measureSuspendOperation("5b. MLS E2EE Voice Note Dispatch") {
+                        repository.sendVoiceNote(conv, voiceNote)
+                    }
+                    .onSuccess { msgId ->
+                        val clientInbox = (engine.state.value as? XmtpEngineState.Ready)?.client?.inboxId ?: "N/A"
+                        recordCommittedMessage(
+                            msgId = msgId,
+                            sender = if (clientInbox != "N/A") clientInbox else (walletAddress.value ?: "0x..."),
+                            topic = conv.topic
+                        )
+                        logAction(
+                            tag = "VOICE",
+                            message = "TX VOICE COMMITTED | MsgID: $msgId | Duration: ${VoiceNoteCodec.formatDuration(voiceNote.durationMs)} | Bytes: ${voiceNote.audioBytes.size}"
+                        )
+                    }
+                    .onFailure { err ->
+                        _statusBanner.value = "Αποτυχία αποστολής φωνητικού: ${err.message}"
+                        logAction("VOICE", "Voice dispatch failed: ${err.message}", isError = true)
+                    }
                 }
             } finally {
-                _isSending.value = false
+                if (pendingSendCount.decrementAndGet() <= 0) {
+                    pendingSendCount.set(0)
+                    _isSending.value = false
+                }
             }
         }
     }

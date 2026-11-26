@@ -31,7 +31,6 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -100,7 +99,6 @@ internal fun MessagingChatScreen(
     localInboxId: String,
     peerLastReadTimestampMs: Long? = null,
     draft: String,
-    isSending: Boolean,
     isSyncing: Boolean = false,
     isShredding: Boolean = false,
     voiceRecordingState: VoiceRecordingState = VoiceRecordingState(),
@@ -227,7 +225,7 @@ internal fun MessagingChatScreen(
                                         isLastSeenOwnMessage = isSeen && message.id == lastSeenOwnMessageId,
                                         seenAtMs = peerLastReadTimestampMs,
                                         maxBubbleWidth = maxBubbleWidth,
-                                        retryEnabled = !isSending && !isShredding,
+                                        retryEnabled = !isShredding,
                                         voicePlaybackState = voicePlaybackState,
                                         onToggleVoicePlayback = onToggleVoicePlayback,
                                         onSeekVoicePlayback = onSeekVoicePlayback,
@@ -275,50 +273,36 @@ internal fun MessagingChatScreen(
                                 keyboardType = KeyboardType.Text,
                                 imeAction = ImeAction.Default
                             ),
-                            enabled = !isSending && !isShredding,
+                            // Mantenemos el campo habilitado durante el envio para no perder el foco ni cerrar el teclado.
+                            enabled = !isShredding,
                             shape = RoundedCornerShape(20.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
-                        if (draft.isBlank()) {
-                            IconButton(
-                                onClick = onStartVoiceRecording,
-                                enabled = !isSending && !isShredding,
-                                modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                            ) {
-                                if (isSending) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(20.dp),
-                                        strokeWidth = 2.dp
-                                    )
-                                } else {
-                                    Icon(
-                                        painter = painterResource(R.drawable.ic_mic_on),
-                                        contentDescription = "Φωνητικό μήνυμα",
-                                        tint = MaterialTheme.colorScheme.primary
-                                    )
-                                }
-                            }
-                        } else {
-                            IconButton(
-                                onClick = {
+                        val hasDraftText = draft.isNotBlank()
+                        IconButton(
+                            onClick = {
+                                if (hasDraftText) {
                                     val content = draft.trim()
                                     if (content.isNotEmpty()) onSendMessage(content)
-                                },
-                                enabled = !isSending && !isShredding,
-                                modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                            ) {
-                                if (isSending) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(20.dp),
-                                        strokeWidth = 2.dp
-                                    )
                                 } else {
-                                    Icon(
-                                        imageVector = Icons.AutoMirrored.Filled.Send,
-                                        contentDescription = "Αποστολή",
-                                        tint = MaterialTheme.colorScheme.primary
-                                    )
+                                    onStartVoiceRecording()
                                 }
+                            },
+                            enabled = !isShredding,
+                            modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                        ) {
+                            if (hasDraftText) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.Send,
+                                    contentDescription = "Αποστολή",
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            } else {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_mic_on),
+                                    contentDescription = "Φωνητικό μήνυμα",
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
                             }
                         }
                     }

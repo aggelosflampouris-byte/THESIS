@@ -171,7 +171,6 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     val statusBanner by viewModel.statusBanner.collectAsState()
     val actionLogs by viewModel.actionLogs.collectAsState()
     val actionLogSessions by viewModel.actionLogSessions.collectAsState()
-    val isSending by viewModel.isSending.collectAsState()
     val isSyncing by viewModel.isSyncing.collectAsState()
     val isBenchmarking by viewModel.isBenchmarking.collectAsState()
     val isCreatingConversation by viewModel.isCreatingConversation.collectAsState()
@@ -724,7 +723,6 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                                     localInboxId = state.client.inboxId,
                                     peerLastReadTimestampMs = peerReadTimestamps[activeConv.id],
                                     draft = draft,
-                                    isSending = isSending,
                                     isSyncing = isSyncing,
                                     isShredding = isShredding,
                                     voiceRecordingState = voiceRecordingState,

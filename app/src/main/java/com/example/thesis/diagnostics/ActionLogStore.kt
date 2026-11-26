@@ -53,7 +53,13 @@ class ActionLogStore(
     val sessions: StateFlow<List<ActionLogSession>>
 
     init {
-        val initialEntries = trimEntries(loadEntries(logFile, maxEntries), maxEntries, maxSessions)
+        val allLoadedEntries = loadAllDecodedEntries(logFile)
+        val initialEntries = trimEntries(
+            entries = allLoadedEntries,
+            maxEntries = maxEntries,
+            maxSessions = maxSessions,
+            activeSessionId = currentSessionId
+        )
         registerActiveSessionForCrashHandler(currentSessionId, currentSessionStartedAt)
         _entries = MutableStateFlow(initialEntries)
         entries = _entries.asStateFlow()
@@ -65,10 +71,16 @@ class ActionLogStore(
             )
         )
         sessions = _sessions.asStateFlow()
+        if (initialEntries.size < allLoadedEntries.size) {
+            // Podamos el archivo en disco al iniciar para no conservar sesiones antiguas excedentes.
+            runCatching { writer.execute { rewriteEntries(logFile, initialEntries) } }
+        }
     }
 
     // Inicia una nueva sesion al reabrir la UI si la sesion previa ya contenia eventos, evitando sesiones vacias duplicadas en arranque en frio.
     fun onAppOpened(nowMs: Long = System.currentTimeMillis()): String {
+        val sessionId: String
+        val prunedEntries: List<ActionLogEntry>?
         synchronized(stateLock) {
             if (!currentSessionHasEntries) {
                 currentSessionStartedAt = nowMs
@@ -76,27 +88,52 @@ class ActionLogStore(
                 refreshSessionsLocked()
                 return currentSessionId
             }
-            return startNewSessionLocked(nowMs)
+            val result = startNewSessionLocked(nowMs)
+            sessionId = result.first
+            prunedEntries = result.second
         }
+        if (prunedEntries != null) {
+            runCatching { writer.execute { rewriteEntries(logFile, prunedEntries) } }
+        }
+        return sessionId
     }
 
     fun startNewSession(nowMs: Long = System.currentTimeMillis()): String {
+        val sessionId: String
+        val prunedEntries: List<ActionLogEntry>?
         synchronized(stateLock) {
-            return startNewSessionLocked(nowMs)
+            val result = startNewSessionLocked(nowMs)
+            sessionId = result.first
+            prunedEntries = result.second
         }
+        if (prunedEntries != null) {
+            runCatching { writer.execute { rewriteEntries(logFile, prunedEntries) } }
+        }
+        return sessionId
     }
 
-    private fun startNewSessionLocked(nowMs: Long): String {
+    private fun startNewSessionLocked(nowMs: Long): Pair<String, List<ActionLogEntry>?> {
         currentSessionId = UUID.randomUUID().toString()
         currentSessionStartedAt = nowMs
         currentSessionHasEntries = false
         registerActiveSessionForCrashHandler(currentSessionId, currentSessionStartedAt)
+        val previousEntries = _entries.value
+        val trimmed = trimEntries(
+            entries = previousEntries,
+            maxEntries = maxEntries,
+            maxSessions = maxSessions,
+            activeSessionId = currentSessionId
+        )
+        _entries.value = trimmed
         refreshSessionsLocked()
-        return currentSessionId
+        val prunedToRewrite = if (trimmed.size < previousEntries.size) trimmed else null
+        return currentSessionId to prunedToRewrite
     }
 
     fun append(entry: ActionLogEntry) {
         val boundEntry: ActionLogEntry
+        val updatedSnapshot: List<ActionLogEntry>
+        val sessionEvicted: Boolean
         synchronized(stateLock) {
             val sid = entry.sessionId.ifBlank { currentSessionId }
             val startedAt = if (entry.sessionStartedAt > 0L) {
@@ -113,13 +150,26 @@ class ActionLogStore(
                 sessionId = sid,
                 sessionStartedAt = startedAt
             )
-            val updated = trimEntries(_entries.value + boundEntry, maxEntries, maxSessions)
+            val candidate = _entries.value + boundEntry
+            val updated = trimEntries(
+                entries = candidate,
+                maxEntries = maxEntries,
+                maxSessions = maxSessions,
+                activeSessionId = currentSessionId
+            )
+            sessionEvicted = countDistinctSessions(updated) < countDistinctSessions(candidate)
+            updatedSnapshot = updated
             _entries.value = updated
             refreshSessionsLocked()
         }
-        val line = encodeLine(boundEntry)
-        // Escribimos fuera del hilo principal para no bloquear la UI con E/S de disco.
-        runCatching { writer.execute { appendLineAndCompact(logFile, line, maxEntries) } }
+        if (sessionEvicted) {
+            // Reescribimos el registro en disco para purgar de inmediato las sesiones que superan el limite.
+            runCatching { writer.execute { rewriteEntries(logFile, updatedSnapshot) } }
+        } else {
+            val line = encodeLine(boundEntry)
+            // Escribimos fuera del hilo principal para no bloquear la UI con E/S de disco.
+            runCatching { writer.execute { appendLineAndCompact(logFile, line, maxEntries, maxSessions) } }
+        }
     }
 
     fun clear() {
@@ -153,7 +203,7 @@ class ActionLogStore(
 
     companion object {
         const val DEFAULT_MAX_ENTRIES = 1_000
-        const val DEFAULT_MAX_SESSIONS = 25
+        const val DEFAULT_MAX_SESSIONS = 5
         const val LEGACY_SESSION_ID = "legacy-session"
         private const val MAX_MESSAGE_CHARS = 8_000
         private const val COMPACT_THRESHOLD_BYTES = 768L * 1024L
@@ -175,7 +225,12 @@ class ActionLogStore(
             File(context.applicationContext.filesDir, "diagnostics/action_logs.log")
 
         // Escritura sincrona usada por el manejador de fallos para asociar el crash a la sesion activa antes de morir el proceso.
-        fun appendSync(file: File, entry: ActionLogEntry, maxEntries: Int = DEFAULT_MAX_ENTRIES) {
+        fun appendSync(
+            file: File,
+            entry: ActionLogEntry,
+            maxEntries: Int = DEFAULT_MAX_ENTRIES,
+            maxSessions: Int = DEFAULT_MAX_SESSIONS
+        ) {
             val activeSid = entry.sessionId.ifBlank {
                 lastActiveSessionId.ifBlank { UUID.randomUUID().toString() }
             }
@@ -185,7 +240,7 @@ class ActionLogStore(
                 else -> entry.timestamp
             }
             val bound = entry.copy(sessionId = activeSid, sessionStartedAt = activeStarted)
-            appendLineAndCompact(file, encodeLine(bound), maxEntries)
+            appendLineAndCompact(file, encodeLine(bound), maxEntries, maxSessions)
         }
 
         internal fun buildSessions(
@@ -227,18 +282,27 @@ class ActionLogStore(
             return chronological.asReversed()
         }
 
-        private fun trimEntries(
+        internal fun trimEntries(
             entries: List<ActionLogEntry>,
             maxEntries: Int,
-            maxSessions: Int
+            maxSessions: Int,
+            activeSessionId: String? = null
         ): List<ActionLogEntry> {
-            if (entries.isEmpty()) return emptyList()
+            if (entries.isEmpty() || maxSessions <= 0) return emptyList()
             val sessionOrder = LinkedHashSet<String>()
             for (entry in entries) {
                 sessionOrder.add(entry.sessionId.ifBlank { LEGACY_SESSION_ID })
             }
-            val allowedSessions = if (sessionOrder.size > maxSessions) {
-                sessionOrder.toList().takeLast(maxSessions).toSet()
+            val normalizedActive = activeSessionId?.takeIf { it.isNotBlank() }
+            // Si la sesion activa aun no tiene registros, reservamos su hueco dentro del maximo permitido.
+            val effectiveLimit = if (normalizedActive != null && normalizedActive !in sessionOrder) {
+                (maxSessions - 1).coerceAtLeast(0)
+            } else {
+                maxSessions
+            }
+            if (effectiveLimit <= 0) return emptyList()
+            val allowedSessions = if (sessionOrder.size > effectiveLimit) {
+                sessionOrder.toList().takeLast(effectiveLimit).toSet()
             } else {
                 sessionOrder
             }
@@ -247,13 +311,42 @@ class ActionLogStore(
                 .takeLast(maxEntries)
         }
 
-        internal fun loadEntries(file: File, maxEntries: Int): List<ActionLogEntry> {
+        private fun countDistinctSessions(entries: List<ActionLogEntry>): Int {
+            if (entries.isEmpty()) return 0
+            val sessions = HashSet<String>()
+            for (entry in entries) {
+                sessions.add(entry.sessionId.ifBlank { LEGACY_SESSION_ID })
+            }
+            return sessions.size
+        }
+
+        private fun rewriteEntries(file: File, entries: List<ActionLogEntry>) {
+            synchronized(FILE_LOCK) {
+                runCatching {
+                    if (entries.isEmpty()) {
+                        if (file.exists()) {
+                            file.delete()
+                        }
+                        return@runCatching
+                    }
+                    file.parentFile?.mkdirs()
+                    file.writeText(
+                        entries.joinToString("\n", postfix = "\n") { encodeLine(it) },
+                        StandardCharsets.UTF_8
+                    )
+                }
+            }
+        }
+
+        internal fun loadEntries(file: File, maxEntries: Int): List<ActionLogEntry> =
+            loadAllDecodedEntries(file).takeLast(maxEntries)
+
+        private fun loadAllDecodedEntries(file: File): List<ActionLogEntry> {
             return synchronized(FILE_LOCK) {
                 runCatching {
                     if (!file.exists()) return@runCatching emptyList()
                     val decoded = file.readLines(StandardCharsets.UTF_8)
                         .mapNotNull { decodeLine(it) }
-                        .takeLast(maxEntries)
                     val firstLegacyTs = decoded.firstOrNull { it.sessionId == LEGACY_SESSION_ID }?.timestamp ?: 0L
                     if (firstLegacyTs > 0L) {
                         decoded.map { entry ->
@@ -324,17 +417,29 @@ class ActionLogStore(
             }.getOrNull()
         }
 
-        private fun appendLineAndCompact(file: File, line: String, maxEntries: Int) {
+        private fun appendLineAndCompact(
+            file: File,
+            line: String,
+            maxEntries: Int,
+            maxSessions: Int = DEFAULT_MAX_SESSIONS
+        ) {
             synchronized(FILE_LOCK) {
                 runCatching {
                     file.parentFile?.mkdirs()
                     file.appendText(line + "\n", StandardCharsets.UTF_8)
                     // Compactamos solo al superar el umbral para no reescribir el archivo en cada registro.
                     if (file.length() > COMPACT_THRESHOLD_BYTES) {
-                        val kept = file.readLines(StandardCharsets.UTF_8)
-                            .filter { it.isNotBlank() }
-                            .takeLast(maxEntries)
-                        file.writeText(kept.joinToString("\n", postfix = "\n"), StandardCharsets.UTF_8)
+                        val decoded = file.readLines(StandardCharsets.UTF_8)
+                            .mapNotNull { decodeLine(it) }
+                        val kept = trimEntries(decoded, maxEntries, maxSessions)
+                        if (kept.isEmpty()) {
+                            file.delete()
+                        } else {
+                            file.writeText(
+                                kept.joinToString("\n", postfix = "\n") { encodeLine(it) },
+                                StandardCharsets.UTF_8
+                            )
+                        }
                     }
                 }
             }
