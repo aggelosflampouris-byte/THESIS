@@ -181,6 +181,8 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     val nicknameSnapshot by viewModel.nicknameSnapshot.collectAsState()
     val peerReadTimestamps by viewModel.peerReadTimestamps.collectAsState()
     val callEventsByConversation by viewModel.callEventsByConversation.collectAsState()
+    val voiceRecordingState by viewModel.voiceRecordingState.collectAsState()
+    val voicePlaybackState by viewModel.voicePlaybackState.collectAsState()
     val isScreenRecordingActive by viewModel.isScreenRecordingActive.collectAsState()
     val deviceTransferState by viewModel.deviceTransferState.collectAsState()
     val callState by viewModel.callState.collectAsState()
@@ -725,6 +727,8 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                                     isSending = isSending,
                                     isSyncing = isSyncing,
                                     isShredding = isShredding,
+                                    voiceRecordingState = voiceRecordingState,
+                                    voicePlaybackState = voicePlaybackState,
                                     onSync = { viewModel.syncConversations() },
                                     onStartVoiceCall = if (activeConv is Conversation.Dm && callState is CallUiState.Idle) {
                                         {
@@ -733,6 +737,15 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                                             }
                                         }
                                     } else null,
+                                    onStartVoiceRecording = {
+                                        runWithRecordAudioPermission {
+                                            viewModel.startVoiceRecording()
+                                        }
+                                    },
+                                    onCancelVoiceRecording = { viewModel.cancelVoiceRecording() },
+                                    onStopAndSendVoiceRecording = { viewModel.stopAndSendVoiceRecording() },
+                                    onToggleVoicePlayback = { msgId, note -> viewModel.toggleVoicePlayback(msgId, note) },
+                                    onSeekVoicePlayback = { msgId, fraction -> viewModel.seekVoicePlayback(msgId, fraction) },
                                     onDraftChange = { draft = it },
                                     onSendMessage = { text ->
                                         draft = ""

@@ -392,6 +392,7 @@ class XmtpEngine(
             runCatching { Client.register(ReadReceiptCodec()) }
             runCatching { Client.register(ProfileNicknameCodec()) }
             runCatching { Client.register(CallSignalCodec()) }
+            runCatching { Client.register(VoiceNoteCodec()) }
             val xmtpClient = Client.create(account = signer, options = options)
             Log.i(TAG, "XMTP client ready [env=$environment]")
 

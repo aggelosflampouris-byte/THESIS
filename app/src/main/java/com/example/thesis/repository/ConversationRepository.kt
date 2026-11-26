@@ -14,7 +14,10 @@ import com.example.thesis.xmtp.CallSignal
 import com.example.thesis.xmtp.CallSignalCodec
 import com.example.thesis.xmtp.ContentTypeCallSignal
 import com.example.thesis.xmtp.ContentTypeProfileNickname
+import com.example.thesis.xmtp.ContentTypeVoiceNote
 import com.example.thesis.xmtp.ProfileNickname
+import com.example.thesis.xmtp.VoiceNote
+import com.example.thesis.xmtp.VoiceNoteCodec
 import com.example.thesis.xmtp.XmtpEngine
 import com.example.thesis.xmtp.XmtpEngineState
 import kotlinx.coroutines.CancellationException
@@ -946,6 +949,24 @@ class ConversationRepository(
             }
         }
 
+    // Enviamos la nota de voz codificada directamente sobre el canal cifrado MLS sin subir audio a servidores externos.
+    suspend fun sendVoiceNote(conversation: Conversation, voiceNote: VoiceNote): Result<String> =
+        withContext(ioDispatcher) {
+            runCatching {
+                val msgId = conversation.send(
+                    voiceNote,
+                    SendOptions(contentType = ContentTypeVoiceNote)
+                )
+                try {
+                    conversation.sync()
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                }
+                messageRefreshTrigger.emit(conversation.id)
+                msgId
+            }
+        }
+
     suspend fun sendCallSignal(conversationId: String, signal: CallSignal): Result<String> =
         withContext(ioDispatcher) {
             val client = xmtpEngine.client
@@ -1397,19 +1418,22 @@ enum class MessageDeliveryStatus {
 /**
  * Maps a libxmtp [DecodedMessage] into a clean domain [Message].
  */
-fun DecodedMessage.toDomainMessage(): Message = Message(
-    id = id ?: "",
-    conversationId = conversationId ?: "",
-    senderAddress = senderInboxId ?: "",
-    body = body ?: "",
-    sentAt = sentAt?.time ?: (sentAtNs / 1_000_000L),
-    deliveryStatus = when (deliveryStatus) {
-        DecodedMessage.MessageDeliveryStatus.PUBLISHED -> MessageDeliveryStatus.PUBLISHED
-        DecodedMessage.MessageDeliveryStatus.UNPUBLISHED -> MessageDeliveryStatus.LOCAL_PENDING
-        DecodedMessage.MessageDeliveryStatus.FAILED -> MessageDeliveryStatus.FAILED
-        DecodedMessage.MessageDeliveryStatus.ALL -> MessageDeliveryStatus.PUBLISHED
-    }
-)
+fun DecodedMessage.toDomainMessage(): Message {
+    val voicePreview = extractVoiceNote()?.let { VoiceNoteCodec.formatFallbackPreview(it.durationMs) }
+    return Message(
+        id = id ?: "",
+        conversationId = conversationId ?: "",
+        senderAddress = senderInboxId ?: "",
+        body = voicePreview ?: body ?: "",
+        sentAt = sentAt?.time ?: (sentAtNs / 1_000_000L),
+        deliveryStatus = when (deliveryStatus) {
+            DecodedMessage.MessageDeliveryStatus.PUBLISHED -> MessageDeliveryStatus.PUBLISHED
+            DecodedMessage.MessageDeliveryStatus.UNPUBLISHED -> MessageDeliveryStatus.LOCAL_PENDING
+            DecodedMessage.MessageDeliveryStatus.FAILED -> MessageDeliveryStatus.FAILED
+            DecodedMessage.MessageDeliveryStatus.ALL -> MessageDeliveryStatus.PUBLISHED
+        }
+    )
+}
 
 
 /**
@@ -1422,6 +1446,7 @@ typealias DecryptedMessage = DecodedMessage
  * MLS protocol/transcript control messages such as `xmtp.org/group_updated:1.0`.
  */
 internal fun DecodedMessage.isDisplayableUserMessage(): Boolean {
+    if (isVoiceNoteMessage()) return true
     val contentType = runCatching { encodedContent.type }.getOrNull()
     if (contentType != null) {
         val typeId = runCatching { contentType.typeId }.getOrNull().orEmpty()
@@ -1493,6 +1518,24 @@ internal fun DecodedMessage.extractCallSignal(): CallSignal? {
     if (decoded != null) return decoded
     val rawBytes = runCatching { encodedContent.content.toByteArray() }.getOrNull() ?: return null
     return runCatching { CallSignalCodec.decodeBytes(rawBytes) }.getOrNull()
+}
+
+internal fun DecodedMessage.isVoiceNoteMessage(): Boolean {
+    val ct = runCatching { encodedContent.type }.getOrNull()
+    val authority = ct?.let { runCatching { it.authorityId }.getOrNull() }.orEmpty()
+    val typeId = ct?.let { runCatching { it.typeId }.getOrNull() }.orEmpty()
+    if (authority == ContentTypeVoiceNote.authorityId && typeId == ContentTypeVoiceNote.typeId) {
+        return true
+    }
+    return runCatching { content<Any>() }.getOrNull() is VoiceNote
+}
+
+internal fun DecodedMessage.extractVoiceNote(): VoiceNote? {
+    if (!isVoiceNoteMessage()) return null
+    val decoded = runCatching { content<Any>() }.getOrNull() as? VoiceNote
+    if (decoded != null) return decoded
+    val rawBytes = runCatching { encodedContent.content.toByteArray() }.getOrNull() ?: return null
+    return runCatching { VoiceNoteCodec.decodeBytes(rawBytes) }.getOrNull()
 }
 
 val DecodedMessage.senderAddress: String

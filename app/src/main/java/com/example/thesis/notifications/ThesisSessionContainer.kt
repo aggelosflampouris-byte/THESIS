@@ -15,7 +15,11 @@ import com.example.thesis.xmtp.XmtpEngine
 import com.example.thesis.call.CallNotificationManager
 import com.example.thesis.call.CallSessionManager
 import com.example.thesis.diagnostics.ActionLogStore
+import com.example.thesis.repository.extractVoiceNote
 import com.example.thesis.ui.ActionLogEntry
+import com.example.thesis.voice.VoiceNotePlayer
+import com.example.thesis.voice.VoiceNoteRecorder
+import com.example.thesis.xmtp.VoiceNoteCodec
 import com.example.thesis.xmtp.XmtpEngineState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -56,6 +60,8 @@ internal class ThesisSessionContainer(context: Context) {
     )
     val appUpdateManager = AppUpdateManager(appContext)
     val notificationManager = MessageNotificationManager(appContext)
+    val voiceNoteRecorder = VoiceNoteRecorder(appContext)
+    val voiceNotePlayer = VoiceNotePlayer(appContext)
     // Registro persistente compartido por la UI y los componentes en segundo plano (llamadas, fallos).
     val actionLogStore = ActionLogStore(ActionLogStore.defaultFile(appContext))
     val callNotificationManager = CallNotificationManager(appContext)
@@ -104,6 +110,7 @@ internal class ThesisSessionContainer(context: Context) {
         // Purgamos preferencias heredadas al iniciar para garantizar proteccion inmutable.
         ScreenSecurityManager.purgeLegacyPreference(appContext)
         TransferFileHygiene.purgeTransferCache(appContext.cacheDir)
+        VoiceNoteRecorder.purgeTempDir(appContext.cacheDir)
         appScope.launch {
             repository.incomingMessages.collect { incoming ->
                 handleIncomingMessage(incoming)
@@ -179,6 +186,9 @@ internal class ThesisSessionContainer(context: Context) {
         }
         XmtpMessagingService.stop(appContext)
         BackgroundSyncScheduler.cancelAll(appContext)
+        voiceNoteRecorder.cancel()
+        voiceNotePlayer.stop()
+        VoiceNoteRecorder.purgeTempDir(appContext.cacheDir)
         callSessionManager.forceTeardownOnGdprShred()
         callNotificationManager.cancelAllCallNotifications()
         notificationManager.cancelAllNotifications()
@@ -243,6 +253,8 @@ internal class ThesisSessionContainer(context: Context) {
 
     private fun handleIncomingMessage(msg: DecodedMessage) {
         val localInboxId = (engine.state.value as? XmtpEngineState.Ready)?.client?.inboxId
+        val effectiveBody = msg.extractVoiceNote()?.let { VoiceNoteCodec.formatFallbackPreview(it.durationMs) }
+            ?: msg.body
         val reservedForDispatch = synchronized(notifiedMessageIds) {
             val alreadyNotified = msg.id in notifiedMessageIds
             val shouldNotify = MessageNotificationPolicy.shouldNotify(
@@ -250,7 +262,7 @@ internal class ThesisSessionContainer(context: Context) {
                 conversationId = msg.conversationId,
                 senderInboxId = msg.senderInboxId,
                 localInboxId = localInboxId,
-                body = msg.body,
+                body = effectiveBody,
                 isAppInForeground = isAppInForeground,
                 activeConversationId = activeConversationId,
                 isLogsScreenOpen = isLogsScreenOpen,
@@ -291,7 +303,7 @@ internal class ThesisSessionContainer(context: Context) {
             snapshot = currentNicknames
         )
         val title = MessageNotificationPolicy.formatSenderTitle(resolvedExplicitName, msg.senderInboxId)
-        val bodyPreview = MessageNotificationPolicy.formatBodyPreview(msg.body)
+        val bodyPreview = MessageNotificationPolicy.formatBodyPreview(effectiveBody)
         val sentAtMs = msg.sentAt?.time
             ?: if (msg.sentAtNs > 0L) msg.sentAtNs / 1_000_000L else System.currentTimeMillis()
 

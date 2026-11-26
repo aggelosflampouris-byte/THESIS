@@ -1,6 +1,8 @@
 package com.example.thesis.ui.screens
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -26,10 +28,14 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -41,7 +47,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -55,6 +63,11 @@ import com.example.thesis.call.CallHistoryPolicy
 import com.example.thesis.call.ChatCallEvent
 import com.example.thesis.call.ChatCallOutcome
 import com.example.thesis.repository.ReadReceiptPolicy
+import com.example.thesis.repository.extractVoiceNote
+import com.example.thesis.voice.VoicePlaybackState
+import com.example.thesis.voice.VoiceRecordingState
+import com.example.thesis.xmtp.VoiceNote
+import com.example.thesis.xmtp.VoiceNoteCodec
 import org.xmtp.android.library.libxmtp.DecodedMessage
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -90,8 +103,15 @@ internal fun MessagingChatScreen(
     isSending: Boolean,
     isSyncing: Boolean = false,
     isShredding: Boolean = false,
+    voiceRecordingState: VoiceRecordingState = VoiceRecordingState(),
+    voicePlaybackState: VoicePlaybackState = VoicePlaybackState(),
     onSync: () -> Unit = {},
     onStartVoiceCall: (() -> Unit)? = null,
+    onStartVoiceRecording: () -> Unit = {},
+    onCancelVoiceRecording: () -> Unit = {},
+    onStopAndSendVoiceRecording: () -> Unit = {},
+    onToggleVoicePlayback: (String, VoiceNote) -> Unit = { _, _ -> },
+    onSeekVoicePlayback: (String, Float) -> Unit = { _, _ -> },
     onDraftChange: (String) -> Unit,
     onSendMessage: (String) -> Unit,
     onRetryMessage: (String) -> Unit = onSendMessage
@@ -107,7 +127,7 @@ internal fun MessagingChatScreen(
         }?.id
     }
 
-    // Intercalamos mensajes de texto y eventos de llamada en una sola linea temporal cronologica.
+    // Intercalamos mensajes (texto y notas de voz) y eventos de llamada en una sola linea temporal cronologica.
     val timelineItems = remember(messages, callEvents) {
         val combined = ArrayList<ChatTimelineItem>(messages.size + callEvents.size)
         for (msg in messages) {
@@ -208,6 +228,9 @@ internal fun MessagingChatScreen(
                                         seenAtMs = peerLastReadTimestampMs,
                                         maxBubbleWidth = maxBubbleWidth,
                                         retryEnabled = !isSending && !isShredding,
+                                        voicePlaybackState = voicePlaybackState,
+                                        onToggleVoicePlayback = onToggleVoicePlayback,
+                                        onSeekVoicePlayback = onSeekVoicePlayback,
                                         onRetry = { onRetryMessage(message.body) }
                                     )
                                 }
@@ -229,49 +252,169 @@ internal fun MessagingChatScreen(
                 modifier = Modifier.fillMaxWidth(),
                 tonalElevation = 2.dp
             ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.Bottom
-                ) {
-                    OutlinedTextField(
-                        value = draft,
-                        onValueChange = onDraftChange,
-                        placeholder = { Text("Γράψτε μήνυμα...", fontSize = 13.sp) },
-                        modifier = Modifier.weight(1f),
-                        maxLines = 4,
-                        keyboardOptions = KeyboardOptions(
-                            keyboardType = KeyboardType.Text,
-                            imeAction = ImeAction.Default
-                        ),
-                        enabled = !isSending && !isShredding,
-                        shape = RoundedCornerShape(20.dp)
+                if (voiceRecordingState.isRecording) {
+                    VoiceRecordingInputBar(
+                        recordingState = voiceRecordingState,
+                        onCancel = onCancelVoiceRecording,
+                        onSend = onStopAndSendVoiceRecording
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    IconButton(
-                        onClick = {
-                            val content = draft.trim()
-                            if (content.isNotEmpty()) onSendMessage(content)
-                        },
-                        enabled = draft.isNotBlank() && !isSending && !isShredding,
-                        modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                } else {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.Bottom
                     ) {
-                        if (isSending) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(20.dp),
-                                strokeWidth = 2.dp
-                            )
+                        OutlinedTextField(
+                            value = draft,
+                            onValueChange = onDraftChange,
+                            placeholder = { Text("Γράψτε μήνυμα...", fontSize = 13.sp) },
+                            modifier = Modifier.weight(1f),
+                            maxLines = 4,
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Text,
+                                imeAction = ImeAction.Default
+                            ),
+                            enabled = !isSending && !isShredding,
+                            shape = RoundedCornerShape(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        if (draft.isBlank()) {
+                            IconButton(
+                                onClick = onStartVoiceRecording,
+                                enabled = !isSending && !isShredding,
+                                modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                            ) {
+                                if (isSending) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(20.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                } else {
+                                    Icon(
+                                        painter = painterResource(R.drawable.ic_mic_on),
+                                        contentDescription = "Φωνητικό μήνυμα",
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
                         } else {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.Send,
-                                contentDescription = "Αποστολή",
-                                tint = if (draft.isNotBlank()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                            )
+                            IconButton(
+                                onClick = {
+                                    val content = draft.trim()
+                                    if (content.isNotEmpty()) onSendMessage(content)
+                                },
+                                enabled = !isSending && !isShredding,
+                                modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                            ) {
+                                if (isSending) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(20.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.Send,
+                                        contentDescription = "Αποστολή",
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
                         }
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun VoiceRecordingInputBar(
+    recordingState: VoiceRecordingState,
+    onCancel: () -> Unit,
+    onSend: () -> Unit
+) {
+    val bars = remember(recordingState.livePeaks) {
+        if (recordingState.livePeaks.isEmpty()) List(16) { 18 } else recordingState.livePeaks.takeLast(18)
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        IconButton(
+            onClick = onCancel,
+            modifier = Modifier.defaultMinSize(minWidth = 44.dp, minHeight = 44.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Delete,
+                contentDescription = "Ακύρωση εγγραφής",
+                tint = MaterialTheme.colorScheme.error
+            )
+        }
+
+        Surface(
+            modifier = Modifier.weight(1f),
+            shape = RoundedCornerShape(20.dp),
+            color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.28f),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.35f))
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(10.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.error)
+                )
+                Text(
+                    text = "${VoiceNoteCodec.formatDuration(recordingState.elapsedMs)} / 2:00",
+                    fontSize = 12.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.error
+                )
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(22.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    bars.forEach { peak ->
+                        val frac = (peak.coerceIn(10, 100) / 100f)
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height((4f + frac * 16f).dp)
+                                .clip(RoundedCornerShape(2.dp))
+                                .background(MaterialTheme.colorScheme.error.copy(alpha = 0.75f))
+                        )
+                    }
+                }
+            }
+        }
+
+        FilledIconButton(
+            onClick = onSend,
+            modifier = Modifier.size(44.dp),
+            colors = IconButtonDefaults.filledIconButtonColors(
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary
+            )
+        ) {
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.Send,
+                contentDescription = "Αποστολή φωνητικού"
+            )
         }
     }
 }
@@ -403,8 +546,12 @@ private fun MessagingMessageBubble(
     seenAtMs: Long? = null,
     maxBubbleWidth: Dp,
     retryEnabled: Boolean = true,
+    voicePlaybackState: VoicePlaybackState = VoicePlaybackState(),
+    onToggleVoicePlayback: (String, VoiceNote) -> Unit = { _, _ -> },
+    onSeekVoicePlayback: (String, Float) -> Unit = { _, _ -> },
     onRetry: () -> Unit
 ) {
+    val voiceNote = remember(message.id) { message.extractVoiceNote() }
     val timeLabel = remember(message.sentAt, message.sentAtNs) {
         val date = message.sentAt ?: if (message.sentAtNs > 0L) Date(message.sentAtNs / 1_000_000L) else Date()
         SimpleDateFormat("HH:mm", Locale.getDefault()).format(date)
@@ -436,7 +583,7 @@ private fun MessagingMessageBubble(
         horizontalAlignment = if (isOwnMessage) Alignment.End else Alignment.Start
     ) {
         Surface(
-            modifier = Modifier.widthIn(min = 60.dp, max = maxBubbleWidth),
+            modifier = Modifier.widthIn(min = if (voiceNote != null) 220.dp else 60.dp, max = maxBubbleWidth),
             shape = RoundedCornerShape(
                 topStart = 16.dp,
                 topEnd = 16.dp,
@@ -447,11 +594,120 @@ private fun MessagingMessageBubble(
             else MaterialTheme.colorScheme.surfaceVariant
         ) {
             Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-                Text(
-                    text = message.body,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = contentColor
-                )
+                if (voiceNote != null) {
+                    val isCurrent = voicePlaybackState.activeMessageId == message.id
+                    val isPlaying = isCurrent && voicePlaybackState.isPlaying
+                    val activeDurMs = if (isCurrent && voicePlaybackState.durationMs > 0L) {
+                        voicePlaybackState.durationMs
+                    } else {
+                        voiceNote.durationMs
+                    }
+                    val progressFraction = if (isCurrent && activeDurMs > 0L) {
+                        (voicePlaybackState.positionMs.toFloat() / activeDurMs.toFloat()).coerceIn(0f, 1f)
+                    } else {
+                        0f
+                    }
+                    val bars = remember(voiceNote.waveformPeaks) {
+                        if (voiceNote.waveformPeaks.isEmpty()) {
+                            VoiceNoteCodec.downsampleWaveform(emptyList(), 28)
+                        } else {
+                            voiceNote.waveformPeaks
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        FilledIconButton(
+                            onClick = { onToggleVoicePlayback(message.id, voiceNote) },
+                            modifier = Modifier.size(40.dp),
+                            colors = IconButtonDefaults.filledIconButtonColors(
+                                containerColor = MaterialTheme.colorScheme.primary,
+                                contentColor = MaterialTheme.colorScheme.onPrimary
+                            )
+                        ) {
+                            if (isPlaying) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_pause),
+                                    contentDescription = "Παύση",
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.PlayArrow,
+                                    contentDescription = "Αναπαραγωγή",
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                        }
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(26.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                val totalBars = bars.size.coerceAtLeast(1)
+                                bars.forEachIndexed { idx, peak ->
+                                    val barPos = (idx + 0.5f) / totalBars
+                                    val isPlayed = isCurrent && barPos <= progressFraction
+                                    val barColor = if (isPlayed) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        contentColor.copy(alpha = 0.35f)
+                                    }
+                                    val barHeight = (4f + (peak.coerceIn(10, 100) / 100f) * 20f).dp
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(barHeight)
+                                            .clip(RoundedCornerShape(2.dp))
+                                            .background(barColor)
+                                            .clickable(enabled = isCurrent) {
+                                                onSeekVoicePlayback(message.id, barPos)
+                                            }
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                val displayedTime = if (isCurrent && (isPlaying || voicePlaybackState.positionMs > 0L)) {
+                                    "${VoiceNoteCodec.formatDuration(voicePlaybackState.positionMs)} / ${VoiceNoteCodec.formatDuration(activeDurMs)}"
+                                } else {
+                                    VoiceNoteCodec.formatDuration(activeDurMs)
+                                }
+                                Text(
+                                    text = displayedTime,
+                                    fontSize = 11.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = contentColor
+                                )
+                                Text(
+                                    text = "MLS E2EE",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = contentColor.copy(alpha = 0.7f)
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    Text(
+                        text = message.body,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = contentColor
+                    )
+                }
+
                 if (isOwnMessage && status != null) {
                     val isPublished = message.deliveryStatus == DecodedMessage.MessageDeliveryStatus.PUBLISHED
                     val statusTint = when {
@@ -504,7 +760,7 @@ private fun MessagingMessageBubble(
                 }
             }
         }
-        if (isOwnMessage && isFailed) {
+        if (isOwnMessage && isFailed && voiceNote == null) {
             TextButton(onClick = onRetry, enabled = retryEnabled) {
                 Text("Προσπάθεια ξανά", color = MaterialTheme.colorScheme.error, fontSize = 11.sp)
             }

@@ -29,6 +29,10 @@ import com.example.thesis.call.CallForegroundService
 import com.example.thesis.call.CallUiState
 import com.example.thesis.call.ChatCallEvent
 import com.example.thesis.diagnostics.ActionLogSession
+import com.example.thesis.voice.VoicePlaybackState
+import com.example.thesis.voice.VoiceRecordingState
+import com.example.thesis.xmtp.VoiceNote
+import com.example.thesis.xmtp.VoiceNoteCodec
 import com.example.thesis.xmtp.XmtpEngineState
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -119,6 +123,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     val peerReadTimestamps: StateFlow<Map<String, Long>> = repository.peerReadTimestamps
     val callEventsByConversation: StateFlow<Map<String, List<ChatCallEvent>>> = repository.callEventsByConversation
     val callState: StateFlow<CallUiState> = sessionContainer.callSessionManager.callState
+    val voiceRecordingState: StateFlow<VoiceRecordingState> = sessionContainer.voiceNoteRecorder.state
+    val voicePlaybackState: StateFlow<VoicePlaybackState> = sessionContainer.voiceNotePlayer.state
 
     private val _isScreenRecordingActive = MutableStateFlow(false)
     val isScreenRecordingActive: StateFlow<Boolean> = _isScreenRecordingActive.asStateFlow()
@@ -630,6 +636,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectConversation(conversation: Conversation?) {
+        sessionContainer.voiceNoteRecorder.cancel()
+        sessionContainer.voiceNotePlayer.stop()
         _selectedConversation.value = conversation
         sessionContainer.setActiveConversationId(conversation?.id)
         messagesJob?.cancel()
@@ -1064,6 +1072,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun openInstallPermissionSettings() = appUpdateManager.openInstallPermissionSettings()
 
     private fun clearLocalConversationUiState(clearLogsAndTelemetry: Boolean) {
+        sessionContainer.voiceNoteRecorder.cancel()
+        sessionContainer.voiceNotePlayer.stop()
         messagesJob?.cancel()
         _selectedConversation.value = null
         _messages.value = emptyList()
@@ -1443,6 +1453,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun startVoiceCall(conversation: Conversation) {
         if (conversation !is Conversation.Dm) return
         if (!hasRecordAudioPermission()) return
+        sessionContainer.voiceNoteRecorder.cancel()
+        sessionContainer.voiceNotePlayer.stop()
         sessionContainer.callSessionManager.startOutgoingCall(conversation, isVideo = false)
         logAction(
             tag = "CALL",
@@ -1453,11 +1465,84 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     fun startVideoCall(conversation: Conversation) {
         if (conversation !is Conversation.Dm) return
         if (!hasRecordAudioPermission() || !hasCameraPermission()) return
+        sessionContainer.voiceNoteRecorder.cancel()
+        sessionContainer.voiceNotePlayer.stop()
         sessionContainer.callSessionManager.startOutgoingCall(conversation, isVideo = true)
         logAction(
             tag = "CALL",
             message = "Εκκίνηση κρυπτογραφημένης βιντεοκλήσης P2P DTLS-SRTP."
         )
+    }
+
+    fun startVoiceRecording() {
+        if (_isSending.value || _isShredding.value || _selectedConversation.value == null) return
+        if (!hasRecordAudioPermission()) return
+        if (callState.value !is CallUiState.Idle) {
+            _statusBanner.value = "Τερματίστε την κλήση πριν την εγγραφή φωνητικού μηνύματος."
+            return
+        }
+        sessionContainer.voiceNotePlayer.stop()
+        sessionContainer.voiceNoteRecorder.start { autoNote ->
+            dispatchVoiceNote(autoNote)
+        }.onFailure { err ->
+            _statusBanner.value = "Αποτυχία έναρξης εγγραφής: ${err.message}"
+            logAction("VOICE", "Voice record start failed: ${err.message}", isError = true)
+        }
+    }
+
+    fun cancelVoiceRecording() {
+        sessionContainer.voiceNoteRecorder.cancel()
+    }
+
+    fun stopAndSendVoiceRecording() {
+        sessionContainer.voiceNoteRecorder.stopAndBuildVoiceNote()
+            .onSuccess { note ->
+                dispatchVoiceNote(note)
+            }
+            .onFailure { err ->
+                _statusBanner.value = err.message ?: "Αποτυχία αποθήκευσης φωνητικού μηνύματος."
+            }
+    }
+
+    fun toggleVoicePlayback(messageId: String, voiceNote: VoiceNote) {
+        if (callState.value !is CallUiState.Idle) return
+        sessionContainer.voiceNotePlayer.togglePlayPause(messageId, voiceNote)
+    }
+
+    fun seekVoicePlayback(messageId: String, fraction: Float) {
+        sessionContainer.voiceNotePlayer.seekToFraction(messageId, fraction)
+    }
+
+    private fun dispatchVoiceNote(voiceNote: VoiceNote) {
+        if (_isSending.value || _isShredding.value || _isBenchmarking.value) return
+        val conv = _selectedConversation.value ?: return
+        _isSending.value = true
+        viewModelScope.launch {
+            try {
+                logAction("VOICE", "Dispatching MLS E2EE voice note (${VoiceNoteCodec.formatDuration(voiceNote.durationMs)}, ${voiceNote.audioBytes.size / 1024} KB)...")
+                ThesisTelemetry.measureSuspendOperation("5b. MLS E2EE Voice Note Dispatch") {
+                    repository.sendVoiceNote(conv, voiceNote)
+                }
+                .onSuccess { msgId ->
+                    val clientInbox = (engine.state.value as? XmtpEngineState.Ready)?.client?.inboxId ?: "N/A"
+                    recordCommittedMessage(
+                        msgId = msgId,
+                        sender = if (clientInbox != "N/A") clientInbox else (walletAddress.value ?: "0x..."),
+                        topic = conv.topic
+                    )
+                    logAction(
+                        tag = "VOICE",
+                        message = "TX VOICE COMMITTED | MsgID: $msgId | Duration: ${VoiceNoteCodec.formatDuration(voiceNote.durationMs)} | Bytes: ${voiceNote.audioBytes.size}"
+                    )
+                }
+                .onFailure { err ->
+                    _statusBanner.value = "Αποτυχία αποστολής φωνητικού: ${err.message}"
+                    logAction("VOICE", "Voice dispatch failed: ${err.message}", isError = true)
+                }
+            } finally {
+                _isSending.value = false
+            }
+        }
     }
 
     fun requestNotificationCallAccept(callId: String?) {
@@ -1470,6 +1555,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun acceptIncomingCall(callId: String? = null) {
         if (!hasRecordAudioPermission()) return
+        sessionContainer.voiceNoteRecorder.cancel()
+        sessionContainer.voiceNotePlayer.stop()
         sessionContainer.callSessionManager.acceptIncomingCall(callId)
     }
 
@@ -1503,6 +1590,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     override fun onCleared() {
         cancelDeviceTransfer()
+        sessionContainer.voiceNoteRecorder.cancel()
+        sessionContainer.voiceNotePlayer.stop()
         // Desvinculamos el callback de UI pero mantenemos el motor vivo para notificaciones fuera de la app.
         sessionContainer.onNotificationDispatched = null
     }
