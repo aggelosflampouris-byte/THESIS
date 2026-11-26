@@ -95,4 +95,22 @@ class CallSignalingPolicyTest {
             CallSignalingPolicy.classifySelectedCandidatePair("srflx", "prflx")
         )
     }
+
+    @Test
+    fun iceServerConfig_remainsDecentralizedWithStatelessStunOnly() {
+        val stunEndpoints = IceServerConfig.defaultStunEndpoints
+        assertTrue(stunEndpoints.isNotEmpty())
+        val allUrls = stunEndpoints.flatMap { it.urls }
+        assertTrue(allUrls.isNotEmpty())
+        // Verificamos ausencia total de servidores TURN centralizados por defecto.
+        assertTrue(allUrls.all { it.startsWith("stun:") })
+        assertTrue(stunEndpoints.all { it.username == null && it.credential == null })
+    }
+
+    @Test
+    fun isVideoOffer_detectsVideoBySdpOrReason() {
+        assertTrue(CallSignalingPolicy.isVideoOffer(sdp = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111", reason = "video"))
+        assertTrue(CallSignalingPolicy.isVideoOffer(sdp = "v=0\r\nm=audio 9...\r\nm=video 9 UDP/TLS/RTP/SAVPF 96", reason = null))
+        assertFalse(CallSignalingPolicy.isVideoOffer(sdp = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111", reason = null))
+    }
 }

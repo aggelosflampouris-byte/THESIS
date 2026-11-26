@@ -105,5 +105,56 @@ class CallHistoryPolicyTest {
         assertTrue(missed.isOutgoing)
         assertEquals("Εσείς καλέσατε • Χωρίς απάντηση", CallHistoryPolicy.formatCallSubtitle(missed, "Alice"))
     }
+
+    @Test
+    fun buildCallEvents_videoCallFormatsVideoTitlesAndDuration() {
+        val records = listOf(
+            DecodedCallSignalRecord(
+                messageId = "mv1",
+                conversationId = "conv1",
+                senderInboxId = localInbox,
+                timestampMs = 5_000_000L,
+                signal = CallSignal(
+                    callId = "vc1",
+                    type = CallSignalType.OFFER,
+                    timestampMs = 5_000_000L,
+                    sdp = "v=0\r\nm=audio 9\r\nm=video 9",
+                    reason = "video"
+                )
+            ),
+            DecodedCallSignalRecord(
+                messageId = "mv2",
+                conversationId = "conv1",
+                senderInboxId = peerInbox,
+                timestampMs = 5_003_000L,
+                signal = CallSignal(
+                    callId = "vc1",
+                    type = CallSignalType.ANSWER,
+                    timestampMs = 5_003_000L,
+                    sdp = "v=0\r\nm=audio 9\r\nm=video 9"
+                )
+            ),
+            DecodedCallSignalRecord(
+                messageId = "mv3",
+                conversationId = "conv1",
+                senderInboxId = peerInbox,
+                timestampMs = 5_045_000L,
+                signal = CallSignal(
+                    callId = "vc1",
+                    type = CallSignalType.HANGUP,
+                    timestampMs = 5_045_000L,
+                    reason = CallHistoryPolicy.encodeHangupReason("hangup", 42L)
+                )
+            )
+        )
+
+        val events = CallHistoryPolicy.buildCallEvents(records, localInboxId = localInbox, nowMs = 5_060_000L)
+        assertEquals(1, events.size)
+        val event = events[0]
+        assertTrue(event.isVideo)
+        assertEquals(ChatCallOutcome.COMPLETED, event.outcome)
+        assertEquals("Εξερχόμενη βιντεοκλήση", CallHistoryPolicy.formatCallTitle(event))
+        assertEquals("Εσείς καλέσατε • Η κλήση διήρκεσε 42 δευτ.", CallHistoryPolicy.formatCallSubtitle(event, "Alice"))
+    }
 }
 

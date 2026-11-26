@@ -80,7 +80,8 @@ internal fun MessagingTopBar(
     onOpenShred: () -> Unit,
     onOpenLogs: () -> Unit = {},
     onOpenProtocolInspector: () -> Unit = {},
-    onStartVoiceCall: () -> Unit = {}
+    onStartVoiceCall: () -> Unit = {},
+    onStartVideoCall: () -> Unit = {}
 ) {
     TopAppBar(
         title = {
@@ -179,13 +180,24 @@ internal fun MessagingTopBar(
                         Icon(
                             painter = painterResource(R.drawable.ic_call_phone),
                             contentDescription = "Κλήση φωνής",
+                            modifier = Modifier.size(21.dp)
+                        )
+                    }
+                    IconButton(
+                        onClick = onStartVideoCall,
+                        enabled = !isShredding && !isCallActive
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_videocam),
+                            contentDescription = "Βιντεοκλήση",
                             modifier = Modifier.size(22.dp)
                         )
                     }
-                }
-
-                IconButton(onClick = onOpenProtocolInspector) {
-                    Icon(Icons.Default.Info, contentDescription = "Protocol Info")
+                } else {
+                    // En conversaciones grupales mostramos el boton Info; en DM basta pulsar el titulo para liberar espacio.
+                    IconButton(onClick = onOpenProtocolInspector) {
+                        Icon(Icons.Default.Info, contentDescription = "Protocol Info")
+                    }
                 }
 
                 if (engineState is XmtpEngineState.Ready) {

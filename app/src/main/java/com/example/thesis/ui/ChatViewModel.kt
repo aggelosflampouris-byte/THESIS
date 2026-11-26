@@ -57,6 +57,8 @@ import com.example.thesis.transfer.TransferImportResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
+import org.webrtc.EglBase
+import org.webrtc.VideoSink
 
 /**
  * Action log entry capturing runtime operations, security milestones, and benchmark latencies.
@@ -1422,13 +1424,39 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         return CallForegroundService.hasRecordAudioPermission(getApplication())
     }
 
+    fun hasCameraPermission(): Boolean {
+        return CallForegroundService.hasCameraPermission(getApplication())
+    }
+
+    fun getCallEglBaseContext(): EglBase.Context? {
+        return sessionContainer.callSessionManager.getEglBaseContext()
+    }
+
+    fun setLocalVideoSink(sink: VideoSink?) {
+        sessionContainer.callSessionManager.setLocalVideoSink(sink)
+    }
+
+    fun setRemoteVideoSink(sink: VideoSink?) {
+        sessionContainer.callSessionManager.setRemoteVideoSink(sink)
+    }
+
     fun startVoiceCall(conversation: Conversation) {
         if (conversation !is Conversation.Dm) return
         if (!hasRecordAudioPermission()) return
-        sessionContainer.callSessionManager.startOutgoingCall(conversation)
+        sessionContainer.callSessionManager.startOutgoingCall(conversation, isVideo = false)
         logAction(
             tag = "CALL",
             message = "Εκκίνηση κρυπτογραφημένης κλήσης φωνής DTLS-SRTP."
+        )
+    }
+
+    fun startVideoCall(conversation: Conversation) {
+        if (conversation !is Conversation.Dm) return
+        if (!hasRecordAudioPermission() || !hasCameraPermission()) return
+        sessionContainer.callSessionManager.startOutgoingCall(conversation, isVideo = true)
+        logAction(
+            tag = "CALL",
+            message = "Εκκίνηση κρυπτογραφημένης βιντεοκλήσης P2P DTLS-SRTP."
         )
     }
 
@@ -1459,6 +1487,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun toggleCallSpeaker() {
         sessionContainer.callSessionManager.toggleSpeaker()
+    }
+
+    fun toggleCallCamera() {
+        sessionContainer.callSessionManager.toggleCamera()
+    }
+
+    fun switchCallCamera() {
+        sessionContainer.callSessionManager.switchCamera()
     }
 
     fun dismissEndedCall() {

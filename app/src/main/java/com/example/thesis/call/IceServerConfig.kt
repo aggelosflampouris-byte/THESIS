@@ -8,13 +8,14 @@ data class IceEndpoint(
     val credential: String? = null
 )
 
-// Configuracion de servidores STUN publicos para atravesar NAT sin servidor propio de senalizacion,
-// manteniendo soporte opcional para credenciales TURN externas en tiempo de ejecucion.
+// Configuracion estrictamente descentralizada de servidores STUN sin estado (RFC 5389) para descubrimiento P2P de NAT,
+// sin relés TURN de terceros preconfigurados; solo se usan relés si el usuario o un nodo propio los aporta en tiempo de ejecucion.
 object IceServerConfig {
     val defaultStunEndpoints: List<IceEndpoint> = listOf(
         IceEndpoint(urls = listOf("stun:stun.l.google.com:19302")),
         IceEndpoint(urls = listOf("stun:stun1.l.google.com:19302")),
-        IceEndpoint(urls = listOf("stun:stun.cloudflare.com:3478"))
+        IceEndpoint(urls = listOf("stun:stun.cloudflare.com:3478")),
+        IceEndpoint(urls = listOf("stun:stun.stunprotocol.org:3478"))
     )
 
     fun buildIceServerList(turnServers: List<IceEndpoint> = emptyList()): List<PeerConnection.IceServer> {

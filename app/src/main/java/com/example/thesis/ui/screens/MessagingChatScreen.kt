@@ -328,7 +328,11 @@ private fun CallFeedbackChatCard(
                     Box(contentAlignment = Alignment.Center) {
                         Icon(
                             painter = painterResource(
-                                if (isMissedOrDeclined) R.drawable.ic_call_end else R.drawable.ic_call_phone
+                                when {
+                                    isMissedOrDeclined -> R.drawable.ic_call_end
+                                    event.isVideo -> R.drawable.ic_videocam
+                                    else -> R.drawable.ic_call_phone
+                                }
                             ),
                             contentDescription = null,
                             tint = accentColor,

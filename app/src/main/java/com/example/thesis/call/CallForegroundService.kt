@@ -24,10 +24,11 @@ internal class CallForegroundService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         // Android exige startForeground() tras startForegroundService(); lo llamamos siempre primero
         // para evitar ForegroundServiceDidNotStartInTimeException si la llamada termina enseguida.
+        val isVideo = intent?.getBooleanExtra(EXTRA_IS_VIDEO, false) == true
         val notification = buildNotificationSafely(intent)
-        val started = enterForeground(notification)
+        val started = enterForeground(notification, isVideo)
         if (!started) {
-            Log.e(TAG, "Failed to enter microphone foreground service")
+            Log.e(TAG, "Failed to enter call foreground service")
             startPending = false
             stopSelf()
             return START_NOT_STICKY
@@ -49,24 +50,35 @@ internal class CallForegroundService : Service() {
         super.onDestroy()
     }
 
-    private fun enterForeground(notification: Notification): Boolean {
-        val fgsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && hasRecordAudioPermission(this)) {
+    private fun enterForeground(notification: Notification, isVideo: Boolean): Boolean {
+        val baseMicType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && hasRecordAudioPermission(this)) {
             ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
         } else {
             0
+        }
+        val fgsType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && isVideo && hasCameraPermission(this)) {
+            baseMicType or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+        } else {
+            baseMicType
         }
         val primary = runCatching {
             ServiceCompat.startForeground(this, CallNotificationManager.NOTIFICATION_ID_ONGOING, notification, fgsType)
         }
         if (primary.isSuccess) return true
         Log.w(TAG, "startForeground with call notification failed: ${primary.exceptionOrNull()}")
-        // Reintentamos con una notificacion basica por si el estilo CallStyle es rechazado por el sistema.
+        // Si Android rechaza el tipo camera o CallStyle, reintentamos con solo microfono y notificacion basica.
+        if (fgsType != baseMicType) {
+            val micOnly = runCatching {
+                ServiceCompat.startForeground(this, CallNotificationManager.NOTIFICATION_ID_ONGOING, notification, baseMicType)
+            }
+            if (micOnly.isSuccess) return true
+        }
         return runCatching {
             ServiceCompat.startForeground(
                 this,
                 CallNotificationManager.NOTIFICATION_ID_ONGOING,
                 buildFallbackNotification(),
-                fgsType
+                baseMicType
             )
         }.isSuccess
     }
@@ -113,6 +125,7 @@ internal class CallForegroundService : Service() {
         private const val EXTRA_CONVERSATION_ID = "extra_conversation_id"
         private const val EXTRA_PEER_NAME = "extra_peer_name"
         private const val EXTRA_STATUS_LABEL = "extra_status_label"
+        private const val EXTRA_IS_VIDEO = "extra_is_video"
 
         @Volatile
         private var startPending: Boolean = false
@@ -130,12 +143,20 @@ internal class CallForegroundService : Service() {
             ) == PackageManager.PERMISSION_GRANTED
         }
 
+        fun hasCameraPermission(context: Context): Boolean {
+            return ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.CAMERA
+            ) == PackageManager.PERMISSION_GRANTED
+        }
+
         fun start(
             context: Context,
             callId: String,
             conversationId: String,
             peerName: String,
-            statusLabel: String
+            statusLabel: String,
+            isVideo: Boolean = false
         ): Boolean {
             if (!hasRecordAudioPermission(context)) return false
             val appCtx = context.applicationContext
@@ -145,6 +166,7 @@ internal class CallForegroundService : Service() {
                 putExtra(EXTRA_CONVERSATION_ID, conversationId)
                 putExtra(EXTRA_PEER_NAME, peerName)
                 putExtra(EXTRA_STATUS_LABEL, statusLabel)
+                putExtra(EXTRA_IS_VIDEO, isVideo)
             }
             stopRequested = false
             startPending = true

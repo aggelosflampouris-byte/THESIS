@@ -25,6 +25,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.webrtc.EglBase
+import org.webrtc.VideoSink
 import org.xmtp.android.library.Conversation
 import java.util.Collections
 import java.util.LinkedHashMap
@@ -35,26 +37,32 @@ sealed interface CallUiState {
     val conversationId: String
     val peerInboxId: String
     val peerDisplayName: String
+    val isVideo: Boolean
 
     data object Idle : CallUiState {
         override val callId: String = ""
         override val conversationId: String = ""
         override val peerInboxId: String = ""
         override val peerDisplayName: String = ""
+        override val isVideo: Boolean = false
     }
 
     data class OutgoingRinging(
         override val callId: String,
         override val conversationId: String,
         override val peerInboxId: String,
-        override val peerDisplayName: String
+        override val peerDisplayName: String,
+        override val isVideo: Boolean = false,
+        val isCameraEnabled: Boolean = isVideo,
+        val isFrontCamera: Boolean = true
     ) : CallUiState
 
     data class IncomingRinging(
         override val callId: String,
         override val conversationId: String,
         override val peerInboxId: String,
-        override val peerDisplayName: String
+        override val peerDisplayName: String,
+        override val isVideo: Boolean = false
     ) : CallUiState
 
     data class Connecting(
@@ -63,7 +71,10 @@ sealed interface CallUiState {
         val isOutgoing: Boolean,
         override val peerInboxId: String,
         override val peerDisplayName: String,
-        val sasCode: String? = null
+        val sasCode: String? = null,
+        override val isVideo: Boolean = false,
+        val isCameraEnabled: Boolean = false,
+        val isFrontCamera: Boolean = true
     ) : CallUiState
 
     data class Active(
@@ -75,7 +86,11 @@ sealed interface CallUiState {
         val isMuted: Boolean = false,
         val isSpeakerOn: Boolean = false,
         val sasCode: String? = null,
-        val transportType: CallTransportType = CallTransportType.UNKNOWN
+        val transportType: CallTransportType = CallTransportType.UNKNOWN,
+        override val isVideo: Boolean = false,
+        val isCameraEnabled: Boolean = false,
+        val isFrontCamera: Boolean = true,
+        val hasRemoteVideo: Boolean = false
     ) : CallUiState
 
     data class Ended(
@@ -83,11 +98,12 @@ sealed interface CallUiState {
         override val conversationId: String,
         override val peerInboxId: String,
         override val peerDisplayName: String,
-        val reasonText: String
+        val reasonText: String,
+        override val isVideo: Boolean = false
     ) : CallUiState
 }
 
-// Orquestador unico de estado para llamadas 1-a-1 WebRTC + XMTP con cola FIFO y temporizadores de timbre/conexion.
+// Orquestador unico de estado para llamadas P2P de voz y video WebRTC + XMTP con cola FIFO y temporizadores.
 @OptIn(ExperimentalCoroutinesApi::class)
 internal class CallSessionManager(
     private val appContext: Context,
@@ -105,6 +121,7 @@ internal class CallSessionManager(
         val peerInboxId: String,
         val peerDisplayName: String,
         val isOutgoing: Boolean,
+        val isVideo: Boolean,
         var phase: SessionPhase,
         var remoteOfferSdp: String? = null,
         val bufferedRemoteIce: MutableList<CallIceCandidate> = mutableListOf(),
@@ -114,7 +131,10 @@ internal class CallSessionManager(
         var transportType: CallTransportType = CallTransportType.UNKNOWN,
         var connectedAtElapsedMs: Long? = null,
         var isMuted: Boolean = false,
-        var isSpeakerOn: Boolean = false,
+        var isSpeakerOn: Boolean = isVideo,
+        var isCameraEnabled: Boolean = isVideo,
+        var isFrontCamera: Boolean = true,
+        var hasRemoteVideo: Boolean = false,
         val outboundSignalChannel: Channel<CallSignal> = Channel(Channel.UNLIMITED),
         var signalSenderJob: Job? = null
     )
@@ -165,9 +185,24 @@ internal class CallSessionManager(
         }
     }
 
-    fun startOutgoingCall(conversation: Conversation) {
+    fun getEglBaseContext(): EglBase.Context? = webrtcEngine.getOrCreateEglBaseContext()
+
+    fun setLocalVideoSink(sink: VideoSink?) {
+        webrtcEngine.setLocalVideoSink(sink)
+    }
+
+    fun setRemoteVideoSink(sink: VideoSink?) {
+        webrtcEngine.setRemoteVideoSink(sink)
+    }
+
+    fun startOutgoingCall(conversation: Conversation, isVideo: Boolean = false) {
         if (conversation !is Conversation.Dm) return
         if (!CallForegroundService.hasRecordAudioPermission(appContext)) return
+        val canUseCamera = isVideo && CallForegroundService.hasCameraPermission(appContext)
+        if (isVideo && !canUseCamera) {
+            diagnosticsLogger("CALL", "Αδυναμία βιντεοκλήσης: λείπει η άδεια CAMERA", true)
+            return
+        }
 
         val peerInboxId = conversation.dm.peerInboxId
         val callId = UUID.randomUUID().toString()
@@ -183,7 +218,10 @@ internal class CallSessionManager(
                 peerInboxId = peerInboxId,
                 peerDisplayName = peerName,
                 isOutgoing = true,
-                phase = SessionPhase.OUTGOING_RINGING
+                isVideo = isVideo,
+                phase = SessionPhase.OUTGOING_RINGING,
+                isSpeakerOn = isVideo,
+                isCameraEnabled = canUseCamera
             )
             startSignalSenderLocked(session)
             activeSession = session
@@ -191,7 +229,10 @@ internal class CallSessionManager(
                 callId = callId,
                 conversationId = conversation.id,
                 peerInboxId = peerInboxId,
-                peerDisplayName = peerName
+                peerDisplayName = peerName,
+                isVideo = isVideo,
+                isCameraEnabled = canUseCamera,
+                isFrontCamera = session.isFrontCamera
             )
 
             CallForegroundService.start(
@@ -199,12 +240,17 @@ internal class CallSessionManager(
                 callId = callId,
                 conversationId = conversation.id,
                 peerName = peerName,
-                statusLabel = "Κλήση σε εξέλιξη..."
+                statusLabel = if (isVideo) "Βιντεοκλήση σε εξέλιξη..." else "Κλήση σε εξέλιξη...",
+                isVideo = isVideo
             )
-            audioController.startInCallAudio(speakerOn = false)
+            audioController.startInCallAudio(speakerOn = session.isSpeakerOn)
             scheduleRingTimeoutLocked(callId, isOutgoing = true)
-            diagnosticsLogger("CALL", "Εξερχόμενη κλήση [call=${callId.take(8)}]", false)
-            webrtcEngine.startOutgoingOffer(callId)
+            diagnosticsLogger(
+                "CALL",
+                if (isVideo) "Εξερχόμενη βιντεοκλήση [call=${callId.take(8)}]" else "Εξερχόμενη κλήση [call=${callId.take(8)}]",
+                false
+            )
+            webrtcEngine.startOutgoingOffer(callId, isVideo = isVideo)
         }
     }
 
@@ -217,6 +263,7 @@ internal class CallSessionManager(
         audioController.stopRinging()
         notificationManager.cancelIncomingCallNotification()
         val currentUi = _callState.value
+        val canUseCamera = currentUi.isVideo && CallForegroundService.hasCameraPermission(appContext)
         if (currentUi is CallUiState.IncomingRinging &&
             (targetCallId.isNullOrBlank() || currentUi.callId == targetCallId)
         ) {
@@ -226,7 +273,10 @@ internal class CallSessionManager(
                 isOutgoing = false,
                 peerInboxId = currentUi.peerInboxId,
                 peerDisplayName = currentUi.peerDisplayName,
-                sasCode = null
+                sasCode = null,
+                isVideo = currentUi.isVideo,
+                isCameraEnabled = canUseCamera,
+                isFrontCamera = true
             )
         }
 
@@ -237,7 +287,8 @@ internal class CallSessionManager(
                 return@launch
             }
             if (!targetCallId.isNullOrBlank() && session.callId != targetCallId) return@launch
-            if (session.phase != SessionPhase.INCOMING_RINGING && session.phase != SessionPhase.CONNECTING) {
+            // Evitamos reiniciar PeerConnection/DTLS si el usuario toca Aceptar dos veces seguidas.
+            if (session.phase != SessionPhase.INCOMING_RINGING) {
                 return@launch
             }
             val offerSdp = session.remoteOfferSdp
@@ -251,23 +302,34 @@ internal class CallSessionManager(
             }
 
             ringTimeoutJob?.cancel()
+            val enableCamera = session.isVideo && CallForegroundService.hasCameraPermission(appContext)
             session.phase = SessionPhase.CONNECTING
+            session.isCameraEnabled = enableCamera
+            session.isSpeakerOn = session.isVideo
             _callState.value = CallUiState.Connecting(
                 callId = session.callId,
                 conversationId = session.conversationId,
                 isOutgoing = false,
                 peerInboxId = session.peerInboxId,
                 peerDisplayName = session.peerDisplayName,
-                sasCode = session.sasCode
+                sasCode = session.sasCode,
+                isVideo = session.isVideo,
+                isCameraEnabled = enableCamera,
+                isFrontCamera = session.isFrontCamera
             )
 
-            diagnosticsLogger("CALL", "Αποδοχή εισερχόμενης κλήσης [call=${session.callId.take(8)}]", false)
+            diagnosticsLogger(
+                "CALL",
+                if (session.isVideo) "Αποδοχή βιντεοκλήσης [call=${session.callId.take(8)}]" else "Αποδοχή εισερχόμενης κλήσης [call=${session.callId.take(8)}]",
+                false
+            )
             CallForegroundService.start(
                 context = appContext,
                 callId = session.callId,
                 conversationId = session.conversationId,
                 peerName = session.peerDisplayName,
-                statusLabel = "Σύνδεση κλήσης..."
+                statusLabel = if (session.isVideo) "Σύνδεση βιντεοκλήσης..." else "Σύνδεση κλήσης...",
+                isVideo = enableCamera
             )
             audioController.startInCallAudio(speakerOn = session.isSpeakerOn)
             scheduleConnectTimeoutLocked(session.callId)
@@ -277,7 +339,9 @@ internal class CallSessionManager(
             webrtcEngine.acceptIncomingOfferAndCreateAnswer(
                 callId = session.callId,
                 remoteOfferSdp = offerSdp,
-                initialRemoteIce = initialIce
+                initialRemoteIce = initialIce,
+                isVideo = session.isVideo,
+                enableLocalCamera = enableCamera
             )
         }
     }
@@ -395,6 +459,26 @@ internal class CallSessionManager(
         }
     }
 
+    fun toggleCamera() {
+        managerScope.launch {
+            val session = activeSession ?: return@launch
+            if (!session.isVideo) return@launch
+            if (!session.isCameraEnabled && !CallForegroundService.hasCameraPermission(appContext)) return@launch
+            val nextEnabled = !session.isCameraEnabled
+            session.isCameraEnabled = nextEnabled
+            webrtcEngine.setVideoEnabled(nextEnabled)
+            refreshVideoFlagsOnState(session)
+        }
+    }
+
+    fun switchCamera() {
+        managerScope.launch {
+            val session = activeSession ?: return@launch
+            if (!session.isVideo || !session.isCameraEnabled) return@launch
+            webrtcEngine.switchCamera()
+        }
+    }
+
     fun dismissEndedState() {
         endedDismissJob?.cancel()
         if (_callState.value is CallUiState.Ended) {
@@ -432,7 +516,8 @@ internal class CallSessionManager(
                     callId = callId,
                     type = CallSignalType.OFFER,
                     timestampMs = System.currentTimeMillis(),
-                    sdp = sdp
+                    sdp = sdp,
+                    reason = if (session.isVideo) "video" else null
                 )
             )
         }
@@ -490,13 +575,21 @@ internal class CallSessionManager(
                 isMuted = session.isMuted,
                 isSpeakerOn = session.isSpeakerOn,
                 sasCode = session.sasCode,
-                transportType = session.transportType
+                transportType = session.transportType,
+                isVideo = session.isVideo,
+                isCameraEnabled = session.isCameraEnabled,
+                isFrontCamera = session.isFrontCamera,
+                hasRemoteVideo = session.hasRemoteVideo
             )
             notificationManager.updateOngoingCallNotification(
                 callId = session.callId,
                 conversationId = session.conversationId,
                 peerName = session.peerDisplayName,
-                statusLabel = "Κλήση φωνής σε εξέλιξη (DTLS-SRTP)"
+                statusLabel = if (session.isVideo) {
+                    "Βιντεοκλήση σε εξέλιξη (DTLS-SRTP)"
+                } else {
+                    "Κλήση φωνής σε εξέλιξη (DTLS-SRTP)"
+                }
             )
         }
     }
@@ -556,6 +649,24 @@ internal class CallSessionManager(
         }
     }
 
+    override fun onRemoteVideoAvailable(callId: String, available: Boolean) {
+        managerScope.launch {
+            val session = activeSession ?: return@launch
+            if (session.callId != callId) return@launch
+            session.hasRemoteVideo = available
+            refreshVideoFlagsOnState(session)
+        }
+    }
+
+    override fun onCameraFacingChanged(callId: String, isFrontFacing: Boolean) {
+        managerScope.launch {
+            val session = activeSession ?: return@launch
+            if (session.callId != callId) return@launch
+            session.isFrontCamera = isFrontFacing
+            refreshVideoFlagsOnState(session)
+        }
+    }
+
     override fun onEngineError(callId: String, reason: String) {
         Log.e(TAG, "WebRTC error on call=$callId: $reason")
         diagnosticsLogger("CALL", "Σφάλμα WebRTC [call=${callId.take(8)}]: $reason", true)
@@ -569,10 +680,39 @@ internal class CallSessionManager(
                 reason = "error"
             )
             teardownSessionLocked(
-                endReasonText = "Σφάλμα ήχου WebRTC",
+                endReasonText = "Σφάλμα ήχου/βίντεο WebRTC",
                 signalToSend = hangupSignal,
                 targetConvId = session.conversationId
             )
+        }
+    }
+
+    override fun onCallDiagnostic(callId: String, message: String) {
+        diagnosticsLogger("CALL", "[call=${callId.take(8)}] $message", false)
+    }
+
+    private fun refreshVideoFlagsOnState(session: ActiveSession) {
+        when (val current = _callState.value) {
+            is CallUiState.OutgoingRinging -> if (current.callId == session.callId) {
+                _callState.value = current.copy(
+                    isCameraEnabled = session.isCameraEnabled,
+                    isFrontCamera = session.isFrontCamera
+                )
+            }
+            is CallUiState.Connecting -> if (current.callId == session.callId) {
+                _callState.value = current.copy(
+                    isCameraEnabled = session.isCameraEnabled,
+                    isFrontCamera = session.isFrontCamera
+                )
+            }
+            is CallUiState.Active -> if (current.callId == session.callId) {
+                _callState.value = current.copy(
+                    isCameraEnabled = session.isCameraEnabled,
+                    isFrontCamera = session.isFrontCamera,
+                    hasRemoteVideo = session.hasRemoteVideo
+                )
+            }
+            else -> Unit
         }
     }
 
@@ -660,6 +800,7 @@ internal class CallSessionManager(
         }
 
         endedDismissJob?.cancel()
+        val isVideo = CallSignalingPolicy.isVideoOffer(offerSdp, signal.reason)
         val peerName = resolvePeerDisplayName(conversation.id, incoming.senderInboxId)
         val session = ActiveSession(
             callId = signal.callId,
@@ -667,9 +808,12 @@ internal class CallSessionManager(
             peerInboxId = incoming.senderInboxId,
             peerDisplayName = peerName,
             isOutgoing = false,
+            isVideo = isVideo,
             phase = SessionPhase.INCOMING_RINGING,
             remoteOfferSdp = offerSdp,
-            remoteFingerprint = CallSignalingPolicy.extractDtlsSha256Fingerprint(offerSdp)
+            remoteFingerprint = CallSignalingPolicy.extractDtlsSha256Fingerprint(offerSdp),
+            isSpeakerOn = isVideo,
+            isCameraEnabled = isVideo
         )
         startSignalSenderLocked(session)
         activeSession = session
@@ -677,15 +821,21 @@ internal class CallSessionManager(
             callId = session.callId,
             conversationId = session.conversationId,
             peerInboxId = session.peerInboxId,
-            peerDisplayName = session.peerDisplayName
+            peerDisplayName = session.peerDisplayName,
+            isVideo = isVideo
         )
 
-        diagnosticsLogger("CALL", "Εισερχόμενη κλήση [call=${session.callId.take(8)}]", false)
+        diagnosticsLogger(
+            "CALL",
+            if (isVideo) "Εισερχόμενη βιντεοκλήση [call=${session.callId.take(8)}]" else "Εισερχόμενη κλήση [call=${session.callId.take(8)}]",
+            false
+        )
         audioController.startIncomingRinging()
         notificationManager.showIncomingCallNotification(
             callId = session.callId,
             conversationId = session.conversationId,
-            callerName = session.peerDisplayName
+            callerName = session.peerDisplayName,
+            isVideo = isVideo
         )
         scheduleRingTimeoutLocked(session.callId, isOutgoing = false)
     }
@@ -704,7 +854,10 @@ internal class CallSessionManager(
             isOutgoing = true,
             peerInboxId = session.peerInboxId,
             peerDisplayName = session.peerDisplayName,
-            sasCode = session.sasCode
+            sasCode = session.sasCode,
+            isVideo = session.isVideo,
+            isCameraEnabled = session.isCameraEnabled,
+            isFrontCamera = session.isFrontCamera
         )
         scheduleConnectTimeoutLocked(session.callId)
         webrtcEngine.applyRemoteAnswer(session.callId, answerSdp)
@@ -723,7 +876,7 @@ internal class CallSessionManager(
         }
     }
 
-    private fun handleRemoteTerminalSignalLocked(
+    private suspend fun handleRemoteTerminalSignalLocked(
         incoming: IncomingCallSignal,
         endMessage: String
     ) {
@@ -777,7 +930,7 @@ internal class CallSessionManager(
                 reason = "ice_timeout"
             )
             teardownSessionLocked(
-                endReasonText = "Αποτυχία σύνδεσης ICE",
+                endReasonText = "Αδυναμία απευθείας P2P (περιορισμένο NAT)",
                 signalToSend = hangup,
                 targetConvId = session.conversationId
             )
@@ -805,7 +958,8 @@ internal class CallSessionManager(
                 conversationId = session.conversationId,
                 peerInboxId = session.peerInboxId,
                 peerDisplayName = session.peerDisplayName,
-                reasonText = endReasonText
+                reasonText = endReasonText,
+                isVideo = session.isVideo
             )
             endedDismissJob?.cancel()
             endedDismissJob = managerScope.launch {

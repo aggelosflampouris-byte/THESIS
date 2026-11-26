@@ -14,8 +14,14 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
+import org.webrtc.Camera1Enumerator
+import org.webrtc.Camera2Enumerator
+import org.webrtc.CameraVideoCapturer
 import org.webrtc.CandidatePairChangeEvent
 import org.webrtc.DataChannel
+import org.webrtc.DefaultVideoDecoderFactory
+import org.webrtc.DefaultVideoEncoderFactory
+import org.webrtc.EglBase
 import org.webrtc.IceCandidate
 import org.webrtc.MediaConstraints
 import org.webrtc.MediaStream
@@ -25,6 +31,11 @@ import org.webrtc.RtpReceiver
 import org.webrtc.RtpTransceiver
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
+import org.webrtc.SurfaceTextureHelper
+import org.webrtc.VideoCapturer
+import org.webrtc.VideoSink
+import org.webrtc.VideoSource
+import org.webrtc.VideoTrack
 import org.webrtc.audio.JavaAudioDeviceModule
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
@@ -38,9 +49,12 @@ interface WebRtcCallListener {
     fun onTransportTypeChanged(callId: String, transportType: CallTransportType)
     fun onFingerprintsUpdated(callId: String, localFingerprint: String?, remoteFingerprint: String?)
     fun onEngineError(callId: String, reason: String)
+    fun onCallDiagnostic(callId: String, message: String) = Unit
+    fun onRemoteVideoAvailable(callId: String, available: Boolean) = Unit
+    fun onCameraFacingChanged(callId: String, isFrontFacing: Boolean) = Unit
 }
 
-// Motor WebRTC solo-voz con serializacion en hilo unico para evitar condiciones de carrera JNI al cerrar llamadas.
+// Motor WebRTC de voz y video P2P con serializacion en hilo unico para evitar condiciones de carrera JNI y EGL.
 internal class WebRtcCallEngine(
     private val appContext: Context,
     private val listener: WebRtcCallListener,
@@ -54,11 +68,26 @@ internal class WebRtcCallEngine(
     @Volatile
     private var activeCallId: String? = null
 
+    @Volatile
+    private var sharedEglBase: EglBase? = null
+    private val eglLock = Any()
+
     private var audioDeviceModule: JavaAudioDeviceModule? = null
     private var peerConnectionFactory: PeerConnectionFactory? = null
     private var peerConnection: PeerConnection? = null
     private var audioSource: AudioSource? = null
     private var localAudioTrack: AudioTrack? = null
+
+    private var videoCapturer: VideoCapturer? = null
+    private var surfaceTextureHelper: SurfaceTextureHelper? = null
+    private var videoSource: VideoSource? = null
+    private var localVideoTrack: VideoTrack? = null
+    private var remoteVideoTrack: VideoTrack? = null
+    private var localVideoSink: VideoSink? = null
+    private var remoteVideoSink: VideoSink? = null
+    private var isVideoSession: Boolean = false
+    private var isFrontCamera: Boolean = true
+    private var isCapturing: Boolean = false
 
     private var localFingerprint: String? = null
     private var remoteFingerprint: String? = null
@@ -67,11 +96,23 @@ internal class WebRtcCallEngine(
     private val outboundIceBuffer = mutableListOf<CallIceCandidate>()
     private var iceFlushJob: Job? = null
 
-    fun startOutgoingOffer(callId: String) {
+    // Mantenemos un EglBase compartido para evitar fallos si Compose desmonta SurfaceViewRenderer tras finalizar la llamada.
+    fun getOrCreateEglBaseContext(): EglBase.Context? {
+        synchronized(eglLock) {
+            if (sharedEglBase == null) {
+                sharedEglBase = runCatching { EglBase.create() }.getOrNull()
+            }
+            return sharedEglBase?.eglBaseContext
+        }
+    }
+
+    fun startOutgoingOffer(callId: String, isVideo: Boolean = false) {
         runOnWebRtc {
-            if (!prepareSessionOnExecutor(callId)) return@runOnWebRtc
+            if (!prepareSessionOnExecutor(callId, isVideo = isVideo, enableLocalCamera = isVideo)) {
+                return@runOnWebRtc
+            }
             val pc = peerConnection ?: return@runOnWebRtc
-            val constraints = buildOfferAnswerConstraints()
+            val constraints = buildOfferAnswerConstraints(isVideo = isVideo)
             pc.createOffer(object : SdpObserver {
                 override fun onCreateSuccess(sdp: SessionDescription?) {
                     if (sdp == null) {
@@ -95,10 +136,14 @@ internal class WebRtcCallEngine(
     fun acceptIncomingOfferAndCreateAnswer(
         callId: String,
         remoteOfferSdp: String,
-        initialRemoteIce: List<CallIceCandidate> = emptyList()
+        initialRemoteIce: List<CallIceCandidate> = emptyList(),
+        isVideo: Boolean = false,
+        enableLocalCamera: Boolean = isVideo
     ) {
         runOnWebRtc {
-            if (!prepareSessionOnExecutor(callId)) return@runOnWebRtc
+            if (!prepareSessionOnExecutor(callId, isVideo = isVideo, enableLocalCamera = enableLocalCamera)) {
+                return@runOnWebRtc
+            }
             val pc = peerConnection ?: return@runOnWebRtc
             if (initialRemoteIce.isNotEmpty()) {
                 pendingRemoteIce.addAll(initialRemoteIce)
@@ -114,7 +159,7 @@ internal class WebRtcCallEngine(
                         remoteFingerprint = CallSignalingPolicy.extractDtlsSha256Fingerprint(remoteOfferSdp)
                         listener.onFingerprintsUpdated(callId, localFingerprint, remoteFingerprint)
                         drainPendingRemoteIceOnExecutor()
-                        createLocalAnswerOnExecutor(callId)
+                        createLocalAnswerOnExecutor(callId, isVideo = isVideo)
                     }
                 }
 
@@ -181,6 +226,72 @@ internal class WebRtcCallEngine(
         }
     }
 
+    fun setVideoEnabled(enabled: Boolean) {
+        runOnWebRtc {
+            runCatching { localVideoTrack?.setEnabled(enabled) }
+            val capturer = videoCapturer ?: return@runOnWebRtc
+            if (enabled && !isCapturing) {
+                runCatching {
+                    capturer.startCapture(VIDEO_WIDTH, VIDEO_HEIGHT, VIDEO_FPS)
+                    isCapturing = true
+                }
+            } else if (!enabled && isCapturing) {
+                runCatching {
+                    capturer.stopCapture()
+                    isCapturing = false
+                }
+            }
+        }
+    }
+
+    fun switchCamera() {
+        runOnWebRtc {
+            val camCapturer = videoCapturer as? CameraVideoCapturer ?: return@runOnWebRtc
+            val callId = activeCallId ?: return@runOnWebRtc
+            camCapturer.switchCamera(object : CameraVideoCapturer.CameraSwitchHandler {
+                override fun onCameraSwitchDone(isFrontFacing: Boolean) {
+                    runOnWebRtc {
+                        if (activeCallId != callId) return@runOnWebRtc
+                        isFrontCamera = isFrontFacing
+                        listener.onCameraFacingChanged(callId, isFrontFacing)
+                    }
+                }
+
+                override fun onCameraSwitchError(errorDescription: String?) {
+                    Log.w(TAG, "Camera switch failed: $errorDescription")
+                }
+            })
+        }
+    }
+
+    fun setLocalVideoSink(sink: VideoSink?) {
+        runOnWebRtc {
+            val previous = localVideoSink
+            if (previous === sink) return@runOnWebRtc
+            if (previous != null) {
+                runCatching { localVideoTrack?.removeSink(previous) }
+            }
+            localVideoSink = sink
+            if (sink != null) {
+                runCatching { localVideoTrack?.addSink(sink) }
+            }
+        }
+    }
+
+    fun setRemoteVideoSink(sink: VideoSink?) {
+        runOnWebRtc {
+            val previous = remoteVideoSink
+            if (previous === sink) return@runOnWebRtc
+            if (previous != null) {
+                runCatching { remoteVideoTrack?.removeSink(previous) }
+            }
+            remoteVideoSink = sink
+            if (sink != null) {
+                runCatching { remoteVideoTrack?.addSink(sink) }
+            }
+        }
+    }
+
     fun disposeSession(callId: String? = null) {
         runOnWebRtc {
             if (callId != null && activeCallId != null && activeCallId != callId) {
@@ -209,6 +320,10 @@ internal class WebRtcCallEngine(
         iceFlushJob?.cancel()
         engineScope.cancel()
         webrtcExecutor.shutdown()
+        synchronized(eglLock) {
+            runCatching { sharedEglBase?.release() }
+            sharedEglBase = null
+        }
     }
 
     // Capturamos cualquier Throwable (incluido UnsatisfiedLinkError) para que un fallo nativo no cierre el proceso.
@@ -231,10 +346,17 @@ internal class WebRtcCallEngine(
         }
     }
 
-    private fun prepareSessionOnExecutor(callId: String): Boolean {
+    private fun prepareSessionOnExecutor(
+        callId: String,
+        isVideo: Boolean,
+        enableLocalCamera: Boolean
+    ): Boolean {
         disposeSessionOnExecutor()
 
         activeCallId = callId
+        isVideoSession = isVideo
+        isFrontCamera = true
+        isCapturing = false
         localFingerprint = null
         remoteFingerprint = null
         hasRemoteDescription = false
@@ -281,15 +403,25 @@ internal class WebRtcCallEngine(
                 .createAudioDeviceModule()
             audioDeviceModule = adm
 
-            val factory = PeerConnectionFactory.builder()
+            val eglContext = if (isVideo) getOrCreateEglBaseContext() else null
+            val factoryBuilder = PeerConnectionFactory.builder()
                 .setAudioDeviceModule(adm)
-                .createPeerConnectionFactory()
+            if (isVideo && eglContext != null) {
+                factoryBuilder
+                    .setVideoEncoderFactory(DefaultVideoEncoderFactory(eglContext, true, true))
+                    .setVideoDecoderFactory(DefaultVideoDecoderFactory(eglContext))
+            }
+            val factory = factoryBuilder.createPeerConnectionFactory()
             peerConnectionFactory = factory
 
             val iceServers = IceServerConfig.buildIceServerList(turnServersProvider())
             val rtcConfig = PeerConnection.RTCConfiguration(iceServers).apply {
                 sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
+                bundlePolicy = PeerConnection.BundlePolicy.MAXBUNDLE
+                rtcpMuxPolicy = PeerConnection.RtcpMuxPolicy.REQUIRE
+                tcpCandidatePolicy = PeerConnection.TcpCandidatePolicy.ENABLED
                 continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
+                iceCandidatePoolSize = 2
             }
 
             val pc = factory.createPeerConnection(rtcConfig, createPeerObserver(callId))
@@ -314,6 +446,10 @@ internal class WebRtcCallEngine(
             }
             localAudioTrack = track
             pc.addTrack(track, listOf(LOCAL_MEDIA_STREAM_ID))
+
+            if (isVideo && enableLocalCamera && eglContext != null && CallForegroundService.hasCameraPermission(appContext)) {
+                setupLocalCameraTrackOnExecutor(callId, factory, pc, eglContext)
+            }
             true
         } catch (e: Throwable) {
             Log.e(TAG, "WebRTC initialization failed: ${e::class.java.simpleName}", e)
@@ -323,7 +459,58 @@ internal class WebRtcCallEngine(
         }
     }
 
-    private fun createLocalAnswerOnExecutor(callId: String) {
+    private fun setupLocalCameraTrackOnExecutor(
+        callId: String,
+        factory: PeerConnectionFactory,
+        pc: PeerConnection,
+        eglContext: EglBase.Context
+    ) {
+        // Si la camara falla al abrirse, continuamos con el audio y video remoto sin cerrar la llamada.
+        runCatching {
+            val enumerator = if (Camera2Enumerator.isSupported(appContext)) {
+                Camera2Enumerator(appContext)
+            } else {
+                Camera1Enumerator(true)
+            }
+            val devices = enumerator.deviceNames
+            val frontDevice = devices.firstOrNull { enumerator.isFrontFacing(it) }
+            val chosenDevice = frontDevice ?: devices.firstOrNull()
+                ?: throw IllegalStateException("No camera hardware available")
+
+            isFrontCamera = enumerator.isFrontFacing(chosenDevice)
+            listener.onCameraFacingChanged(callId, isFrontCamera)
+
+            val capturer = enumerator.createCapturer(chosenDevice, null)
+                ?: throw IllegalStateException("createCapturer returned null")
+            videoCapturer = capturer
+
+            val texHelper = SurfaceTextureHelper.create("ThesisVideoCaptureThread", eglContext)
+            surfaceTextureHelper = texHelper
+
+            val vSource = factory.createVideoSource(capturer.isScreencast)
+            videoSource = vSource
+
+            capturer.initialize(texHelper, appContext, vSource.capturerObserver)
+            capturer.startCapture(VIDEO_WIDTH, VIDEO_HEIGHT, VIDEO_FPS)
+            isCapturing = true
+
+            val vTrack = factory.createVideoTrack(LOCAL_VIDEO_TRACK_ID, vSource).apply {
+                setEnabled(true)
+            }
+            localVideoTrack = vTrack
+            localVideoSink?.let { sink ->
+                runCatching { vTrack.addSink(sink) }
+            }
+            pc.addTrack(vTrack, listOf(LOCAL_MEDIA_STREAM_ID))
+            listener.onCallDiagnostic(callId, "Local camera started ($chosenDevice)")
+        }.onFailure { err ->
+            Log.w(TAG, "Local camera setup failed: ${err::class.java.simpleName}: ${err.message}")
+            listener.onCallDiagnostic(callId, "Camera fallback to audio-only: ${err.message}")
+            releaseLocalVideoObjectsOnExecutor()
+        }
+    }
+
+    private fun createLocalAnswerOnExecutor(callId: String, isVideo: Boolean) {
         val pc = peerConnection ?: return
         pc.createAnswer(object : SdpObserver {
             override fun onCreateSuccess(sdp: SessionDescription?) {
@@ -341,7 +528,7 @@ internal class WebRtcCallEngine(
             }
 
             override fun onSetFailure(error: String?) = Unit
-        }, buildOfferAnswerConstraints())
+        }, buildOfferAnswerConstraints(isVideo = isVideo))
     }
 
     private fun setLocalSdpAndNotify(callId: String, sdp: SessionDescription, isOffer: Boolean) {
@@ -390,6 +577,7 @@ internal class WebRtcCallEngine(
 
         override fun onIceConnectionChange(newState: PeerConnection.IceConnectionState?) {
             if (activeCallId != callId) return
+            listener.onCallDiagnostic(callId, "ICE state -> ${newState?.name}")
             when (newState) {
                 PeerConnection.IceConnectionState.CONNECTED,
                 PeerConnection.IceConnectionState.COMPLETED -> listener.onIceConnected(callId)
@@ -401,6 +589,7 @@ internal class WebRtcCallEngine(
 
         override fun onConnectionChange(newState: PeerConnection.PeerConnectionState?) {
             if (activeCallId != callId) return
+            listener.onCallDiagnostic(callId, "Peer/DTLS state -> ${newState?.name}")
             when (newState) {
                 PeerConnection.PeerConnectionState.CONNECTED -> listener.onIceConnected(callId)
                 PeerConnection.PeerConnectionState.FAILED -> listener.onIceDisconnected(callId, "PEER_FAILED")
@@ -447,6 +636,7 @@ internal class WebRtcCallEngine(
                 else -> CallTransportType.UNKNOWN
             }
             if (resolved != CallTransportType.UNKNOWN) {
+                listener.onCallDiagnostic(callId, "Selected transport -> ${resolved.name}")
                 listener.onTransportTypeChanged(callId, resolved)
             }
         }
@@ -456,7 +646,23 @@ internal class WebRtcCallEngine(
         override fun onDataChannel(dataChannel: DataChannel?) = Unit
         override fun onRenegotiationNeeded() = Unit
         override fun onAddTrack(receiver: RtpReceiver?, mediaStreams: Array<out MediaStream>?) = Unit
-        override fun onTrack(transceiver: RtpTransceiver?) = Unit
+
+        override fun onTrack(transceiver: RtpTransceiver?) {
+            val track = transceiver?.receiver?.track() as? VideoTrack ?: return
+            runOnWebRtc {
+                if (activeCallId != callId) return@runOnWebRtc
+                remoteVideoSink?.let { sink ->
+                    runCatching { remoteVideoTrack?.removeSink(sink) }
+                }
+                remoteVideoTrack = track
+                runCatching { track.setEnabled(true) }
+                remoteVideoSink?.let { sink ->
+                    runCatching { track.addSink(sink) }
+                }
+                listener.onRemoteVideoAvailable(callId, true)
+                listener.onCallDiagnostic(callId, "Remote video track attached")
+            }
+        }
     }
 
     private fun scheduleDebouncedIceFlush(callId: String) {
@@ -476,7 +682,38 @@ internal class WebRtcCallEngine(
         if (activeCallId != callId || outboundIceBuffer.isEmpty()) return
         val batch = outboundIceBuffer.toList()
         outboundIceBuffer.clear()
+        val hostCount = batch.count { it.candidate.contains(" typ host", ignoreCase = true) }
+        val srflxCount = batch.count { it.candidate.contains(" typ srflx", ignoreCase = true) }
+        val relayCount = batch.count {
+            CallSignalingPolicy.classifyIceCandidateType(it.candidate) == CallTransportType.RELAYED_TURN
+        }
+        listener.onCallDiagnostic(
+            callId,
+            "ICE batch sent: ${batch.size} (host=$hostCount, srflx=$srflxCount, relay=$relayCount)"
+        )
         listener.onIceCandidateBatchReady(callId, batch)
+    }
+
+    private fun releaseLocalVideoObjectsOnExecutor() {
+        localVideoSink?.let { sink ->
+            runCatching { localVideoTrack?.removeSink(sink) }
+        }
+        runCatching { localVideoTrack?.setEnabled(false) }
+        runCatching { localVideoTrack?.dispose() }
+        localVideoTrack = null
+
+        if (isCapturing) {
+            runCatching { videoCapturer?.stopCapture() }
+            isCapturing = false
+        }
+        runCatching { videoCapturer?.dispose() }
+        videoCapturer = null
+
+        runCatching { videoSource?.dispose() }
+        videoSource = null
+
+        runCatching { surfaceTextureHelper?.dispose() }
+        surfaceTextureHelper = null
     }
 
     private fun disposeSessionOnExecutor() {
@@ -484,12 +721,21 @@ internal class WebRtcCallEngine(
         iceFlushJob = null
         activeCallId = null
         hasRemoteDescription = false
+        isVideoSession = false
+        isFrontCamera = true
         localFingerprint = null
         remoteFingerprint = null
         pendingRemoteIce.clear()
         outboundIceBuffer.clear()
 
-        // Liberamos objetos nativos en orden inverso al de creacion para evitar fugas o bloqueos de audio.
+        remoteVideoSink?.let { sink ->
+            runCatching { remoteVideoTrack?.removeSink(sink) }
+        }
+        remoteVideoTrack = null
+
+        // Liberamos objetos nativos en orden inverso al de creacion antes de destruir PeerConnection y Factory.
+        releaseLocalVideoObjectsOnExecutor()
+
         runCatching { localAudioTrack?.setEnabled(false) }
         runCatching { localAudioTrack?.dispose() }
         localAudioTrack = null
@@ -508,15 +754,19 @@ internal class WebRtcCallEngine(
         audioDeviceModule = null
     }
 
-    private fun buildOfferAnswerConstraints(): MediaConstraints = MediaConstraints().apply {
+    private fun buildOfferAnswerConstraints(isVideo: Boolean): MediaConstraints = MediaConstraints().apply {
         mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveAudio", "true"))
-        mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveVideo", "false"))
+        mandatory.add(MediaConstraints.KeyValuePair("OfferToReceiveVideo", if (isVideo) "true" else "false"))
     }
 
     companion object {
         private const val TAG = "WebRtcCallEngine"
         private const val LOCAL_AUDIO_TRACK_ID = "THESIS_VOICE_TRACK_0"
+        private const val LOCAL_VIDEO_TRACK_ID = "THESIS_VIDEO_TRACK_0"
         private const val LOCAL_MEDIA_STREAM_ID = "THESIS_VOICE_STREAM"
+        private const val VIDEO_WIDTH = 640
+        private const val VIDEO_HEIGHT = 480
+        private const val VIDEO_FPS = 24
         private val initLock = Any()
 
         @Volatile

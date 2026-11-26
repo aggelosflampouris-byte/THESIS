@@ -20,7 +20,8 @@ object CallSignalingPolicy {
     const val OFFER_TTL_MS: Long = 45_000L
     const val MAX_FUTURE_SKEW_MS: Long = 120_000L
     const val RING_TIMEOUT_MS: Long = 45_000L
-    const val CONNECT_TIMEOUT_MS: Long = 20_000L
+    // Ampliamos el margen de conexion a 30s para dar tiempo a la reserva TURN y al handshake DTLS-SRTP en 4G/5G.
+    const val CONNECT_TIMEOUT_MS: Long = 30_000L
     const val ICE_BATCH_DEBOUNCE_MS: Long = 300L
 
     private val DTLS_SHA256_REGEX = Regex(
@@ -31,6 +32,15 @@ object CallSignalingPolicy {
         pattern = """\btyp\s+(host|srflx|prflx|relay)\b""",
         options = setOf(RegexOption.IGNORE_CASE)
     )
+
+    private val SDP_VIDEO_MEDIA_REGEX = Regex(
+        pattern = """(?im)^m=video\b"""
+    )
+
+    fun isVideoOffer(sdp: String?, reason: String? = null): Boolean {
+        if (reason.equals("video", ignoreCase = true)) return true
+        return !sdp.isNullOrBlank() && SDP_VIDEO_MEDIA_REGEX.containsMatchIn(sdp)
+    }
 
     fun isOfferExpired(
         offerTimestampMs: Long,

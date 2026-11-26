@@ -313,10 +313,52 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
         }
     }
 
+    var pendingVideoAction by remember { mutableStateOf<Pair<Boolean, () -> Unit>?>(null) }
+    val videoCallPermissionsLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        val pending = pendingVideoAction
+        pendingVideoAction = null
+        val audioGranted = results[Manifest.permission.RECORD_AUDIO] == true || viewModel.hasRecordAudioPermission()
+        val cameraGranted = results[Manifest.permission.CAMERA] == true || viewModel.hasCameraPermission()
+        if (pending != null) {
+            val (requireCamera, action) = pending
+            if (audioGranted && (!requireCamera || cameraGranted)) {
+                action()
+            } else {
+                val msg = if (!audioGranted) {
+                    "Απαιτείται άδεια μικροφώνου για κλήσεις."
+                } else {
+                    "Απαιτείται άδεια κάμερας για εκκίνηση βιντεοκλήσης."
+                }
+                scope.launch { snackbarHostState.showSnackbar(msg) }
+            }
+        }
+    }
+
+    val runWithVideoCallPermissions: (Boolean, () -> Unit) -> Unit = { requireCamera, action ->
+        val hasAudio = viewModel.hasRecordAudioPermission()
+        val hasCamera = viewModel.hasCameraPermission()
+        if (hasAudio && hasCamera) {
+            action()
+        } else {
+            pendingVideoAction = Pair(requireCamera, action)
+            videoCallPermissionsLauncher.launch(
+                arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA)
+            )
+        }
+    }
+
     LaunchedEffect(pendingCallAcceptId) {
         val acceptCallId = pendingCallAcceptId ?: return@LaunchedEffect
-        runWithRecordAudioPermission {
-            viewModel.acceptIncomingCall(acceptCallId.takeIf { it.isNotBlank() })
+        if (callState.isVideo) {
+            runWithVideoCallPermissions(false) {
+                viewModel.acceptIncomingCall(acceptCallId.takeIf { it.isNotBlank() })
+            }
+        } else {
+            runWithRecordAudioPermission {
+                viewModel.acceptIncomingCall(acceptCallId.takeIf { it.isNotBlank() })
+            }
         }
         viewModel.consumeNotificationCallAccept()
     }
@@ -574,6 +616,14 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                                     viewModel.startVoiceCall(targetConv)
                                 }
                             }
+                        },
+                        onStartVideoCall = {
+                            val targetConv = selectedConversation
+                            if (targetConv != null) {
+                                runWithVideoCallPermissions(true) {
+                                    viewModel.startVideoCall(targetConv)
+                                }
+                            }
                         }
                     )
                 }
@@ -591,8 +641,14 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                             onExpand = { isCallOverlayMinimized = false },
                             onAccept = {
                                 isCallOverlayMinimized = false
-                                runWithRecordAudioPermission {
-                                    viewModel.acceptIncomingCall()
+                                if (callState.isVideo) {
+                                    runWithVideoCallPermissions(false) {
+                                        viewModel.acceptIncomingCall()
+                                    }
+                                } else {
+                                    runWithRecordAudioPermission {
+                                        viewModel.acceptIncomingCall()
+                                    }
                                 }
                             },
                             onDeclineOrHangup = {
@@ -719,17 +775,32 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
         }
         }
         if (callState !is CallUiState.Idle && !isCallOverlayMinimized) {
+            val callEglContext = remember(callState.isVideo) {
+                if (callState.isVideo) viewModel.getCallEglBaseContext() else null
+            }
             ActiveCallOverlay(
                 callState = callState,
+                eglBaseContext = callEglContext,
+                suppressVideoSurfaces = ScreenSecurityPolicy.shouldShowPrivacyShield(isScreenRecordingActive),
+                onBindLocalVideoSink = { sink -> viewModel.setLocalVideoSink(sink) },
+                onBindRemoteVideoSink = { sink -> viewModel.setRemoteVideoSink(sink) },
                 onAccept = {
-                    runWithRecordAudioPermission {
-                        viewModel.acceptIncomingCall()
+                    if (callState.isVideo) {
+                        runWithVideoCallPermissions(false) {
+                            viewModel.acceptIncomingCall()
+                        }
+                    } else {
+                        runWithRecordAudioPermission {
+                            viewModel.acceptIncomingCall()
+                        }
                     }
                 },
                 onDecline = { viewModel.declineIncomingCall() },
                 onHangup = { viewModel.hangupCall() },
                 onToggleMute = { viewModel.toggleCallMute() },
                 onToggleSpeaker = { viewModel.toggleCallSpeaker() },
+                onToggleCamera = { viewModel.toggleCallCamera() },
+                onSwitchCamera = { viewModel.switchCallCamera() },
                 onDismissEnded = { viewModel.dismissEndedCall() },
                 onMinimize = { isCallOverlayMinimized = true }
             )

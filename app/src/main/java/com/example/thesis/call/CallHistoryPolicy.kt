@@ -30,7 +30,8 @@ data class ChatCallEvent(
     val endedAtMs: Long,
     val durationSeconds: Long?,
     val outcome: ChatCallOutcome,
-    val endedByLocal: Boolean
+    val endedByLocal: Boolean,
+    val isVideo: Boolean = false
 )
 
 // Sintetiza eventos de llamada para la linea de tiempo del chat a partir de las tramas CallSignal de la conversacion.
@@ -124,6 +125,11 @@ internal object CallHistoryPolicy {
                 }
             }
 
+            val isVideo = CallSignalingPolicy.isVideoOffer(
+                sdp = offer?.signal?.sdp,
+                reason = offer?.signal?.reason
+            )
+
             events.add(
                 ChatCallEvent(
                     callId = callId,
@@ -134,7 +140,8 @@ internal object CallHistoryPolicy {
                     endedAtMs = maxOf(startedAtMs, endedAtMs),
                     durationSeconds = durationSeconds,
                     outcome = outcome,
-                    endedByLocal = endedByLocal
+                    endedByLocal = endedByLocal,
+                    isVideo = isVideo
                 )
             )
         }
@@ -144,23 +151,38 @@ internal object CallHistoryPolicy {
 
     fun formatCallTitle(event: ChatCallEvent): String {
         return when (event.outcome) {
-            ChatCallOutcome.COMPLETED -> if (event.isOutgoing) {
-                "Εξερχόμενη κλήση φωνής"
-            } else {
-                "Εισερχόμενη κλήση φωνής"
+            ChatCallOutcome.COMPLETED -> when {
+                event.isVideo && event.isOutgoing -> "Εξερχόμενη βιντεοκλήση"
+                event.isVideo -> "Εισερχόμενη βιντεοκλήση"
+                event.isOutgoing -> "Εξερχόμενη κλήση φωνής"
+                else -> "Εισερχόμενη κλήση φωνής"
             }
-            ChatCallOutcome.DECLINED -> "Κλήση φωνής — Απορρίφθηκε"
-            ChatCallOutcome.MISSED -> if (event.isOutgoing) {
-                "Εξερχόμενη κλήση — Χωρίς απάντηση"
+            ChatCallOutcome.DECLINED -> if (event.isVideo) {
+                "Βιντεοκλήση — Απορρίφθηκε"
             } else {
-                "Αναπάντητη κλήση φωνής"
+                "Κλήση φωνής — Απορρίφθηκε"
             }
-            ChatCallOutcome.BUSY -> "Κλήση φωνής — Κατειλημμένος"
-            ChatCallOutcome.IN_PROGRESS -> "Κλήση φωνής σε εξέλιξη"
-            ChatCallOutcome.RINGING -> if (event.isOutgoing) {
-                "Εξερχόμενη κλήση..."
+            ChatCallOutcome.MISSED -> when {
+                event.isVideo && event.isOutgoing -> "Εξερχόμενη βιντεοκλήση — Χωρίς απάντηση"
+                event.isVideo -> "Αναπάντητη βιντεοκλήση"
+                event.isOutgoing -> "Εξερχόμενη κλήση — Χωρίς απάντηση"
+                else -> "Αναπάντητη κλήση φωνής"
+            }
+            ChatCallOutcome.BUSY -> if (event.isVideo) {
+                "Βιντεοκλήση — Κατειλημμένος"
             } else {
-                "Εισερχόμενη κλήση..."
+                "Κλήση φωνής — Κατειλημμένος"
+            }
+            ChatCallOutcome.IN_PROGRESS -> if (event.isVideo) {
+                "Βιντεοκλήση σε εξέλιξη"
+            } else {
+                "Κλήση φωνής σε εξέλιξη"
+            }
+            ChatCallOutcome.RINGING -> when {
+                event.isVideo && event.isOutgoing -> "Εξερχόμενη βιντεοκλήση..."
+                event.isVideo -> "Εισερχόμενη βιντεοκλήση..."
+                event.isOutgoing -> "Εξερχόμενη κλήση..."
+                else -> "Εισερχόμενη κλήση..."
             }
         }
     }

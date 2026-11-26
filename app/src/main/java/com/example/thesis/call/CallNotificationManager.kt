@@ -40,11 +40,12 @@ internal class CallNotificationManager(private val appContext: Context) {
     fun showIncomingCallNotification(
         callId: String,
         conversationId: String,
-        callerName: String
+        callerName: String,
+        isVideo: Boolean = false
     ) {
         if (!hasPostNotificationsPermission()) return
         ensureChannelCreated()
-        val notification = buildIncomingCallNotification(callId, conversationId, callerName)
+        val notification = buildIncomingCallNotification(callId, conversationId, callerName, isVideo)
         postNotificationSafely(NOTIFICATION_ID_INCOMING, notification)
     }
 
@@ -63,7 +64,8 @@ internal class CallNotificationManager(private val appContext: Context) {
     fun buildIncomingCallNotification(
         callId: String,
         conversationId: String,
-        callerName: String
+        callerName: String,
+        isVideo: Boolean = false
     ): Notification {
         ensureChannelCreated()
         val safeName = callerName.ifBlank { "Επαφή XMTP" }
@@ -91,10 +93,16 @@ internal class CallNotificationManager(private val appContext: Context) {
             conversationId = conversationId
         )
 
+        val incomingText = if (isVideo) {
+            "Εισερχόμενη κρυπτογραφημένη βιντεοκλήση"
+        } else {
+            "Εισερχόμενη κρυπτογραφημένη κλήση φωνής"
+        }
+
         return NotificationCompat.Builder(appContext, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_call_phone)
+            .setSmallIcon(if (isVideo) R.drawable.ic_videocam else R.drawable.ic_call_phone)
             .setContentTitle(safeName)
-            .setContentText("Εισερχόμενη κρυπτογραφημένη κλήση φωνής")
+            .setContentText(incomingText)
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
