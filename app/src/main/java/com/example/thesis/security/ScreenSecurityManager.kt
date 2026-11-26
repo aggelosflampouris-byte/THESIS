@@ -51,6 +51,7 @@ object ScreenSecurityManager {
         )
     }
 
+    @RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
     fun registerScreenCaptureObserver(
         activity: Activity,
         onCaptureDetected: () -> Unit

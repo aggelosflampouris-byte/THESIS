@@ -413,6 +413,15 @@ class XmtpEngine(
             mapExceptionToState(e)
         } catch (e: Exception) {
             mapExceptionToState(e)
+        } catch (e: LinkageError) {
+            // Capturamos errores de enlace JNI/FFI o R8 para mostrar diagnostico en lugar de cerrar el proceso.
+            Log.e(TAG, "XMTP native/R8 linkage failure [${e.javaClass.simpleName}]")
+            XmtpEngineState.Error(
+                XmtpInitError.Unknown(
+                    message = "Native/JNI linkage error (${e.javaClass.simpleName}): ${e.message ?: "unknown"}",
+                    cause = e
+                )
+            )
         } finally {
             dekToZero?.fill(0x00)
         }
