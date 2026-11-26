@@ -14,7 +14,6 @@ import org.web3j.crypto.Sign
 import org.xmtp.android.library.Client
 import org.xmtp.android.library.XMTPEnvironment
 import java.io.File
-import java.io.RandomAccessFile
 import java.math.BigInteger
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
@@ -26,6 +25,7 @@ import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
+import kotlin.math.log2
 
 data class CryptoAuditCheck(
     val id: String,
@@ -47,7 +47,10 @@ data class Eip191AuditProof(
 data class DatabaseCiphertextAudit(
     val fileCount: Int,
     val totalBytes: Long,
-    val hasPlaintextSqliteHeader: Boolean,
+    val isEncrypted: Boolean,
+    val encryptionMode: String,
+    val hasSaltFile: Boolean,
+    val payloadEntropyBits: Double,
     val sampleSha256Prefix: String
 )
 
@@ -70,7 +73,18 @@ object CryptoAuditVerifier {
     private const val AES_GCM_TRANSFORMATION = "AES/GCM/NoPadding"
     private const val GCM_IV_BYTES = 12
     private const val GCM_TAG_BITS = 128
+    private const val WAL_PLAINTEXT_HEADER_BYTES = 32
+    private const val SQLITE_HEADER_BYTES = 100
+    private const val MIN_SQLCIPHER_PAGE_BYTES = 512
+    private const val MAX_AUDIT_READ_BYTES = 65536
+    private const val MIN_CIPHERTEXT_ENTROPY_BITS = 6.5
     private val SQLITE_PLAINTEXT_HEADER = "SQLite format 3\u0000".toByteArray(StandardCharsets.US_ASCII)
+    private val PLAINTEXT_SCHEMA_MARKERS = listOf(
+        "create table",
+        "create index",
+        "sqlite_master",
+        "sqlite_schema"
+    )
     private val SECP256K1_HALF_N: BigInteger = Sign.CURVE_PARAMS.n.shiftRight(1)
 
     suspend fun runFullAudit(
@@ -167,8 +181,9 @@ object CryptoAuditVerifier {
             } else {
                 val dir = databaseFactory.resolveAccountDatabaseDirectory(cleanAddr)
                 val stats = inspectDatabaseEncryptionOnDisk(dir)
-                val ok = stats.fileCount > 0 && !stats.hasPlaintextSqliteHeader
-                ok to "dbFiles=${stats.fileCount}, totalBytes=${stats.totalBytes}, plaintextHeader=${stats.hasPlaintextSqliteHeader}, sha256=${stats.sampleSha256Prefix}"
+                val ok = stats.fileCount > 0 && stats.isEncrypted
+                val entropyStr = String.format(Locale.US, "%.2f", stats.payloadEntropyBits)
+                ok to "dbFiles=${stats.fileCount}, totalBytes=${stats.totalBytes}, encrypted=${stats.isEncrypted}, mode=${stats.encryptionMode}, saltFile=${stats.hasSaltFile}, entropy=${entropyStr}b/B, sha256=${stats.sampleSha256Prefix}"
             }
         }
         checks.add(dbCipherAudit)
@@ -287,20 +302,29 @@ object CryptoAuditVerifier {
         }
     }
 
-    // Verifica que la base SQLite en disco no conserve la cabecera en texto claro "SQLite format 3".
+    // Verificamos el cifrado SQLCipher real en disco (incluyendo modo libxmtp WAL con cabecera plana de 32 bytes).
     fun inspectDatabaseEncryptionOnDisk(accountDir: File): DatabaseCiphertextAudit {
         if (!accountDir.exists() || !accountDir.isDirectory) {
             return DatabaseCiphertextAudit(
                 fileCount = 0,
                 totalBytes = 0L,
-                hasPlaintextSqliteHeader = false,
+                isEncrypted = false,
+                encryptionMode = "NONE",
+                hasSaltFile = false,
+                payloadEntropyBits = 0.0,
                 sampleSha256Prefix = "none"
             )
+        }
+        val hasSaltFile = accountDir.walkTopDown().any { file ->
+            file.isFile &&
+                file.length() > 0L &&
+                file.name.contains("sqlcipher_salt", ignoreCase = true)
         }
         val dbFiles = accountDir.walkTopDown()
             .filter { file ->
                 file.isFile &&
                     file.length() > 0L &&
+                    !file.name.contains("sqlcipher_salt", ignoreCase = true) &&
                     (file.name.endsWith(".db", ignoreCase = true) || file.name.endsWith(".db3", ignoreCase = true))
             }
             .toList()
@@ -309,29 +333,37 @@ object CryptoAuditVerifier {
             return DatabaseCiphertextAudit(
                 fileCount = 0,
                 totalBytes = 0L,
-                hasPlaintextSqliteHeader = false,
+                isEncrypted = false,
+                encryptionMode = "NONE",
+                hasSaltFile = hasSaltFile,
+                payloadEntropyBits = 0.0,
                 sampleSha256Prefix = "none"
             )
         }
 
-        var hasPlaintextHeader = false
         var totalBytes = 0L
-        val digest = MessageDigest.getInstance("SHA-256")
-        val sampleFile = dbFiles.first()
+        var allEncrypted = true
+        var reportedMode = "UNKNOWN"
+        var minEntropyBits = Double.MAX_VALUE
 
         for (file in dbFiles) {
             totalBytes += file.length()
-            val header = ByteArray(SQLITE_PLAINTEXT_HEADER.size)
-            val readLen = runCatching {
-                RandomAccessFile(file, "r").use { raf ->
-                    raf.read(header)
+            val verdict = inspectSingleDatabaseFile(file)
+            if (!verdict.isEncrypted) {
+                if (allEncrypted) {
+                    reportedMode = verdict.mode
                 }
-            }.getOrDefault(0)
-            if (readLen == SQLITE_PLAINTEXT_HEADER.size && header.contentEquals(SQLITE_PLAINTEXT_HEADER)) {
-                hasPlaintextHeader = true
+                allEncrypted = false
+            } else if (reportedMode == "UNKNOWN") {
+                reportedMode = verdict.mode
+            }
+            if (verdict.entropyBits < minEntropyBits) {
+                minEntropyBits = verdict.entropyBits
             }
         }
 
+        val digest = MessageDigest.getInstance("SHA-256")
+        val sampleFile = dbFiles.first()
         runCatching {
             sampleFile.inputStream().use { inp ->
                 val buf = ByteArray(4096)
@@ -344,9 +376,107 @@ object CryptoAuditVerifier {
         return DatabaseCiphertextAudit(
             fileCount = dbFiles.size,
             totalBytes = totalBytes,
-            hasPlaintextSqliteHeader = hasPlaintextHeader,
+            isEncrypted = allEncrypted,
+            encryptionMode = reportedMode,
+            hasSaltFile = hasSaltFile,
+            payloadEntropyBits = if (minEntropyBits == Double.MAX_VALUE) 0.0 else minEntropyBits,
             sampleSha256Prefix = shaPrefix
         )
+    }
+
+    private data class SingleDbAuditVerdict(
+        val isEncrypted: Boolean,
+        val mode: String,
+        val entropyBits: Double
+    )
+
+    // Evaluamos un archivo SQLite/SQLCipher individual distinguiendo cabecera plana de 32 bytes frente a SQLite sin cifrar.
+    private fun inspectSingleDatabaseFile(file: File): SingleDbAuditVerdict {
+        val sample = ByteArray(MAX_AUDIT_READ_BYTES)
+        val readLen = runCatching {
+            file.inputStream().use { inp ->
+                var totalRead = 0
+                while (totalRead < sample.size) {
+                    val n = inp.read(sample, totalRead, sample.size - totalRead)
+                    if (n <= 0) break
+                    totalRead += n
+                }
+                totalRead
+            }
+        }.getOrDefault(0)
+
+        if (readLen <= 0) {
+            return SingleDbAuditVerdict(isEncrypted = false, mode = "UNREADABLE", entropyBits = 0.0)
+        }
+
+        val asciiLower = String(sample, 0, readLen, StandardCharsets.ISO_8859_1).lowercase(Locale.ROOT)
+        if (PLAINTEXT_SCHEMA_MARKERS.any { asciiLower.contains(it) }) {
+            val entropy = computeShannonEntropyBits(sample, 0, readLen)
+            return SingleDbAuditVerdict(isEncrypted = false, mode = "PLAINTEXT_SCHEMA", entropyBits = entropy)
+        }
+
+        val hasMagicHeader = readLen >= SQLITE_PLAINTEXT_HEADER.size &&
+            SQLITE_PLAINTEXT_HEADER.indices.all { sample[it] == SQLITE_PLAINTEXT_HEADER[it] }
+
+        if (!hasMagicHeader) {
+            val entropy = computeShannonEntropyBits(sample, 0, readLen)
+            return if (readLen >= WAL_PLAINTEXT_HEADER_BYTES && entropy >= MIN_CIPHERTEXT_ENTROPY_BITS) {
+                SingleDbAuditVerdict(isEncrypted = true, mode = "SQLCIPHER_FULL", entropyBits = entropy)
+            } else {
+                SingleDbAuditVerdict(isEncrypted = false, mode = "TOO_SMALL", entropyBits = entropy)
+            }
+        }
+
+        if (file.length() < MIN_SQLCIPHER_PAGE_BYTES || readLen < MIN_SQLCIPHER_PAGE_BYTES) {
+            val entropy = computeShannonEntropyBits(sample, 0, readLen)
+            return SingleDbAuditVerdict(isEncrypted = false, mode = "PLAINTEXT_SQLITE", entropyBits = entropy)
+        }
+
+        val encryptedPayloadEntropy = computeShannonEntropyBits(sample, WAL_PLAINTEXT_HEADER_BYTES, readLen)
+
+        // En SQLite sin cifrar los bytes 72..91 son siempre ceros reservados; en SQLCipher WAL32 son texto cifrado.
+        val reservedBytesAllZero = (72 until 92).all { sample[it] == 0.toByte() }
+        if (reservedBytesAllZero) {
+            return SingleDbAuditVerdict(isEncrypted = false, mode = "PLAINTEXT_SQLITE", entropyBits = encryptedPayloadEntropy)
+        }
+
+        val textEncoding = ((sample[56].toInt() and 0xFF) shl 24) or
+            ((sample[57].toInt() and 0xFF) shl 16) or
+            ((sample[58].toInt() and 0xFF) shl 8) or
+            (sample[59].toInt() and 0xFF)
+        val zeroCountHeaderTail = (WAL_PLAINTEXT_HEADER_BYTES until SQLITE_HEADER_BYTES).count { sample[it] == 0.toByte() }
+        if (textEncoding in 1..3 && zeroCountHeaderTail >= 24) {
+            return SingleDbAuditVerdict(isEncrypted = false, mode = "PLAINTEXT_SQLITE", entropyBits = encryptedPayloadEntropy)
+        }
+
+        if (encryptedPayloadEntropy < MIN_CIPHERTEXT_ENTROPY_BITS) {
+            return SingleDbAuditVerdict(isEncrypted = false, mode = "LOW_ENTROPY", entropyBits = encryptedPayloadEntropy)
+        }
+
+        return SingleDbAuditVerdict(
+            isEncrypted = true,
+            mode = "SQLCIPHER_WAL32",
+            entropyBits = encryptedPayloadEntropy
+        )
+    }
+
+    // Calculamos la entropia de Shannon (bits/byte) para distinguir texto cifrado AES de paginas en claro.
+    private fun computeShannonEntropyBits(data: ByteArray, fromIndex: Int, toIndex: Int): Double {
+        val len = toIndex - fromIndex
+        if (len <= 0) return 0.0
+        val counts = IntArray(256)
+        for (i in fromIndex until toIndex) {
+            counts[data[i].toInt() and 0xFF]++
+        }
+        var entropy = 0.0
+        val total = len.toDouble()
+        for (count in counts) {
+            if (count > 0) {
+                val p = count / total
+                entropy -= p * log2(p)
+            }
+        }
+        return entropy
     }
 
     fun formatAuditReportMarkdown(report: CryptoAuditReport): String {

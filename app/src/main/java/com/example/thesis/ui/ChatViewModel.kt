@@ -218,15 +218,24 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         msgId: String,
         sender: String,
         topic: String,
-        sentAtNs: Long? = null
+        sentAtNs: Long? = null,
+        fallbackSentAtNs: Long? = null
     ) {
         if (msgId.isBlank()) return
         synchronized(committedProofMap) {
+            val existing = committedProofMap[msgId]
+            // Conservamos el sello temporal real de la red si una confirmacion posterior no lo incluye.
+            val resolvedSentAtNs = when {
+                sentAtNs != null && sentAtNs > 0L -> sentAtNs
+                existing?.sentAtNs != null && existing.sentAtNs > 0L -> existing.sentAtNs
+                fallbackSentAtNs != null && fallbackSentAtNs > 0L -> fallbackSentAtNs
+                else -> null
+            }
             committedProofMap[msgId] = CommittedMessageProof(
                 msgId = msgId,
-                sender = sender,
-                topic = topic,
-                sentAtNs = sentAtNs
+                sender = if (sender.isNotBlank() && sender != "N/A") sender else (existing?.sender ?: sender),
+                topic = if (topic.isNotBlank()) topic else (existing?.topic ?: topic),
+                sentAtNs = resolvedSentAtNs
             )
             _verifiedMessageCount.value = committedProofMap.size
         }
@@ -901,7 +910,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     recordCommittedMessage(
                         msgId = msgId,
                         sender = if (clientInbox != "N/A") clientInbox else sender0x,
-                        topic = conv.topic
+                        topic = conv.topic,
+                        fallbackSentAtNs = System.currentTimeMillis() * 1_000_000L
                     )
                     logAction(
                         "MLS",
@@ -1043,7 +1053,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             recordCommittedMessage(
                                 msgId = probeMsgId,
                                 sender = clientInbox,
-                                topic = conv.topic
+                                topic = conv.topic,
+                                fallbackSentAtNs = System.currentTimeMillis() * 1_000_000L
                             )
                             logAction(
                                 tag = "BENCHMARK",
@@ -1582,7 +1593,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     recordCommittedMessage(
                         msgId = msgId,
                         sender = if (clientInbox != "N/A") clientInbox else (walletAddress.value ?: "0x..."),
-                        topic = conv.topic
+                        topic = conv.topic,
+                        fallbackSentAtNs = System.currentTimeMillis() * 1_000_000L
                     )
                     logAction(
                         tag = "VOICE",

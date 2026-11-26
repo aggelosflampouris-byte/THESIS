@@ -8,6 +8,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
+import java.util.Random
 
 class CryptoAuditVerifierTest {
 
@@ -36,22 +37,69 @@ class CryptoAuditVerifierTest {
     }
 
     @Test
-    fun inspectDatabaseEncryptionOnDisk_distinguishesPlaintextSqliteFromCiphertext() {
-        val dir = Files.createTempDirectory("cipher-audit-test").toFile()
+    fun inspectDatabaseEncryptionOnDisk_rejectsShortAndFullPlaintextSqliteFiles() {
+        val dir = Files.createTempDirectory("cipher-audit-plain").toFile()
         try {
-            val plainDb = dir.resolve("plain.db")
-            plainDb.writeBytes("SQLite format 3\u0000remainder-bytes".toByteArray(StandardCharsets.US_ASCII))
-            val plainAudit = CryptoAuditVerifier.inspectDatabaseEncryptionOnDisk(dir)
-            assertEquals(1, plainAudit.fileCount)
-            assertTrue(plainAudit.hasPlaintextSqliteHeader)
+            val shortPlain = dir.resolve("short.db")
+            shortPlain.writeBytes("SQLite format 3\u0000remainder-bytes".toByteArray(StandardCharsets.US_ASCII))
+            val shortAudit = CryptoAuditVerifier.inspectDatabaseEncryptionOnDisk(dir)
+            assertEquals(1, shortAudit.fileCount)
+            assertFalse(shortAudit.isEncrypted)
+            assertEquals("PLAINTEXT_SQLITE", shortAudit.encryptionMode)
 
-            plainDb.delete()
-            val cipherDb = dir.resolve("cipher.db")
-            cipherDb.writeBytes(ByteArray(64) { (it * 7 + 3).toByte() })
-            val cipherAudit = CryptoAuditVerifier.inspectDatabaseEncryptionOnDisk(dir)
-            assertEquals(1, cipherAudit.fileCount)
-            assertFalse(cipherAudit.hasPlaintextSqliteHeader)
-            assertTrue(cipherAudit.totalBytes >= 64L)
+            shortPlain.delete()
+
+            // Construimos una pagina SQLite 3 valida de 4096 bytes sin cifrar (ceros en bytes 72..91 y esquema en claro).
+            val fullPlain = dir.resolve("plain.db3")
+            val page = ByteArray(4096)
+            "SQLite format 3\u0000".toByteArray(StandardCharsets.US_ASCII).copyInto(page, 0)
+            page[59] = 1
+            "CREATE TABLE groups (id BLOB)".toByteArray(StandardCharsets.US_ASCII).copyInto(page, 120)
+            fullPlain.writeBytes(page)
+
+            val fullAudit = CryptoAuditVerifier.inspectDatabaseEncryptionOnDisk(dir)
+            assertEquals(1, fullAudit.fileCount)
+            assertFalse(fullAudit.isEncrypted)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun inspectDatabaseEncryptionOnDisk_acceptsWal32AndFullSqlCipherDatabases() {
+        val dir = Files.createTempDirectory("cipher-audit-wal32").toFile()
+        try {
+            // Simulamos una base SQLCipher 4 con cipher_plaintext_header_size=32 y archivo sqlcipher_salt.
+            val wal32Db = dir.resolve("xmtp.db3")
+            val rng = Random(20261126L)
+            val wal32Bytes = ByteArray(4096)
+            rng.nextBytes(wal32Bytes)
+            "SQLite format 3\u0000".toByteArray(StandardCharsets.US_ASCII).copyInto(wal32Bytes, 0)
+            wal32Bytes[16] = 0x10
+            wal32Bytes[17] = 0x00
+            wal32Db.writeBytes(wal32Bytes)
+            dir.resolve("xmtp.db3.sqlcipher_salt").writeBytes(ByteArray(16) { 0x5A })
+
+            val wal32Audit = CryptoAuditVerifier.inspectDatabaseEncryptionOnDisk(dir)
+            assertEquals(1, wal32Audit.fileCount)
+            assertTrue(wal32Audit.isEncrypted)
+            assertEquals("SQLCIPHER_WAL32", wal32Audit.encryptionMode)
+            assertTrue(wal32Audit.hasSaltFile)
+            assertTrue(wal32Audit.payloadEntropyBits >= 7.5)
+
+            // Probamos tambien el modo completamente cifrado (cipher_plaintext_header_size=0).
+            dir.resolve("xmtp.db3.sqlcipher_salt").delete()
+            wal32Db.delete()
+            val fullCipherBytes = ByteArray(4096)
+            rng.nextBytes(fullCipherBytes)
+            dir.resolve("cipher.db").writeBytes(fullCipherBytes)
+
+            val fullAudit = CryptoAuditVerifier.inspectDatabaseEncryptionOnDisk(dir)
+            assertEquals(1, fullAudit.fileCount)
+            assertTrue(fullAudit.isEncrypted)
+            assertEquals("SQLCIPHER_FULL", fullAudit.encryptionMode)
+            assertFalse(fullAudit.hasSaltFile)
+            assertTrue(fullAudit.totalBytes >= 4096L)
         } finally {
             dir.deleteRecursively()
         }
@@ -86,4 +134,3 @@ class CryptoAuditVerifierTest {
         assertTrue(md.contains("Challenge : THESIS-AUDIT|0xabc|2026-11-26T13:00:00Z"))
     }
 }
-
