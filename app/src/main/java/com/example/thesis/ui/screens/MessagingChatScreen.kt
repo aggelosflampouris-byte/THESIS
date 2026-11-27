@@ -121,7 +121,8 @@ internal fun MessagingChatScreen(
     onStopAndSendVoiceRecording: () -> Unit = {},
     onToggleVoicePlayback: (String, VoiceNote) -> Unit = { _, _ -> },
     onSeekVoicePlayback: (String, Float) -> Unit = { _, _ -> },
-    onOpenPhotoMenu: () -> Unit = {},
+    onPickPhoto: () -> Unit = {},
+    onTakePhoto: () -> Unit = {},
     onPickDocument: () -> Unit = {},
     onOpenMediaAttachment: (MediaAttachment) -> Unit = {},
     onDraftChange: (String) -> Unit,
@@ -275,13 +276,13 @@ internal fun MessagingChatScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 8.dp, vertical = 8.dp),
+                            .padding(horizontal = 6.dp, vertical = 8.dp),
                         verticalAlignment = Alignment.Bottom
                     ) {
                         IconButton(
-                            onClick = onOpenPhotoMenu,
+                            onClick = onPickPhoto,
                             enabled = !isShredding && !isUploadingMedia,
-                            modifier = Modifier.size(40.dp)
+                            modifier = Modifier.size(36.dp)
                         ) {
                             if (isUploadingMedia) {
                                 CircularProgressIndicator(
@@ -292,20 +293,34 @@ internal fun MessagingChatScreen(
                             } else {
                                 Icon(
                                     painter = painterResource(R.drawable.ic_photo_library),
-                                    contentDescription = "Φωτογραφία",
-                                    tint = MaterialTheme.colorScheme.primary
+                                    contentDescription = "Φωτογραφία από συλλογή",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(22.dp)
                                 )
                             }
                         }
                         IconButton(
+                            onClick = onTakePhoto,
+                            enabled = !isShredding && !isUploadingMedia,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_photo_camera),
+                                contentDescription = "Κάμερα",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                        IconButton(
                             onClick = onPickDocument,
                             enabled = !isShredding && !isUploadingMedia,
-                            modifier = Modifier.size(40.dp)
+                            modifier = Modifier.size(36.dp)
                         ) {
                             Icon(
                                 painter = painterResource(R.drawable.ic_attach_file),
                                 contentDescription = "Επισύναψη αρχείου",
-                                tint = MaterialTheme.colorScheme.primary
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp)
                             )
                         }
                         Spacer(modifier = Modifier.width(4.dp))
@@ -323,7 +338,7 @@ internal fun MessagingChatScreen(
                             enabled = !isShredding,
                             shape = RoundedCornerShape(20.dp)
                         )
-                        Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
                         val hasDraftText = draft.isNotBlank()
                         IconButton(
                             onClick = {

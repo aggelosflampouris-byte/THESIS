@@ -53,7 +53,6 @@ import org.xmtp.android.library.Conversation
 import com.example.thesis.ui.dialogs.IdentityDetailsDialog
 import com.example.thesis.ui.dialogs.MLSProtocolInspectorDialog
 import com.example.thesis.ui.dialogs.MediaAttachmentViewerDialog
-import com.example.thesis.ui.dialogs.MediaPhotoOptionsDialog
 import com.example.thesis.ui.dialogs.NewConversationDialog
 import com.example.thesis.media.MediaAttachmentProcessor
 import com.example.thesis.xmtp.MediaAttachment
@@ -869,7 +868,6 @@ private fun MessagingChatScreenHost(
 
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var showPhotoOptionsDialog by remember { mutableStateOf(false) }
     var viewingAttachment by remember { mutableStateOf<MediaAttachment?>(null) }
     var pendingSaveAttachment by remember { mutableStateOf<MediaAttachment?>(null) }
     var pendingCameraCaptureFile by remember { mutableStateOf<File?>(null) }
@@ -991,33 +989,24 @@ private fun MessagingChatScreenHost(
         onStopAndSendVoiceRecording = { viewModel.stopAndSendVoiceRecording() },
         onToggleVoicePlayback = { msgId, note -> viewModel.toggleVoicePlayback(msgId, note) },
         onSeekVoicePlayback = { msgId, fraction -> viewModel.seekVoicePlayback(msgId, fraction) },
-        onOpenPhotoMenu = { showPhotoOptionsDialog = true },
+        onPickPhoto = {
+            photoPickerLauncher.launch(
+                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+            )
+        },
+        onTakePhoto = {
+            if (viewModel.hasCameraPermission()) {
+                launchCameraCapture()
+            } else {
+                cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+            }
+        },
         onPickDocument = { documentPickerLauncher.launch(arrayOf("*/*")) },
         onOpenMediaAttachment = { attachment -> viewingAttachment = attachment },
         onDraftChange = onDraftChange,
         onSendMessage = onSendMessage,
         onRetryMessage = { body -> viewModel.sendMessage(body) }
     )
-
-    if (showPhotoOptionsDialog) {
-        MediaPhotoOptionsDialog(
-            onPickImage = {
-                showPhotoOptionsDialog = false
-                photoPickerLauncher.launch(
-                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                )
-            },
-            onTakePhoto = {
-                showPhotoOptionsDialog = false
-                if (viewModel.hasCameraPermission()) {
-                    launchCameraCapture()
-                } else {
-                    cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-                }
-            },
-            onDismiss = { showPhotoOptionsDialog = false }
-        )
-    }
 
     viewingAttachment?.let { currentAttachment ->
         MediaAttachmentViewerDialog(
