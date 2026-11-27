@@ -52,8 +52,8 @@ import com.example.thesis.ui.dialogs.GDPRShredConfirmationDialog
 import org.xmtp.android.library.Conversation
 import com.example.thesis.ui.dialogs.IdentityDetailsDialog
 import com.example.thesis.ui.dialogs.MLSProtocolInspectorDialog
-import com.example.thesis.ui.dialogs.MediaAttachOptionsDialog
 import com.example.thesis.ui.dialogs.MediaAttachmentViewerDialog
+import com.example.thesis.ui.dialogs.MediaPhotoOptionsDialog
 import com.example.thesis.ui.dialogs.NewConversationDialog
 import com.example.thesis.media.MediaAttachmentProcessor
 import com.example.thesis.xmtp.MediaAttachment
@@ -869,7 +869,7 @@ private fun MessagingChatScreenHost(
 
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var showAttachDialog by remember { mutableStateOf(false) }
+    var showPhotoOptionsDialog by remember { mutableStateOf(false) }
     var viewingAttachment by remember { mutableStateOf<MediaAttachment?>(null) }
     var pendingSaveAttachment by remember { mutableStateOf<MediaAttachment?>(null) }
     var pendingCameraCaptureFile by remember { mutableStateOf<File?>(null) }
@@ -991,34 +991,31 @@ private fun MessagingChatScreenHost(
         onStopAndSendVoiceRecording = { viewModel.stopAndSendVoiceRecording() },
         onToggleVoicePlayback = { msgId, note -> viewModel.toggleVoicePlayback(msgId, note) },
         onSeekVoicePlayback = { msgId, fraction -> viewModel.seekVoicePlayback(msgId, fraction) },
-        onOpenAttachMenu = { showAttachDialog = true },
+        onOpenPhotoMenu = { showPhotoOptionsDialog = true },
+        onPickDocument = { documentPickerLauncher.launch(arrayOf("*/*")) },
         onOpenMediaAttachment = { attachment -> viewingAttachment = attachment },
         onDraftChange = onDraftChange,
         onSendMessage = onSendMessage,
         onRetryMessage = { body -> viewModel.sendMessage(body) }
     )
 
-    if (showAttachDialog) {
-        MediaAttachOptionsDialog(
+    if (showPhotoOptionsDialog) {
+        MediaPhotoOptionsDialog(
             onPickImage = {
-                showAttachDialog = false
+                showPhotoOptionsDialog = false
                 photoPickerLauncher.launch(
                     PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                 )
             },
             onTakePhoto = {
-                showAttachDialog = false
+                showPhotoOptionsDialog = false
                 if (viewModel.hasCameraPermission()) {
                     launchCameraCapture()
                 } else {
                     cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
                 }
             },
-            onPickDocument = {
-                showAttachDialog = false
-                documentPickerLauncher.launch(arrayOf("*/*"))
-            },
-            onDismiss = { showAttachDialog = false }
+            onDismiss = { showPhotoOptionsDialog = false }
         )
     }
 

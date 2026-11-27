@@ -121,7 +121,8 @@ internal fun MessagingChatScreen(
     onStopAndSendVoiceRecording: () -> Unit = {},
     onToggleVoicePlayback: (String, VoiceNote) -> Unit = { _, _ -> },
     onSeekVoicePlayback: (String, Float) -> Unit = { _, _ -> },
-    onOpenAttachMenu: () -> Unit = {},
+    onOpenPhotoMenu: () -> Unit = {},
+    onPickDocument: () -> Unit = {},
     onOpenMediaAttachment: (MediaAttachment) -> Unit = {},
     onDraftChange: (String) -> Unit,
     onSendMessage: (String) -> Unit,
@@ -278,23 +279,34 @@ internal fun MessagingChatScreen(
                         verticalAlignment = Alignment.Bottom
                     ) {
                         IconButton(
-                            onClick = onOpenAttachMenu,
+                            onClick = onOpenPhotoMenu,
                             enabled = !isShredding && !isUploadingMedia,
-                            modifier = Modifier.defaultMinSize(minWidth = 44.dp, minHeight = 48.dp)
+                            modifier = Modifier.size(40.dp)
                         ) {
                             if (isUploadingMedia) {
                                 CircularProgressIndicator(
-                                    modifier = Modifier.size(20.dp),
+                                    modifier = Modifier.size(18.dp),
                                     strokeWidth = 2.dp,
                                     color = MaterialTheme.colorScheme.primary
                                 )
                             } else {
                                 Icon(
-                                    painter = painterResource(R.drawable.ic_attach_file),
-                                    contentDescription = "Επισύναψη αρχείου",
+                                    painter = painterResource(R.drawable.ic_photo_library),
+                                    contentDescription = "Φωτογραφία",
                                     tint = MaterialTheme.colorScheme.primary
                                 )
                             }
+                        }
+                        IconButton(
+                            onClick = onPickDocument,
+                            enabled = !isShredding && !isUploadingMedia,
+                            modifier = Modifier.size(40.dp)
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_attach_file),
+                                contentDescription = "Επισύναψη αρχείου",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
                         }
                         Spacer(modifier = Modifier.width(4.dp))
                         OutlinedTextField(

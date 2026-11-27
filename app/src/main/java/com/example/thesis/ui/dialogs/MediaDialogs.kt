@@ -61,10 +61,9 @@ import com.example.thesis.xmtp.MediaAttachment
 import com.example.thesis.xmtp.MediaAttachmentCodec
 
 @Composable
-internal fun MediaAttachOptionsDialog(
+internal fun MediaPhotoOptionsDialog(
     onPickImage: () -> Unit,
     onTakePhoto: () -> Unit,
-    onPickDocument: () -> Unit,
     onDismiss: () -> Unit
 ) {
     AlertDialog(
@@ -72,7 +71,7 @@ internal fun MediaAttachOptionsDialog(
         properties = ScreenSecurityManager.dialogProperties(),
         title = {
             Text(
-                text = "Αποστολή Πολυμέσων & Αρχείων",
+                text = "Αποστολή Φωτογραφίας",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold
             )
@@ -80,7 +79,7 @@ internal fun MediaAttachOptionsDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    text = "Τα αρχεία κρυπτογραφούνται E2EE (MLS RFC 9420) χωρίς ενδιάμεσο διακομιστή (έως 768 KB).",
+                    text = "Οι φωτογραφίες συμπιέζονται, καθαρίζονται από EXIF και κρυπτογραφούνται E2EE (MLS).",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -96,12 +95,6 @@ internal fun MediaAttachOptionsDialog(
                     title = "Λήψη Φωτογραφίας (Κάμερα)",
                     subtitle = "Άμεση λήψη χωρίς μεταδεδομένα θέσης",
                     onClick = onTakePhoto
-                )
-                AttachOptionRow(
-                    iconRes = R.drawable.ic_description,
-                    title = "Έγγραφο / Αρχείο",
-                    subtitle = "PDF, κείμενο ή δυαδικό αρχείο (έως 768 KB)",
-                    onClick = onPickDocument
                 )
             }
         },
