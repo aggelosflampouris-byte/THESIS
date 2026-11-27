@@ -23,18 +23,36 @@ internal class CallNotificationManager(private val appContext: Context) {
     private val notificationManager = NotificationManagerCompat.from(appContext)
 
     fun ensureChannelCreated() {
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            "Κλήσεις φωνής (MLS + WebRTC)",
-            NotificationManager.IMPORTANCE_HIGH
+        val incomingSpec = CallNotificationPolicy.specFor(CallNotificationKind.INCOMING)
+        val ongoingSpec = CallNotificationPolicy.specFor(CallNotificationKind.ONGOING)
+
+        val incomingChannel = NotificationChannel(
+            incomingSpec.channelId,
+            "Εισερχόμενες κλήσεις (MLS + WebRTC)",
+            incomingSpec.channelImportance
         ).apply {
-            description = "Ειδοποιήσεις εισερχόμενων και ενεργών κλήσεων φωνής."
+            description = "Ειδοποιήσεις υψηλής προτεραιότητας για εισερχόμενες κλήσεις φωνής και βίντεο."
             // El audio de llamada lo controla CallAudioController para evitar doble timbre simultaneo.
             setSound(null, null)
             enableVibration(false)
             lockscreenVisibility = Notification.VISIBILITY_PUBLIC
         }
-        notificationManager.createNotificationChannel(channel)
+
+        // Canal separado de baja importancia para que llamar o mantener una llamada no dispare banners intrusivos.
+        val ongoingChannel = NotificationChannel(
+            ongoingSpec.channelId,
+            "Ενεργές & εξερχόμενες κλήσεις",
+            ongoingSpec.channelImportance
+        ).apply {
+            description = "Σιωπηλή ειδοποίηση χαμηλής προτεραιότητας για εξερχόμενες και ενεργές κλήσεις."
+            setSound(null, null)
+            enableVibration(false)
+            setShowBadge(false)
+            lockscreenVisibility = Notification.VISIBILITY_PRIVATE
+        }
+
+        notificationManager.createNotificationChannel(incomingChannel)
+        notificationManager.createNotificationChannel(ongoingChannel)
     }
 
     fun showIncomingCallNotification(
@@ -99,17 +117,23 @@ internal class CallNotificationManager(private val appContext: Context) {
             "Εισερχόμενη κρυπτογραφημένη κλήση φωνής"
         }
 
-        return NotificationCompat.Builder(appContext, CHANNEL_ID)
+        val spec = CallNotificationPolicy.specFor(CallNotificationKind.INCOMING)
+
+        return NotificationCompat.Builder(appContext, spec.channelId)
             .setSmallIcon(if (isVideo) R.drawable.ic_videocam else R.drawable.ic_call_phone)
             .setContentTitle(safeName)
             .setContentText(incomingText)
             .setCategory(NotificationCompat.CATEGORY_CALL)
-            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setPriority(spec.notificationPriority)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setOngoing(true)
             .setAutoCancel(false)
             .setContentIntent(contentPi)
-            .setFullScreenIntent(contentPi, true)
+            .apply {
+                if (spec.useFullScreenIntent) {
+                    setFullScreenIntent(contentPi, true)
+                }
+            }
             .setStyle(NotificationCompat.CallStyle.forIncomingCall(person, declinePi, acceptPi))
             .build()
     }
@@ -121,10 +145,10 @@ internal class CallNotificationManager(private val appContext: Context) {
         statusLabel: String
     ): Notification {
         ensureChannelCreated()
+        val spec = CallNotificationPolicy.specFor(CallNotificationKind.ONGOING)
         val safeName = peerName.ifBlank { "Επαφή XMTP" }
         val person = Person.Builder()
             .setName(safeName)
-            .setImportant(true)
             .build()
 
         val contentPi = buildActivityCallIntent(
@@ -140,12 +164,13 @@ internal class CallNotificationManager(private val appContext: Context) {
             conversationId = conversationId
         )
 
-        return NotificationCompat.Builder(appContext, CHANNEL_ID)
+        return NotificationCompat.Builder(appContext, spec.channelId)
             .setSmallIcon(R.drawable.ic_call_phone)
             .setContentTitle(safeName)
             .setContentText(statusLabel)
             .setCategory(NotificationCompat.CATEGORY_CALL)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setPriority(spec.notificationPriority)
+            .setSilent(spec.silent)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -221,7 +246,8 @@ internal class CallNotificationManager(private val appContext: Context) {
     }
 
     companion object {
-        const val CHANNEL_ID = "xmtp_mls_voice_calls_v1"
+        const val CHANNEL_ID = CallNotificationPolicy.INCOMING_CHANNEL_ID
+        const val ONGOING_CHANNEL_ID = CallNotificationPolicy.ONGOING_CHANNEL_ID
         const val NOTIFICATION_ID_INCOMING = 4201
         const val NOTIFICATION_ID_ONGOING = 4202
 

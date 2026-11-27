@@ -102,11 +102,16 @@ internal class CallForegroundService : Service() {
     private fun buildFallbackNotification(): Notification {
         val container = (applicationContext as? ThesisApplication)?.sessionContainer
         runCatching { container?.callNotificationManager?.ensureChannelCreated() }
-        return NotificationCompat.Builder(this, CallNotificationManager.CHANNEL_ID)
+        val spec = CallNotificationPolicy.specFor(CallNotificationKind.ONGOING)
+        return NotificationCompat.Builder(this, CallNotificationManager.ONGOING_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_call_phone)
             .setContentTitle("Κλήση φωνής")
             .setContentText("Κλήση φωνής σε εξέλιξη")
             .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setPriority(spec.notificationPriority)
+            .setSilent(spec.silent)
+            .setOnlyAlertOnce(true)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setOngoing(true)
             .build()
     }
