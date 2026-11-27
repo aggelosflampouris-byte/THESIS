@@ -60,6 +60,10 @@ class ReleaseProguardAuditTest {
             rules.contains("-keep class org.xmtp.android.library.** { *; }")
         )
         assertTrue(
+            "Falta regla para com.example.thesis.xmtp.**",
+            rules.contains("-keep class com.example.thesis.xmtp.** { *; }")
+        )
+        assertTrue(
             "Falta regla para GeneratedMessageLite y sus subclases",
             rules.contains("-keep class com.google.protobuf.GeneratedMessageLite { *; }") &&
                 rules.contains("-keep class * extends com.google.protobuf.GeneratedMessageLite { *; }")

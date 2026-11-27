@@ -10,7 +10,9 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.FileProvider
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -50,7 +52,14 @@ import com.example.thesis.ui.dialogs.GDPRShredConfirmationDialog
 import org.xmtp.android.library.Conversation
 import com.example.thesis.ui.dialogs.IdentityDetailsDialog
 import com.example.thesis.ui.dialogs.MLSProtocolInspectorDialog
+import com.example.thesis.ui.dialogs.MediaAttachOptionsDialog
+import com.example.thesis.ui.dialogs.MediaAttachmentViewerDialog
 import com.example.thesis.ui.dialogs.NewConversationDialog
+import com.example.thesis.media.MediaAttachmentProcessor
+import com.example.thesis.xmtp.MediaAttachment
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
 import com.example.thesis.ui.screens.InboxDashboardScreen
 import com.example.thesis.ui.screens.LogsTelemetryScreen
 import com.example.thesis.ui.screens.MessagingChatScreen
@@ -712,6 +721,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                                     isShredding = isShredding,
                                     isCallIdle = callState is CallUiState.Idle,
                                     draft = draft,
+                                    snackbarHostState = snackbarHostState,
                                     onDraftChange = { draft = it },
                                     onSendMessage = { text ->
                                         draft = ""
@@ -843,17 +853,111 @@ private fun MessagingChatScreenHost(
     isShredding: Boolean,
     isCallIdle: Boolean,
     draft: String,
+    snackbarHostState: SnackbarHostState,
     onDraftChange: (String) -> Unit,
     onSendMessage: (String) -> Unit,
     onStartVoiceCall: (Conversation.Dm) -> Unit,
     onStartVoiceRecording: () -> Unit
 ) {
-    // Limitamos mensajes y estado de audio de voz a esta vista para evitar recomposiciones en la raiz.
+    // Limitamos mensajes, estado de audio y adjuntos multimedia a esta vista para evitar recomposiciones en la raiz.
     val messages by viewModel.messages.collectAsState()
     val callEventsByConversation by viewModel.callEventsByConversation.collectAsState()
     val peerReadTimestamps by viewModel.peerReadTimestamps.collectAsState()
     val voiceRecordingState by viewModel.voiceRecordingState.collectAsState()
     val voicePlaybackState by viewModel.voicePlaybackState.collectAsState()
+    val isUploadingMedia by viewModel.isUploadingMedia.collectAsState()
+
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var showAttachDialog by remember { mutableStateOf(false) }
+    var viewingAttachment by remember { mutableStateOf<MediaAttachment?>(null) }
+    var pendingSaveAttachment by remember { mutableStateOf<MediaAttachment?>(null) }
+    var pendingCameraCaptureFile by remember { mutableStateOf<File?>(null) }
+
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            val caption = draft.trim()
+            if (caption.isNotEmpty()) onDraftChange("")
+            viewModel.sendMediaFromUri(uri, caption)
+        }
+    }
+
+    val documentPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            val caption = draft.trim()
+            if (caption.isNotEmpty()) onDraftChange("")
+            viewModel.sendMediaFromUri(uri, caption)
+        }
+    }
+
+    val takePictureLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { success ->
+        val file = pendingCameraCaptureFile
+        pendingCameraCaptureFile = null
+        if (success && file != null && file.exists()) {
+            val uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                file
+            )
+            val caption = draft.trim()
+            if (caption.isNotEmpty()) onDraftChange("")
+            viewModel.sendMediaFromUri(uri, caption, tempCaptureFile = file)
+        } else {
+            file?.delete()
+        }
+    }
+
+    val launchCameraCapture: () -> Unit = {
+        runCatching {
+            val (captureFile, captureUri) = MediaAttachmentProcessor.createTempCameraCaptureFile(context)
+            pendingCameraCaptureFile?.delete()
+            pendingCameraCaptureFile = captureFile
+            takePictureLauncher.launch(captureUri)
+        }.onFailure {
+            pendingCameraCaptureFile?.delete()
+            pendingCameraCaptureFile = null
+            scope.launch {
+                snackbarHostState.showSnackbar("Αδύνατο το άνοιγμα κάμερας.")
+            }
+        }
+    }
+
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted || viewModel.hasCameraPermission()) {
+            launchCameraCapture()
+        } else {
+            scope.launch {
+                snackbarHostState.showSnackbar("Απαιτείται άδεια κάμερας για λήψη φωτογραφίας.")
+            }
+        }
+    }
+
+    val saveDocumentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("*/*")
+    ) { targetUri ->
+        val attachment = pendingSaveAttachment
+        pendingSaveAttachment = null
+        if (targetUri != null && attachment != null) {
+            scope.launch {
+                val res = withContext(Dispatchers.IO) {
+                    MediaAttachmentProcessor.saveMediaAttachmentToUri(context, targetUri, attachment)
+                }
+                if (res.isSuccess) {
+                    snackbarHostState.showSnackbar("Το αρχείο αποθηκεύτηκε στη συσκευή (${attachment.fileName})")
+                } else {
+                    snackbarHostState.showSnackbar("Αποτυχία αποθήκευσης αρχείου")
+                }
+            }
+        }
+    }
 
     val peerDisplayName = remember(activeConv, nicknameSnapshot) {
         if (activeConv is Conversation.Dm) {
@@ -875,6 +979,7 @@ private fun MessagingChatScreenHost(
         draft = draft,
         isSyncing = isSyncing,
         isShredding = isShredding,
+        isUploadingMedia = isUploadingMedia,
         voiceRecordingState = voiceRecordingState,
         voicePlaybackState = voicePlaybackState,
         onSync = { viewModel.syncConversations() },
@@ -886,10 +991,57 @@ private fun MessagingChatScreenHost(
         onStopAndSendVoiceRecording = { viewModel.stopAndSendVoiceRecording() },
         onToggleVoicePlayback = { msgId, note -> viewModel.toggleVoicePlayback(msgId, note) },
         onSeekVoicePlayback = { msgId, fraction -> viewModel.seekVoicePlayback(msgId, fraction) },
+        onOpenAttachMenu = { showAttachDialog = true },
+        onOpenMediaAttachment = { attachment -> viewingAttachment = attachment },
         onDraftChange = onDraftChange,
         onSendMessage = onSendMessage,
         onRetryMessage = { body -> viewModel.sendMessage(body) }
     )
+
+    if (showAttachDialog) {
+        MediaAttachOptionsDialog(
+            onPickImage = {
+                showAttachDialog = false
+                photoPickerLauncher.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                )
+            },
+            onTakePhoto = {
+                showAttachDialog = false
+                if (viewModel.hasCameraPermission()) {
+                    launchCameraCapture()
+                } else {
+                    cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                }
+            },
+            onPickDocument = {
+                showAttachDialog = false
+                documentPickerLauncher.launch(arrayOf("*/*"))
+            },
+            onDismiss = { showAttachDialog = false }
+        )
+    }
+
+    viewingAttachment?.let { currentAttachment ->
+        MediaAttachmentViewerDialog(
+            attachment = currentAttachment,
+            onSave = { item ->
+                pendingSaveAttachment = item
+                saveDocumentLauncher.launch(item.fileName)
+            },
+            onShare = { item ->
+                scope.launch {
+                    val shareRes = withContext(Dispatchers.IO) {
+                        MediaAttachmentProcessor.shareMediaAttachment(context, item)
+                    }
+                    if (shareRes.isFailure) {
+                        snackbarHostState.showSnackbar("Αποτυχία κοινοποίησης αρχείου")
+                    }
+                }
+            },
+            onDismiss = { viewingAttachment = null }
+        )
+    }
 }
 
 @Composable

@@ -13,13 +13,19 @@ import com.example.thesis.util.CryptoUtils
 import com.example.thesis.xmtp.CallSignal
 import com.example.thesis.xmtp.CallSignalCodec
 import com.example.thesis.xmtp.ContentTypeCallSignal
+import com.example.thesis.xmtp.ContentTypeMediaAttachment
 import com.example.thesis.xmtp.ContentTypeProfileNickname
 import com.example.thesis.xmtp.ContentTypeVoiceNote
+import com.example.thesis.xmtp.MediaAttachment
+import com.example.thesis.xmtp.MediaAttachmentCodec
 import com.example.thesis.xmtp.ProfileNickname
 import com.example.thesis.xmtp.VoiceNote
 import com.example.thesis.xmtp.VoiceNoteCodec
 import com.example.thesis.xmtp.XmtpEngine
 import com.example.thesis.xmtp.XmtpEngineState
+import org.xmtp.android.library.codecs.Attachment
+import org.xmtp.android.library.codecs.AttachmentCodec
+import org.xmtp.android.library.codecs.ContentTypeAttachment
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
@@ -967,6 +973,24 @@ class ConversationRepository(
             }
         }
 
+    // Enviamos imagenes o documentos cifrados E2EE dentro de MLS sin almacenarlos en servidores externos.
+    suspend fun sendMediaAttachment(conversation: Conversation, attachment: MediaAttachment): Result<String> =
+        withContext(ioDispatcher) {
+            runCatching {
+                val msgId = conversation.send(
+                    attachment,
+                    SendOptions(contentType = ContentTypeMediaAttachment)
+                )
+                try {
+                    conversation.sync()
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                }
+                messageRefreshTrigger.emit(conversation.id)
+                msgId
+            }
+        }
+
     suspend fun sendCallSignal(conversationId: String, signal: CallSignal): Result<String> =
         withContext(ioDispatcher) {
             val client = xmtpEngine.client
@@ -1420,11 +1444,12 @@ enum class MessageDeliveryStatus {
  */
 fun DecodedMessage.toDomainMessage(): Message {
     val voicePreview = extractVoiceNote()?.let { VoiceNoteCodec.formatFallbackPreview(it.durationMs) }
+    val mediaPreview = extractMediaAttachment()?.let { MediaAttachmentCodec.formatFallbackPreview(it) }
     return Message(
         id = id ?: "",
         conversationId = conversationId ?: "",
         senderAddress = senderInboxId ?: "",
-        body = voicePreview ?: body ?: "",
+        body = voicePreview ?: mediaPreview ?: body ?: "",
         sentAt = sentAt?.time ?: (sentAtNs / 1_000_000L),
         deliveryStatus = when (deliveryStatus) {
             DecodedMessage.MessageDeliveryStatus.PUBLISHED -> MessageDeliveryStatus.PUBLISHED
@@ -1446,7 +1471,7 @@ typealias DecryptedMessage = DecodedMessage
  * MLS protocol/transcript control messages such as `xmtp.org/group_updated:1.0`.
  */
 internal fun DecodedMessage.isDisplayableUserMessage(): Boolean {
-    if (isVoiceNoteMessage()) return true
+    if (isVoiceNoteMessage() || isMediaAttachmentMessage()) return true
     val contentType = runCatching { encodedContent.type }.getOrNull()
     if (contentType != null) {
         val typeId = runCatching { contentType.typeId }.getOrNull().orEmpty()
@@ -1536,6 +1561,51 @@ internal fun DecodedMessage.extractVoiceNote(): VoiceNote? {
     if (decoded != null) return decoded
     val rawBytes = runCatching { encodedContent.content.toByteArray() }.getOrNull() ?: return null
     return runCatching { VoiceNoteCodec.decodeBytes(rawBytes) }.getOrNull()
+}
+
+internal fun DecodedMessage.isMediaAttachmentMessage(): Boolean {
+    val ct = runCatching { encodedContent.type }.getOrNull()
+    val authority = ct?.let { runCatching { it.authorityId }.getOrNull() }.orEmpty()
+    val typeId = ct?.let { runCatching { it.typeId }.getOrNull() }.orEmpty()
+    if ((authority == ContentTypeMediaAttachment.authorityId && typeId == ContentTypeMediaAttachment.typeId) ||
+        (authority == ContentTypeAttachment.authorityId && typeId == ContentTypeAttachment.typeId)
+    ) {
+        return true
+    }
+    val decoded = runCatching { content<Any>() }.getOrNull()
+    return decoded is MediaAttachment || decoded is Attachment
+}
+
+internal fun DecodedMessage.extractMediaAttachment(): MediaAttachment? {
+    if (!isMediaAttachmentMessage()) return null
+    val decoded = runCatching { content<Any>() }.getOrNull()
+    if (decoded is MediaAttachment) return decoded
+    if (decoded is Attachment) {
+        val raw = decoded.data.toByteArray()
+        if (raw.isEmpty() || raw.size > MediaAttachmentCodec.MAX_MEDIA_BYTES) return null
+        return MediaAttachment(
+            fileName = MediaAttachmentCodec.sanitizeFileName(decoded.filename),
+            mimeType = decoded.mimeType.ifBlank { "application/octet-stream" },
+            sha256Hex = CryptoUtils.sha256Hex(raw),
+            dataBytes = raw
+        )
+    }
+    val ct = runCatching { encodedContent.type }.getOrNull()
+    val authority = ct?.let { runCatching { it.authorityId }.getOrNull() }.orEmpty()
+    val typeId = ct?.let { runCatching { it.typeId }.getOrNull() }.orEmpty()
+    if (authority == ContentTypeAttachment.authorityId && typeId == ContentTypeAttachment.typeId) {
+        val decodedStd = runCatching { AttachmentCodec().decode(encodedContent) }.getOrNull() ?: return null
+        val raw = decodedStd.data.toByteArray()
+        if (raw.isEmpty() || raw.size > MediaAttachmentCodec.MAX_MEDIA_BYTES) return null
+        return MediaAttachment(
+            fileName = MediaAttachmentCodec.sanitizeFileName(decodedStd.filename),
+            mimeType = decodedStd.mimeType.ifBlank { "application/octet-stream" },
+            sha256Hex = CryptoUtils.sha256Hex(raw),
+            dataBytes = raw
+        )
+    }
+    val rawBytes = runCatching { encodedContent.content.toByteArray() }.getOrNull() ?: return null
+    return runCatching { MediaAttachmentCodec.decodeBytes(rawBytes) }.getOrNull()
 }
 
 val DecodedMessage.senderAddress: String

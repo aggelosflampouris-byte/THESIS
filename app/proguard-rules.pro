@@ -12,6 +12,7 @@
 -keep class uniffi.** { *; }
 -keep interface uniffi.** { *; }
 -keep class org.xmtp.android.library.** { *; }
+-keep class com.example.thesis.xmtp.** { *; }
 -keep class com.sun.jna.** { *; }
 -keepclassmembers class * extends com.sun.jna.** { public *; }
 -keepclassmembers class * implements com.sun.jna.Callback {

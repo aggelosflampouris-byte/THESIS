@@ -2,4 +2,6 @@
 <paths>
     <cache-path name="update_cache" path="updates/" />
     <cache-path name="report_cache" path="reports/" />
+    <!-- Cache temporal efimero para captura de camara y exportacion segura de adjuntos cifrados -->
+    <cache-path name="media_cache" path="media_cache/" />
 </paths>

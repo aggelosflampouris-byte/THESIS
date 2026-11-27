@@ -7,7 +7,10 @@ import java.util.Locale
 import java.util.TimeZone
 import kotlinx.coroutines.Dispatchers
 import android.app.Application
+import android.net.Uri
 import com.example.thesis.ThesisApplication
+import com.example.thesis.media.MediaAttachmentProcessor
+import com.example.thesis.xmtp.MediaAttachmentCodec
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.thesis.identity.NicknamePolicy
@@ -196,6 +199,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _isBenchmarking = MutableStateFlow(false)
     val isBenchmarking: StateFlow<Boolean> = _isBenchmarking.asStateFlow()
+
+    private val _isUploadingMedia = MutableStateFlow(false)
+    val isUploadingMedia: StateFlow<Boolean> = _isUploadingMedia.asStateFlow()
 
     private val _cryptoAuditReport = MutableStateFlow<CryptoAuditReport?>(null)
     val cryptoAuditReport: StateFlow<CryptoAuditReport?> = _cryptoAuditReport.asStateFlow()
@@ -1154,6 +1160,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             actionLogStore.clear()
             ThesisTelemetry.clearTelemetryData()
             ReportExporter.purgeCachedReports(appContext.cacheDir)
+            MediaAttachmentProcessor.purgeMediaCache(appContext.cacheDir)
         }
     }
 
@@ -1605,6 +1612,67 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     _statusBanner.value = "Αποτυχία αποστολής φωνητικού: ${err.message}"
                     logAction("VOICE", "Voice dispatch failed: ${err.message}", isError = true)
                 }
+            }
+        }
+    }
+
+    // Comprimimos/validamos el archivo seleccionado y lo enviamos cifrado por MLS sin servidores intermedios.
+    fun sendMediaFromUri(uri: Uri, caption: String = "", tempCaptureFile: File? = null) {
+        if (_isShredding.value || _isBenchmarking.value || _isUploadingMedia.value) {
+            tempCaptureFile?.delete()
+            return
+        }
+        val conv = _selectedConversation.value ?: run {
+            tempCaptureFile?.delete()
+            return
+        }
+
+        _isUploadingMedia.value = true
+        viewModelScope.launch {
+            try {
+                val prepared = try {
+                    withContext(Dispatchers.IO) {
+                        MediaAttachmentProcessor.prepareFromUri(appContext, uri, caption)
+                    }
+                } finally {
+                    tempCaptureFile?.delete()
+                }
+
+                val attachment = prepared.getOrElse { err ->
+                    _statusBanner.value = err.message ?: "Αποτυχία προετοιμασίας αρχείου"
+                    logAction("MEDIA", "Media preparation failed: ${err.message}", isError = true)
+                    return@launch
+                }
+
+                sendMutex.withLock {
+                    if (_isShredding.value) return@withLock
+                    logAction(
+                        tag = "MEDIA",
+                        message = "Dispatching MLS E2EE media (${attachment.fileName}, ${attachment.mimeType}, ${MediaAttachmentCodec.formatByteSize(attachment.dataBytes.size)})..."
+                    )
+                    ThesisTelemetry.measureSuspendOperation("5c. MLS E2EE Media Dispatch") {
+                        repository.sendMediaAttachment(conv, attachment)
+                    }
+                    .onSuccess { msgId ->
+                        val clientInbox = (engine.state.value as? XmtpEngineState.Ready)?.client?.inboxId ?: "N/A"
+                        recordCommittedMessage(
+                            msgId = msgId,
+                            sender = if (clientInbox != "N/A") clientInbox else (walletAddress.value ?: "0x..."),
+                            topic = conv.topic,
+                            fallbackSentAtNs = System.currentTimeMillis() * 1_000_000L
+                        )
+                        logAction(
+                            tag = "MEDIA",
+                            message = "TX MEDIA COMMITTED | MsgID: $msgId | Name: ${attachment.fileName} | Mime: ${attachment.mimeType} | Bytes: ${attachment.dataBytes.size} | SHA256: ${attachment.resolvedSha256Hex.take(16)}"
+                        )
+                    }
+                    .onFailure { err ->
+                        _statusBanner.value = "Αποτυχία αποστολής πολυμέσων: ${err.message}"
+                        logAction("MEDIA", "Media dispatch failed: ${err.message}", isError = true)
+                    }
+                }
+            } finally {
+                _isUploadingMedia.value = false
             }
         }
     }

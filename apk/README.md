@@ -11,8 +11,8 @@ This directory contains the ready-to-install Android package (`.apk`) for physic
 | **Min SDK / Target SDK** | `26` (Android 8.0) / `35` (Android 15) |
 | **XMTP Environment** | `PRODUCTION` (MLS RFC 9420 + gRPC TLS) |
 | **Build Profile** | `release` (R8 Minified, Resource Shrunk, Non-Debuggable) |
-| **Size** | `28.8 MB` (`28,758,901 bytes`) |
-| **SHA-256 Checksum** | `e2863de539fab2bd6e2e7a142cf37f69f73dd3a7a7faeab0141fbc6aa8214017` |
+| **Size** | `28.8 MB` (`28,789,689 bytes`) |
+| **SHA-256 Checksum** | `0f66b2eec1994d7c6cbf3c92fb97160ed98e33183e889eb48d69b3b7be473a89` |
 | **Signer Verification** | `APK Signature Scheme v2 (Verified)` |
 | **Supported ABIs** | `arm64-v8a` (Physical 64-bit ARM Phones) |
 

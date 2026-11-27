@@ -97,9 +97,11 @@ object CryptoUtils {
      * @param input UTF-8 string to hash.
      * @return 64-character lowercase hex string (32 bytes x 2 hex chars per byte).
      */
-    fun sha256Hex(input: String): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-            .digest(input.toByteArray(Charsets.UTF_8))
+    fun sha256Hex(input: String): String = sha256Hex(input.toByteArray(Charsets.UTF_8))
+
+    // Calculamos el resumen SHA-256 binario en hexadecimal minusculas sin duplicar la instanciacion de MessageDigest.
+    fun sha256Hex(bytes: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
         return digest.joinToString(separator = "") { byte -> "%02x".format(byte) }
     }
 

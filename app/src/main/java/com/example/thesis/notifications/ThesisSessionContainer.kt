@@ -15,10 +15,13 @@ import com.example.thesis.xmtp.XmtpEngine
 import com.example.thesis.call.CallNotificationManager
 import com.example.thesis.call.CallSessionManager
 import com.example.thesis.diagnostics.ActionLogStore
+import com.example.thesis.media.MediaAttachmentProcessor
+import com.example.thesis.repository.extractMediaAttachment
 import com.example.thesis.repository.extractVoiceNote
 import com.example.thesis.ui.ActionLogEntry
 import com.example.thesis.voice.VoiceNotePlayer
 import com.example.thesis.voice.VoiceNoteRecorder
+import com.example.thesis.xmtp.MediaAttachmentCodec
 import com.example.thesis.xmtp.VoiceNoteCodec
 import com.example.thesis.xmtp.XmtpEngineState
 import kotlinx.coroutines.CoroutineScope
@@ -111,6 +114,7 @@ internal class ThesisSessionContainer(context: Context) {
         ScreenSecurityManager.purgeLegacyPreference(appContext)
         TransferFileHygiene.purgeTransferCache(appContext.cacheDir)
         VoiceNoteRecorder.purgeTempDir(appContext.cacheDir)
+        MediaAttachmentProcessor.purgeMediaCache(appContext.cacheDir)
         appScope.launch {
             repository.incomingMessages.collect { incoming ->
                 handleIncomingMessage(incoming)
@@ -189,6 +193,7 @@ internal class ThesisSessionContainer(context: Context) {
         voiceNoteRecorder.cancel()
         voiceNotePlayer.stop()
         VoiceNoteRecorder.purgeTempDir(appContext.cacheDir)
+        MediaAttachmentProcessor.purgeMediaCache(appContext.cacheDir)
         callSessionManager.forceTeardownOnGdprShred()
         callNotificationManager.cancelAllCallNotifications()
         notificationManager.cancelAllNotifications()
@@ -254,6 +259,7 @@ internal class ThesisSessionContainer(context: Context) {
     private fun handleIncomingMessage(msg: DecodedMessage) {
         val localInboxId = (engine.state.value as? XmtpEngineState.Ready)?.client?.inboxId
         val effectiveBody = msg.extractVoiceNote()?.let { VoiceNoteCodec.formatFallbackPreview(it.durationMs) }
+            ?: msg.extractMediaAttachment()?.let { MediaAttachmentCodec.formatFallbackPreview(it) }
             ?: msg.body
         val reservedForDispatch = synchronized(notifiedMessageIds) {
             val alreadyNotified = msg.id in notifiedMessageIds
