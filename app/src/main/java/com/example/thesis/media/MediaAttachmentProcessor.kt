@@ -16,6 +16,7 @@ import com.example.thesis.xmtp.MediaAttachmentCodec
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.InputStream
 import java.util.Locale
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -33,6 +34,9 @@ internal object MediaAttachmentProcessor {
             dir.mkdirs()
         }
         val captureFile = dir.resolve("capture_${System.currentTimeMillis()}.jpg")
+        if (!captureFile.exists()) {
+            captureFile.createNewFile()
+        }
         val uri = FileProvider.getUriForFile(
             context,
             "${context.packageName}.fileprovider",
@@ -150,20 +154,23 @@ internal object MediaAttachmentProcessor {
             } ?: ExifInterface.ORIENTATION_NORMAL
         }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
 
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        resolver.openInputStream(uri)?.use { stream ->
-            BitmapFactory.decodeStream(stream, null, bounds)
-        } ?: throw IllegalStateException("Αδύνατη η ανάγνωση της επιλεγμένης εικόνας.")
-
-        require(bounds.outWidth > 0 && bounds.outHeight > 0) {
-            "Μη έγκυρη ή κατεστραμμένη μορφή εικόνας."
-        }
+        val (srcWidth, srcHeight) = readImageBounds(
+            openStream = { resolver.openInputStream(uri) },
+            decodeBounds = { stream ->
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                // decodeStream devuelve null con inJustDecodeBounds=true; leemos solo outWidth/outHeight.
+                BitmapFactory.decodeStream(stream, null, bounds)
+                bounds.outWidth to bounds.outHeight
+            }
+        )
 
         val decodeOpts = BitmapFactory.Options().apply {
-            inSampleSize = computeInSampleSize(bounds.outWidth, bounds.outHeight, MAX_IMAGE_EDGE_PX)
+            inSampleSize = computeInSampleSize(srcWidth, srcHeight, MAX_IMAGE_EDGE_PX)
             inPreferredConfig = Bitmap.Config.ARGB_8888
         }
-        val decoded = resolver.openInputStream(uri)?.use { stream ->
+        val decodeStream = resolver.openInputStream(uri)
+            ?: throw IllegalStateException("Αδύνατη η ανάγνωση της επιλεγμένης εικόνας.")
+        val decoded = decodeStream.use { stream ->
             BitmapFactory.decodeStream(stream, null, decodeOpts)
         } ?: throw IllegalStateException("Αποτυχία αποκωδικοποίησης εικόνας.")
 
@@ -175,17 +182,17 @@ internal object MediaAttachmentProcessor {
         try {
             // Recomprimimos a JPEG para eliminar todos los metadatos EXIF (GPS/dispositivo) y ajustar al limite MLS.
             var encodedBytes = compressAdaptiveJpeg(workingBitmap)
-            if (encodedBytes.size > MediaAttachmentCodec.MAX_MEDIA_BYTES) {
-                val smallerW = (workingBitmap.width * 0.72f).roundToInt().coerceAtLeast(1)
-                val smallerH = (workingBitmap.height * 0.72f).roundToInt().coerceAtLeast(1)
+            var shrinkAttempt = 0
+            while (encodedBytes.size > MediaAttachmentCodec.MAX_MEDIA_BYTES && shrinkAttempt < 3) {
+                val smallerW = (workingBitmap.width * 0.75f).roundToInt().coerceAtLeast(1)
+                val smallerH = (workingBitmap.height * 0.75f).roundToInt().coerceAtLeast(1)
                 val resized = Bitmap.createScaledBitmap(workingBitmap, smallerW, smallerH, true)
                 if (resized !== workingBitmap) {
                     workingBitmap.recycle()
                     workingBitmap = resized
                 }
-                val baos = ByteArrayOutputStream()
-                workingBitmap.compress(Bitmap.CompressFormat.JPEG, 60, baos)
-                encodedBytes = baos.toByteArray()
+                encodedBytes = compressAdaptiveJpeg(workingBitmap)
+                shrinkAttempt++
             }
 
             if (encodedBytes.size > MediaAttachmentCodec.MAX_MEDIA_BYTES) {
@@ -226,7 +233,20 @@ internal object MediaAttachmentProcessor {
         return lastBytes
     }
 
-    private fun computeInSampleSize(width: Int, height: Int, maxEdge: Int): Int {
+    internal fun readImageBounds(
+        openStream: () -> InputStream?,
+        decodeBounds: (InputStream) -> Pair<Int, Int>
+    ): Pair<Int, Int> {
+        val stream = openStream()
+            ?: throw IllegalStateException("Αδύνατη η ανάγνωση της επιλεγμένης εικόνας.")
+        val (width, height) = stream.use(decodeBounds)
+        require(width > 0 && height > 0) {
+            "Μη έγκυρη ή κατεστραμμένη μορφή εικόνας."
+        }
+        return width to height
+    }
+
+    internal fun computeInSampleSize(width: Int, height: Int, maxEdge: Int): Int {
         var inSampleSize = 1
         var longest = max(width, height)
         while (longest / 2 >= maxEdge) {
@@ -340,7 +360,7 @@ internal object MediaAttachmentProcessor {
             var total = 0
             while (true) {
                 val n = stream.read(buf)
-                if (n <= 0) break
+                if (n < 0) break
                 total += n
                 if (total > maxBytes) {
                     throw IllegalArgumentException(

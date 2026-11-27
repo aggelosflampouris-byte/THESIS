@@ -870,7 +870,8 @@ private fun MessagingChatScreenHost(
     val scope = rememberCoroutineScope()
     var viewingAttachment by remember { mutableStateOf<MediaAttachment?>(null) }
     var pendingSaveAttachment by remember { mutableStateOf<MediaAttachment?>(null) }
-    var pendingCameraCaptureFile by remember { mutableStateOf<File?>(null) }
+    // Conservamos la ruta temporal entre recreaciones de Activity mientras la app de camara esta abierta.
+    var pendingCameraCapturePath by rememberSaveable { mutableStateOf<String?>(null) }
 
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
@@ -895,9 +896,9 @@ private fun MessagingChatScreenHost(
     val takePictureLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.TakePicture()
     ) { success ->
-        val file = pendingCameraCaptureFile
-        pendingCameraCaptureFile = null
-        if (success && file != null && file.exists()) {
+        val file = pendingCameraCapturePath?.let { File(it) }
+        pendingCameraCapturePath = null
+        if (success && file != null && file.exists() && file.length() > 0L) {
             val uri = FileProvider.getUriForFile(
                 context,
                 "${context.packageName}.fileprovider",
@@ -914,12 +915,12 @@ private fun MessagingChatScreenHost(
     val launchCameraCapture: () -> Unit = {
         runCatching {
             val (captureFile, captureUri) = MediaAttachmentProcessor.createTempCameraCaptureFile(context)
-            pendingCameraCaptureFile?.delete()
-            pendingCameraCaptureFile = captureFile
+            pendingCameraCapturePath?.let { File(it).delete() }
+            pendingCameraCapturePath = captureFile.absolutePath
             takePictureLauncher.launch(captureUri)
         }.onFailure {
-            pendingCameraCaptureFile?.delete()
-            pendingCameraCaptureFile = null
+            pendingCameraCapturePath?.let { File(it).delete() }
+            pendingCameraCapturePath = null
             scope.launch {
                 snackbarHostState.showSnackbar("Αδύνατο το άνοιγμα κάμερας.")
             }
