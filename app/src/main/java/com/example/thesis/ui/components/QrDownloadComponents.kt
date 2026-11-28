@@ -117,11 +117,11 @@ internal fun QrCodeView(
 internal fun LatestVersionQrCard(
     currentVersion: String,
     updateStatus: UpdateStatus,
+    modifier: Modifier = Modifier,
     downloadUrl: String = UpdateConfig.LATEST_APK_DOWNLOAD_URL,
     onCopyUrl: () -> Unit,
     onOpenDownloadUrl: () -> Unit,
-    onExpandQr: () -> Unit,
-    modifier: Modifier = Modifier
+    onExpandQr: () -> Unit
 ) {
     val versionLabel = if (updateStatus is UpdateStatus.UpdateAvailable) {
         "Νέα v${updateStatus.updateInfo.latestVersion}"

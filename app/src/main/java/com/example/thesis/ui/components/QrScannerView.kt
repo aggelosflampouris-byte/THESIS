@@ -37,7 +37,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 @Composable
 internal fun QrScannerView(
     onPairingUriDetected: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    validator: (String) -> Boolean = { DeviceTransferProtocol.parsePairingUri(it) != null }
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -85,7 +86,7 @@ internal fun QrScannerView(
                     try {
                         if (hasEmitted.get()) return@setAnalyzer
                         val decoded = decodeQrFromImage(imageProxy, qrReader, decodeHints) ?: return@setAnalyzer
-                        if (DeviceTransferProtocol.parsePairingUri(decoded) != null &&
+                        if (validator(decoded) &&
                             hasEmitted.compareAndSet(false, true)
                         ) {
                             mainExecutor.execute { onPairingUriDetected(decoded) }

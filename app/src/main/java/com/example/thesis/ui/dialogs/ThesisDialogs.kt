@@ -1,6 +1,7 @@
 package com.example.thesis.ui.dialogs
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
@@ -24,6 +25,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -39,15 +41,21 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.thesis.R
 import com.example.thesis.identity.NicknamePolicy
 import com.example.thesis.security.ScreenSecurityManager
+import com.example.thesis.ui.components.QrCodeView
+import com.example.thesis.ui.components.QrScannerView
 import com.example.thesis.ui.util.readClipboardText
 import com.example.thesis.updater.AppUpdateInfo
 import com.example.thesis.updater.UpdateStatus
@@ -58,11 +66,14 @@ import java.util.Locale
 
 @Composable
 internal fun NewConversationDialog(
+    canUseCamera: Boolean = false,
+    onRequestCameraPermission: () -> Unit = {},
     onDismiss: () -> Unit,
     onStartConversation: (String, String?) -> Unit
 ) {
     var peerInput by rememberSaveable { mutableStateOf("") }
     var nicknameInput by rememberSaveable { mutableStateOf("") }
+    var showQrScanner by rememberSaveable { mutableStateOf(false) }
     val isValidInput = remember(peerInput) {
         val trimmed = peerInput.trim()
         CryptoUtils.isValidEthereumAddress(trimmed) || CryptoUtils.isValidInboxId(trimmed)
@@ -72,7 +83,7 @@ internal fun NewConversationDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         properties = ScreenSecurityManager.dialogProperties(),
-        title = { Text("Νέα Συνομιλία MLS") },
+        title = { Text("Νέα Συνομιλία") },
         text = {
             Column(
                 modifier = Modifier
@@ -80,49 +91,97 @@ internal fun NewConversationDialog(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text("Εισάγετε ταυτότητα παραλήπτη:")
+                if (showQrScanner && canUseCamera) {
+                    Text(
+                        text = "Σαρώστε το QR ταυτότητας της επαφής σας.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    QrScannerView(
+                        onPairingUriDetected = { scanned ->
+                            peerInput = scanned.trim()
+                            showQrScanner = false
+                        },
+                        validator = { raw ->
+                            val candidate = raw.trim()
+                            CryptoUtils.isValidEthereumAddress(candidate) || CryptoUtils.isValidInboxId(candidate)
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(220.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                    )
+                    OutlinedButton(
+                        onClick = { showQrScanner = false },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Εισαγωγή χειροκίνητα")
+                    }
+                } else {
+                    Text("Εισάγετε διεύθυνση, Inbox ID ή σαρώστε QR επαφής:")
 
-                OutlinedTextField(
-                    value = peerInput,
-                    onValueChange = { peerInput = it },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Διεύθυνση (0x...) ή XMTP Inbox ID") },
-                    placeholder = { Text("0x… ή 64-hex inbox ID") },
-                    singleLine = true,
-                    isError = peerInput.isNotBlank() && !isValidInput,
-                    supportingText = {
-                        if (peerInput.isNotBlank() && !isValidInput) {
-                            Text("Απαιτείται διεύθυνση Ethereum (0x...) ή XMTP Inbox ID (64 hex).")
-                        } else {
-                            Text("Υποστηρίζονται διευθύνσεις Ethereum (0x...) και XMTP Inbox IDs.", fontSize = 10.sp)
+                    OutlinedTextField(
+                        value = peerInput,
+                        onValueChange = { peerInput = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Διεύθυνση (0x...) ή Inbox ID") },
+                        placeholder = { Text("0x… ή 64-hex Inbox ID") },
+                        singleLine = true,
+                        isError = peerInput.isNotBlank() && !isValidInput,
+                        supportingText = {
+                            if (peerInput.isNotBlank() && !isValidInput) {
+                                Text("Απαιτείται διεύθυνση 0x… ή 64-hex Inbox ID.")
+                            }
+                        },
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Ascii,
+                            imeAction = ImeAction.Done
+                        )
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                if (canUseCamera) {
+                                    showQrScanner = true
+                                } else {
+                                    onRequestCameraPermission()
+                                }
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_qr_code_scanner),
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Σάρωση QR", maxLines = 1)
                         }
-                    },
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Ascii,
-                        imeAction = ImeAction.Done
-                    )
-                )
+                        OutlinedButton(
+                            onClick = { readClipboardText(context)?.let { peerInput = it.trim() } },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Επικόλληση", maxLines = 1)
+                        }
+                    }
 
-                // Sacamos el boton de pegado fuera del campo para aprovechar todo el ancho en direcciones hexadecimales largas.
-                OutlinedButton(
-                    onClick = { readClipboardText(context)?.let { peerInput = it.trim() } },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Επικόλληση από πρόχειρο", fontSize = 12.sp)
+                    OutlinedTextField(
+                        value = nicknameInput,
+                        onValueChange = { nicknameInput = it.take(NicknamePolicy.MAX_NICKNAME_LENGTH) },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Όνομα επαφής (προαιρετικό)") },
+                        placeholder = { Text("π.χ. Μαρία") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Text,
+                            imeAction = ImeAction.Done
+                        )
+                    )
                 }
-
-                OutlinedTextField(
-                    value = nicknameInput,
-                    onValueChange = { nicknameInput = it.take(NicknamePolicy.MAX_NICKNAME_LENGTH) },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Ψευδώνυμο επαφής (προαιρετικό)") },
-                    placeholder = { Text("π.χ. Μαρία") },
-                    singleLine = true,
-                    keyboardOptions = KeyboardOptions(
-                        keyboardType = KeyboardType.Text,
-                        imeAction = ImeAction.Done
-                    )
-                )
             }
         },
         confirmButton = {
@@ -144,210 +203,159 @@ internal fun NewConversationDialog(
     )
 }
 
+// Διαλογο de QR de contacto limpio para compartir Inbox ID o direccion sin saturar la pantalla.
 @Composable
-internal fun IdentityDetailsDialog(
+internal fun MyIdentityQrDialog(
     address: String?,
     inboxId: String?,
-    myNickname: String? = null,
-    currentVersion: String,
-    isCheckingUpdate: Boolean = false,
-    notificationsEnabled: Boolean = true,
-    isServiceNotificationVisible: Boolean = true,
-    onSaveMyNickname: (String) -> Unit = {},
-    onCheckForUpdates: () -> Unit = {},
-    onOpenNotificationSettings: () -> Unit = {},
-    onOpenServiceNotificationSettings: () -> Unit = {},
-    onTransferToNewDevice: () -> Unit = {},
-    onReceiveFromOldDevice: () -> Unit = {},
     onCopyAddress: () -> Unit,
     onCopyInboxId: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    var nicknameDraft by rememberSaveable(myNickname) { mutableStateOf(myNickname.orEmpty()) }
+    val qrPayload = inboxId ?: address.orEmpty()
     AlertDialog(
         onDismissRequest = onDismiss,
         properties = ScreenSecurityManager.dialogProperties(),
-        title = { Text("Ταυτότητα και Ασφάλεια") },
+        title = { Text("Η ταυτότητά μου") },
         text = {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Text("Κατάσταση: Δοκιμαστική ταυτότητα SECP256K1")
-                Text("Δίκτυο: XMTP Production Network (MLS Protocol)", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                address?.let {
-                    Text("Διεύθυνση Πορτοφολιού (Ethereum)", style = MaterialTheme.typography.labelMedium)
-                    Surface(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(8.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-                    ) {
-                        Text(
-                            text = it,
-                            modifier = Modifier.padding(10.dp),
-                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    OutlinedButton(onClick = onCopyAddress, modifier = Modifier.fillMaxWidth()) {
-                        Text("Αντιγραφή Διεύθυνσης")
-                    }
+                if (qrPayload.isNotBlank()) {
+                    QrCodeView(
+                        content = qrPayload,
+                        modifier = Modifier.size(200.dp),
+                        quietZone = 12.dp
+                    )
+                    Text(
+                        text = "Σαρώστε το QR από άλλη συσκευή για άμεση έναρξη συνομιλίας.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
+                    )
                 }
 
                 inboxId?.let {
-                    Text("XMTP Inbox ID (MLS Ledger)", style = MaterialTheme.typography.labelMedium)
                     Surface(
                         modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(8.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant
                     ) {
-                        Text(
-                            text = it,
-                            modifier = Modifier.padding(10.dp),
-                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    OutlinedButton(onClick = onCopyInboxId, modifier = Modifier.fillMaxWidth()) {
-                        Text("Αντιγραφή Inbox ID")
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("XMTP Inbox ID", style = MaterialTheme.typography.labelSmall)
+                                Text(
+                                    text = it,
+                                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2
+                                )
+                            }
+                            IconButton(onClick = onCopyInboxId) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_content_copy),
+                                    contentDescription = "Αντιγραφή Inbox ID",
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
                     }
                 }
 
-                Text(
-                    "Για επικοινωνία μεταξύ συσκευών, αντιγράψτε το Inbox ID ή τη Διεύθυνση και εισάγετέ τη στη δεύτερη συσκευή στο '+ Νέα'.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.primary
-                )
+                address?.let {
+                    Surface(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Διεύθυνση (Ethereum)", style = MaterialTheme.typography.labelSmall)
+                                Text(
+                                    text = it,
+                                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2
+                                )
+                            }
+                            IconButton(onClick = onCopyAddress) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_content_copy),
+                                    contentDescription = "Αντιγραφή διεύθυνσης",
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Κλείσιμο") }
+        }
+    )
+}
 
+@Composable
+internal fun EditMyNicknameDialog(
+    currentNickname: String?,
+    onSave: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var input by rememberSaveable(currentNickname) { mutableStateOf(currentNickname.orEmpty()) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        properties = ScreenSecurityManager.dialogProperties(),
+        title = { Text("Το όνομά μου") },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 Text(
-                    "Η ταυτότητα προστατεύεται από Hardware-backed Master Key (KEK) στο Android Keystore.",
+                    text = "Μοιράζεται κρυπτογραφημένα με τις επαφές σας.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                HorizontalDivider()
-                Text("Το ψευδώνυμό σας (μοιράζεται κρυπτογραφημένα)", style = MaterialTheme.typography.labelMedium)
                 OutlinedTextField(
-                    value = nicknameDraft,
-                    onValueChange = { nicknameDraft = it.take(NicknamePolicy.MAX_NICKNAME_LENGTH) },
+                    value = input,
+                    onValueChange = { input = it.take(NicknamePolicy.MAX_NICKNAME_LENGTH) },
                     modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text("Εισάγετε ψευδώνυμο...") },
+                    placeholder = { Text("Εισάγετε όνομα…") },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(
                         keyboardType = KeyboardType.Text,
                         imeAction = ImeAction.Done
                     )
                 )
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    OutlinedButton(
-                        onClick = { onSaveMyNickname(nicknameDraft) }
-                    ) {
-                        Text("Αποθήκευση", fontSize = 12.sp)
-                    }
-                    if (!myNickname.isNullOrBlank()) {
-                        TextButton(
-                            onClick = {
-                                nicknameDraft = ""
-                                onSaveMyNickname("")
-                            }
-                        ) {
-                            Text("Εκκαθάριση", fontSize = 12.sp)
-                        }
-                    }
-                }
-                HorizontalDivider()
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Text(
-                        text = "Έκδοση: v$currentVersion",
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.align(Alignment.CenterVertically)
-                    )
-                    TextButton(onClick = onCheckForUpdates, enabled = !isCheckingUpdate) {
-                        Text(if (isCheckingUpdate) "Έλεγχος..." else "Έλεγχος Ενημερώσεων", fontSize = 12.sp)
-                    }
-                }
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Text(
-                        text = if (notificationsEnabled) "Ειδοποιήσεις: Ενεργές" else "Ειδοποιήσεις: Ανενεργές",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (notificationsEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
-                        modifier = Modifier.align(Alignment.CenterVertically)
-                    )
-                    TextButton(onClick = onOpenNotificationSettings) {
-                        Text("Ρυθμίσεις", fontSize = 12.sp)
-                    }
-                }
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    Text(
-                        text = if (isServiceNotificationVisible) {
-                            "Ειδοποίηση παρασκηνίου: Ορατή"
-                        } else {
-                            "Ειδοποίηση παρασκηνίου: Κρυφή (ενεργή λήψη)"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.align(Alignment.CenterVertically)
-                    )
-                    TextButton(onClick = onOpenServiceNotificationSettings) {
-                        Text(if (isServiceNotificationVisible) "Απόκρυψη" else "Κανάλι", fontSize = 12.sp)
-                    }
-                }
-                HorizontalDivider()
-                Text("Μεταφορά Συσκευής (Wi-Fi / QR)", style = MaterialTheme.typography.labelMedium)
-                Text(
-                    text = "Άμεση κρυπτογραφημένη μεταφορά ταυτότητας, ιστορικού MLS και ψευδωνύμων σε νέα συσκευή.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 11.sp
-                )
-                FlowRow(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    OutlinedButton(onClick = onTransferToNewDevice) {
-                        Text("Εξαγωγή σε Νέα Συσκευή", fontSize = 12.sp)
-                    }
-                    OutlinedButton(onClick = onReceiveFromOldDevice) {
-                        Text("Εισαγωγή από Παλιά", fontSize = 12.sp)
-                    }
-                }
-                HorizontalDivider()
-                // Mostramos un estado informativo fijo porque FLAG_SECURE permanece siempre activo.
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    Text(
-                        text = "Προστασία Οθόνης: Μόνιμα Ενεργή (FLAG_SECURE)",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Text(
-                        text = "Αποκλείει στιγμιότυπα, εγγραφή οθόνης και προεπισκόπηση στα Πρόσφατα.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 11.sp
-                    )
-                }
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Κλείσιμο") }
+            TextButton(onClick = { onSave(input) }) {
+                Text("Αποθήκευση")
+            }
+        },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (!currentNickname.isNullOrBlank()) {
+                    TextButton(onClick = { onSave("") }) {
+                        Text("Εκκαθάριση")
+                    }
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("Ακύρωση")
+                }
+            }
         }
     )
 }

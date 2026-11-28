@@ -16,16 +16,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -43,7 +41,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.thesis.security.ShredAuditProof
-import com.example.thesis.ui.components.MessagingNotice
 import com.example.thesis.xmtp.XmtpEngineState
 import com.example.thesis.xmtp.XmtpInitError
 
@@ -63,40 +60,42 @@ internal fun MessagingStartScreen(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .widthIn(max = 480.dp)
+                .widthIn(max = 420.dp)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 24.dp, vertical = 20.dp),
+                .padding(horizontal = 28.dp, vertical = 24.dp),
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Icon(
-                Icons.Default.Lock,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(48.dp)
-            )
-            Spacer(Modifier.height(18.dp))
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.primaryContainer,
+                modifier = Modifier.size(64.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.Default.Lock,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.size(28.dp)
+                    )
+                }
+            }
+            Spacer(Modifier.height(22.dp))
             Text(
-                text = "Ασφαλής Επικοινωνία MLS",
+                text = "Ιδιωτικές Συνομιλίες",
                 style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
                 textAlign = TextAlign.Center
             )
             Spacer(Modifier.height(8.dp))
             Text(
-                text = "Ερευνητικό περιβάλλον ασφάλειας με Hardware Keystore KEK και κρυπτογραφημένο SQLCipher Sandbox.",
+                text = "Κρυπτογραφημένα μηνύματα, φωνητικές σημειώσεις και κλήσεις από άκρο σε άκρο.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
             )
-            Spacer(Modifier.height(20.dp))
-            MessagingNotice(
-                title = "Hardware-Backed Ασφάλεια",
-                text = "Το Database Encryption Key (DEK) κρυπτογραφείται στο Android Keystore. Συμμόρφωση με GDPR Άρθρο 17 (Right to Erasure)."
-            )
 
             if (lastShredProof != null) {
-                Spacer(Modifier.height(14.dp))
+                Spacer(Modifier.height(20.dp))
                 ShredAuditCertificateCard(
                     proof = lastShredProof,
                     onCopyCertificate = { onCopyShredProof(lastShredProof) },
@@ -104,46 +103,39 @@ internal fun MessagingStartScreen(
                 )
             }
 
-            Spacer(Modifier.height(22.dp))
+            Spacer(Modifier.height(28.dp))
             Button(
                 onClick = onStart,
+                shape = RoundedCornerShape(12.dp),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 48.dp)
+                    .heightIn(min = 50.dp)
             ) {
                 Text(
-                    text = "Εκκίνηση Hardware Keystore & XMTP MLS",
-                    textAlign = TextAlign.Center
+                    text = "Έναρξη",
+                    style = MaterialTheme.typography.labelLarge
                 )
             }
             Spacer(Modifier.height(10.dp))
             OutlinedButton(
                 onClick = onReceiveFromOldDevice,
+                shape = RoundedCornerShape(12.dp),
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = 48.dp)
             ) {
                 Text(
-                    text = "Μεταφορά από Παλιά Συσκευή (QR)",
+                    text = "Μεταφορά από παλιά συσκευή",
+                    style = MaterialTheme.typography.labelLarge,
                     textAlign = TextAlign.Center
                 )
             }
-            Spacer(Modifier.height(10.dp))
-            OutlinedButton(
-                onClick = onOpenQrDownload,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 48.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Share,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp)
-                )
-                Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.height(8.dp))
+            TextButton(onClick = onOpenQrDownload) {
                 Text(
-                    text = "Λήψη Τελευταίας Έκδοσης (QR)",
-                    textAlign = TextAlign.Center
+                    text = "Κοινοποίηση εφαρμογής (QR)",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
@@ -156,11 +148,9 @@ private fun ShredAuditCertificateCard(
     onCopyCertificate: () -> Unit,
     onOpenLogs: () -> Unit
 ) {
-    Card(
+    Surface(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.65f)
-        ),
+        color = MaterialTheme.colorScheme.surfaceVariant,
         shape = RoundedCornerShape(12.dp)
     ) {
         Column(
@@ -181,65 +171,44 @@ private fun ShredAuditCertificateCard(
                     tint = MaterialTheme.colorScheme.primary
                 )
                 Text(
-                    text = "GDPR Art. 17 Audit Certificate",
+                    text = "Βεβαίωση Διαγραφής (GDPR Art. 17)",
                     style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
                 )
-                Surface(
-                    shape = RoundedCornerShape(6.dp),
-                    color = if (proof.isCompliant) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.errorContainer
-                ) {
-                    Text(
-                        text = if (proof.isCompliant) "COMPLIANT" else "PARTIAL",
-                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (proof.isCompliant) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onErrorContainer,
-                        maxLines = 1
-                    )
-                }
+                Text(
+                    text = if (proof.isCompliant) "ΠΛΗΡΗΣ" else "ΜΕΡΙΚΗ",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (proof.isCompliant) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                )
             }
 
             Text(
-                text = "Keystore KEK Purged: ${proof.isKeystoreEntryPurged} • SQLCipher DB Unlinked: ${proof.isPrimaryDatabaseUnlinked} • Artifacts: ${proof.deletedArtifactsCount}",
-                style = MaterialTheme.typography.bodySmall,
+                text = "SHA-256: ${proof.certificateSha256}",
+                fontFamily = FontFamily.Monospace,
                 fontSize = 11.sp,
-                color = MaterialTheme.colorScheme.onSecondaryContainer
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
             )
-
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(8.dp),
-                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.75f)
-            ) {
-                Text(
-                    text = "SHA-256: ${proof.certificateSha256}",
-                    modifier = Modifier.padding(8.dp),
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 10.sp,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-            }
 
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
+                verticalArrangement = Arrangement.spacedBy(4.dp)
             ) {
-                OutlinedButton(
+                TextButton(
                     onClick = onCopyCertificate,
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
                 ) {
-                    Text("Αντιγραφή Πιστοποιητικού", fontSize = 11.sp, maxLines = 1)
+                    Text("Αντιγραφή", style = MaterialTheme.typography.labelMedium)
                 }
                 TextButton(
                     onClick = onOpenLogs,
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
                 ) {
-                    Text("Προβολή Logs", fontSize = 11.sp, maxLines = 1)
+                    Text("Καταγραφές", style = MaterialTheme.typography.labelMedium)
                 }
             }
         }
@@ -255,22 +224,22 @@ internal fun MessagingLoadingScreen() {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .widthIn(max = 480.dp)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 24.dp, vertical = 20.dp),
+                .widthIn(max = 360.dp)
+                .padding(horizontal = 28.dp),
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            CircularProgressIndicator()
+            CircularProgressIndicator(strokeWidth = 3.dp)
             Spacer(Modifier.height(18.dp))
             Text(
-                text = "Hardware DEK Unwrap & Σύνδεση MLS...",
+                text = "Σύνδεση…",
                 style = MaterialTheme.typography.titleMedium,
                 textAlign = TextAlign.Center
             )
             Spacer(Modifier.height(6.dp))
             Text(
-                text = "Συνδεόμαστε στο δίκτυο XMTP Production και προετοιμάζουμε την κρυπτογραφημένη βάση SQLCipher.",
+                text = "Ασφαλής προετοιμασία συνεδρίας και τοπικής βάσης.",
+                style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
             )
@@ -282,15 +251,15 @@ internal fun MessagingLoadingScreen() {
 internal fun MessagingConnectionError(state: XmtpEngineState.Error, onRetry: () -> Unit) {
     val explanation = when (state.error) {
         is XmtpInitError.SignatureRejected ->
-            "Η υπογραφή Secp256k1 ακυρώθηκε ή δεν έγινε αποδεκτή."
+            "Η επαλήθευση ταυτότητας ακυρώθηκε."
         is XmtpInitError.NetworkFailure ->
-            "Δεν ήταν δυνατή η σύνδεση gRPC με τους κόμβους του δικτύου XMTP."
+            "Αδυναμία σύνδεσης με το δίκτυο. Ελέγξτε το διαδίκτυο."
         is XmtpInitError.DatabaseError ->
-            "Αποτυχία εκκίνησης του κρυπτογραφημένου SQLCipher database sandbox."
+            "Αδυναμία ανοίγματος της τοπικής κρυπτογραφημένης βάσης."
         is XmtpInitError.IdentityError ->
-            "Αποτυχία εγγραφής του identity installation στο MLS ledger."
+            "Αδυναμία ολοκλήρωσης της εγγραφής ταυτότητας."
         is XmtpInitError.Unknown ->
-            state.error.message ?: "Παρουσιάστηκε απρόσμενο πρόβλημα κατά τη σύνδεση."
+            state.error.message ?: "Παρουσιάστηκε σφάλμα κατά τη σύνδεση."
     }
 
     Box(
@@ -300,39 +269,40 @@ internal fun MessagingConnectionError(state: XmtpEngineState.Error, onRetry: () 
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .widthIn(max = 480.dp)
+                .widthIn(max = 380.dp)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 24.dp, vertical = 20.dp),
+                .padding(horizontal = 28.dp, vertical = 24.dp),
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Icon(
-                Icons.Default.Warning,
+                imageVector = Icons.Default.Warning,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.error,
-                modifier = Modifier.size(44.dp)
+                modifier = Modifier.size(40.dp)
             )
             Spacer(Modifier.height(14.dp))
             Text(
-                text = "Αποτυχία Σύνδεσης",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
+                text = "Αποτυχία σύνδεσης",
+                style = MaterialTheme.typography.titleLarge,
                 textAlign = TextAlign.Center
             )
             Spacer(Modifier.height(8.dp))
             Text(
                 text = explanation,
+                style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
             )
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(22.dp))
             Button(
                 onClick = onRetry,
+                shape = RoundedCornerShape(12.dp),
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(min = 48.dp)
             ) {
-                Text("Επανάληψη Σύνδεσης", textAlign = TextAlign.Center)
+                Text("Δοκιμή ξανά", style = MaterialTheme.typography.labelLarge)
             }
         }
     }

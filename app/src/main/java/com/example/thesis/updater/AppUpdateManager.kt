@@ -331,26 +331,20 @@ class AppUpdateManager(
      * Checks if the app currently holds permission to request package installs on Android 8.0+.
      */
     fun canRequestPackageInstalls(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            appContext.packageManager.canRequestPackageInstalls()
-        } else {
-            true
-        }
+        return appContext.packageManager.canRequestPackageInstalls()
     }
 
     /**
      * Navigates the user to Android system settings to grant unknown app install permission.
      */
     fun openInstallPermissionSettings() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val intent = Intent(
-                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                Uri.parse("package:${appContext.packageName}")
-            ).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            appContext.startActivity(intent)
+        val intent = Intent(
+            Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+            Uri.parse("package:${appContext.packageName}")
+        ).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
+        appContext.startActivity(intent)
     }
 
     /**

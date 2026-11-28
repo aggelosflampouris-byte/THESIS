@@ -1,19 +1,16 @@
 package com.example.thesis.ui.screens
 
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -21,461 +18,284 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowForward
-import androidx.compose.material.icons.automirrored.filled.List
-import androidx.compose.material.icons.filled.AccountCircle
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
-import com.example.thesis.R
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import com.example.thesis.R
 import com.example.thesis.identity.NicknamePolicy
 import com.example.thesis.identity.NicknameSnapshot
-import com.example.thesis.ui.ActionLogEntry
-import com.example.thesis.ui.components.LatestVersionQrCard
-import com.example.thesis.ui.components.SecurityEngineStatusCard
-import com.example.thesis.updater.UpdateStatus
-import com.example.thesis.xmtp.XmtpEngineState
-import org.xmtp.android.library.Conversation
+import com.example.thesis.repository.ConversationPreview
+import com.example.thesis.ui.util.ChatFormatting
 import com.example.thesis.xmtp.cachedGroupName
+import org.xmtp.android.library.Conversation
 
 @Composable
 internal fun InboxDashboardScreen(
     conversations: List<Conversation>,
+    previews: Map<String, ConversationPreview> = emptyMap(),
     unreadCounts: Map<String, Int> = emptyMap(),
     nicknameSnapshot: NicknameSnapshot = NicknameSnapshot(),
-    engineState: XmtpEngineState,
-    isCreatingConversation: Boolean,
-    isShredding: Boolean = false,
-    actionLogs: List<ActionLogEntry>,
-    currentVersion: String,
-    updateStatus: UpdateStatus = UpdateStatus.Idle,
-    onOpenLogs: () -> Unit,
-    onNewConversation: () -> Unit,
-    onStartLoopback: () -> Unit,
+    searchQuery: String = "",
     onSelectConversation: (Conversation) -> Unit,
     onEditContactNickname: (Conversation) -> Unit = {},
-    onCopyDownloadUrl: () -> Unit = {},
-    onOpenDownloadUrl: () -> Unit = {},
-    onExpandQr: () -> Unit = {}
+    modifier: Modifier = Modifier
 ) {
+    val trimmedQuery = searchQuery.trim()
+    val filteredEntries = remember(conversations, previews, nicknameSnapshot, trimmedQuery) {
+        conversations.mapIndexed { idx, conv ->
+            val isDm = conv is Conversation.Dm
+            val isLoopback = conv is Conversation.Group && conv.group.cachedGroupName() == "MLS Research Loopback"
+            val contactKey = if (isDm) conv.dm.peerInboxId else conv.id
+            val fallbackLabel = when {
+                isDm -> {
+                    val peer = conv.dm.peerInboxId
+                    if (peer.length >= 16) "${peer.take(6)}…${peer.takeLast(4)}" else peer
+                }
+                conv is Conversation.Group -> "Ομάδα ${conv.id.take(6)}…"
+                else -> "Συνομιλία ${idx + 1}"
+            }
+            val groupName = (conv as? Conversation.Group)?.group?.cachedGroupName()
+            val resolvedTitle = NicknamePolicy.resolveConversationTitle(
+                conversationKey = contactKey,
+                isDm = isDm,
+                isLoopback = isLoopback,
+                groupName = groupName,
+                fallbackMaskedPeer = fallbackLabel,
+                snapshot = nicknameSnapshot
+            ).let { rawTitle ->
+                // Limpiamos el prefijo "DM: " del titulo por defecto para una vista de contactos mas natural.
+                if (isDm && rawTitle.startsWith("DM: ")) rawTitle.removePrefix("DM: ") else rawTitle
+            }
+            Triple(conv, resolvedTitle, contactKey)
+        }.filter { (_, title, contactKey) ->
+            if (trimmedQuery.isEmpty()) {
+                true
+            } else {
+                title.contains(trimmedQuery, ignoreCase = true) ||
+                    contactKey.contains(trimmedQuery, ignoreCase = true)
+            }
+        }
+    }
+
     Box(
-        modifier = Modifier.fillMaxSize(),
+        modifier = modifier.fillMaxSize(),
         contentAlignment = Alignment.TopCenter
     ) {
-        // Unificamos el panel en un solo LazyColumn para que toda la superficie sea desplazable incluso en horizontal o con fuentes grandes.
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .widthIn(max = 640.dp),
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            item(key = "security_status") {
-                SecurityEngineStatusCard(
-                    engineState = engineState,
-                )
-            }
-
-            item(key = "quick_actions") {
-                BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-                    val actionsEnabled = !isCreatingConversation && !isShredding
-                    if (maxWidth < 300.dp) {
-                        Column(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Button(
-                                onClick = onStartLoopback,
-                                enabled = actionsEnabled,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(min = 44.dp),
-                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
-                            ) {
-                                Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text("Loopback MLS", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-
-                            OutlinedButton(
-                                onClick = onNewConversation,
-                                enabled = actionsEnabled,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .heightIn(min = 44.dp),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
-                            ) {
-                                if (isCreatingConversation) {
-                                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                                } else {
-                                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(Modifier.width(4.dp))
-                                    Text("Νέα", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                }
-                            }
-                        }
-                    } else {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Button(
-                                onClick = onStartLoopback,
-                                enabled = actionsEnabled,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .heightIn(min = 44.dp),
-                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
-                            ) {
-                                Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text("Loopback MLS", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-
-                            OutlinedButton(
-                                onClick = onNewConversation,
-                                enabled = actionsEnabled,
-                                modifier = Modifier
-                                    .weight(0.8f)
-                                    .heightIn(min = 44.dp),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
-                            ) {
-                                if (isCreatingConversation) {
-                                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                                } else {
-                                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                                    Spacer(Modifier.width(4.dp))
-                                    Text("Νέα", fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            item(key = "conversations_header") {
-                Text(
-                    text = "Ενεργές Συνομιλίες MLS (${conversations.size})",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-
-            if (conversations.isEmpty()) {
-                item(key = "empty_conversations") {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
-                        ),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(20.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center
-                        ) {
-                            Text(
-                                text = "Δεν υπάρχουν ακόμη συνομιλίες",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.SemiBold,
-                                textAlign = TextAlign.Center
-                            )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = "Πατήστε 'Loopback MLS' για άμεση δημιουργία συνεδρίας και δοκιμή κρυπτογράφησης στη συσκευή σας.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                fontSize = 12.sp,
-                                textAlign = TextAlign.Center
-                            )
-                        }
-                    }
-                }
-            } else {
-                itemsIndexed(conversations, key = { _, conv -> conv.id }) { index, conv ->
-                    ConversationItemCard(
-                        index = index + 1,
-                        conversation = conv,
-                        unreadCount = unreadCounts[conv.id] ?: 0,
-                        nicknameSnapshot = nicknameSnapshot,
-                        onEditNickname = { onEditContactNickname(conv) },
-                        onClick = { onSelectConversation(conv) }
-                    )
-                }
-            }
-
-            item(key = "telemetry_entry") {
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable(onClick = onOpenLogs),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-                    ),
-                    shape = RoundedCornerShape(12.dp)
+        if (filteredEntries.isEmpty()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .widthIn(max = 420.dp)
+                    .align(Alignment.Center)
+                    .padding(horizontal = 32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Surface(
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    modifier = Modifier.size(56.dp)
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Surface(
-                                shape = CircleShape,
-                                color = MaterialTheme.colorScheme.primaryContainer,
-                                modifier = Modifier.size(32.dp)
-                            ) {
-                                Box(contentAlignment = Alignment.Center) {
-                                    Icon(
-                                        imageVector = Icons.AutoMirrored.Filled.List,
-                                        contentDescription = null,
-                                        modifier = Modifier.size(16.dp),
-                                        tint = MaterialTheme.colorScheme.onPrimaryContainer
-                                    )
-                                }
-                            }
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = "Action & Telemetry Log",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Text(
-                                    text = "${actionLogs.size} καταγραφές",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    fontSize = 11.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                        }
-                        Spacer(modifier = Modifier.width(8.dp))
+                    Box(contentAlignment = Alignment.Center) {
                         Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                            painter = painterResource(id = R.drawable.ic_chat_bubble),
                             contentDescription = null,
-                            modifier = Modifier.size(16.dp),
+                            modifier = Modifier.size(26.dp),
                             tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
-            }
-
-            item(key = "qr_download_section") {
-                LatestVersionQrCard(
-                    currentVersion = currentVersion,
-                    updateStatus = updateStatus,
-                    onCopyUrl = onCopyDownloadUrl,
-                    onOpenDownloadUrl = onOpenDownloadUrl,
-                    onExpandQr = onExpandQr
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text = if (trimmedQuery.isNotEmpty()) {
+                        "Δεν βρέθηκαν συνομιλίες"
+                    } else {
+                        "Καμία συνομιλία ακόμη"
+                    },
+                    style = MaterialTheme.typography.titleMedium,
+                    textAlign = TextAlign.Center
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = if (trimmedQuery.isNotEmpty()) {
+                        "Δοκιμάστε άλλο όνομα ή αναγνωριστικό επαφής."
+                    } else {
+                        "Πατήστε + για να ξεκινήσετε μια κρυπτογραφημένη συνομιλία."
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center
                 )
             }
-
-            item(key = "bottom_spacer") {
-                Spacer(modifier = Modifier.height(8.dp))
+        } else {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .widthIn(max = 640.dp),
+                contentPadding = PaddingValues(top = 4.dp, bottom = 88.dp)
+            ) {
+                itemsIndexed(filteredEntries, key = { _, item -> item.first.id }) { index, (conv, title, _) ->
+                    val isLoopback = conv is Conversation.Group && conv.group.cachedGroupName() == "MLS Research Loopback"
+                    ConversationListRow(
+                        title = title,
+                        isDm = conv is Conversation.Dm,
+                        isLoopback = isLoopback,
+                        preview = previews[conv.id],
+                        unreadCount = unreadCounts[conv.id] ?: 0,
+                        onClick = { onSelectConversation(conv) },
+                        onLongClick = if (!isLoopback) {
+                            { onEditContactNickname(conv) }
+                        } else null
+                    )
+                    if (index < filteredEntries.lastIndex) {
+                        HorizontalDivider(
+                            modifier = Modifier.padding(start = 76.dp, end = 16.dp),
+                            thickness = 0.5.dp,
+                            color = MaterialTheme.colorScheme.outlineVariant
+                        )
+                    }
+                }
             }
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun ConversationItemCard(
-    index: Int,
-    conversation: Conversation,
-    unreadCount: Int = 0,
-    nicknameSnapshot: NicknameSnapshot = NicknameSnapshot(),
-    onEditNickname: () -> Unit = {},
+private fun ConversationListRow(
+    title: String,
+    isDm: Boolean,
+    isLoopback: Boolean,
+    preview: ConversationPreview?,
+    unreadCount: Int,
     onClick: () -> Unit,
+    onLongClick: (() -> Unit)?,
     modifier: Modifier = Modifier
 ) {
-    val isDm = conversation is Conversation.Dm
-    val isLoopback = conversation is Conversation.Group && conversation.group.cachedGroupName() == "MLS Research Loopback"
-    val contactKey = if (isDm) conversation.dm.peerInboxId else conversation.id
-    val maskedPeer = when {
-        isDm -> {
-            val peer = conversation.dm.peerInboxId
-            if (peer.length >= 16) "${peer.take(8)}...${peer.takeLast(6)}" else peer
-        }
-        conversation is Conversation.Group -> "Ομάδα MLS: ${conversation.id.take(8)}..."
-        else -> "Συνομιλία $index: ${conversation.topic.take(18)}..."
+    val initials = remember(title, isLoopback) {
+        if (isLoopback) "LB" else ChatFormatting.extractAvatarInitials(title)
     }
-    val groupName = (conversation as? Conversation.Group)?.group?.cachedGroupName()
-    val title = NicknamePolicy.resolveConversationTitle(
-        conversationKey = contactKey,
-        isDm = isDm,
-        isLoopback = isLoopback,
-        groupName = groupName,
-        fallbackMaskedPeer = maskedPeer,
-        snapshot = nicknameSnapshot
-    )
-    val hasNickname = NicknamePolicy.resolveContactNickname(contactKey, nicknameSnapshot) != null
-
-    val subtitle = when {
-        isDm && hasNickname -> "DM • $maskedPeer"
-        isDm -> "Direct Message"
-        isLoopback -> "Τοπική δοκιμή συσκευής"
+    val timeLabel = remember(preview?.timestampMs) {
+        preview?.let { ChatFormatting.formatConversationListTime(it.timestampMs) }.orEmpty()
+    }
+    val subtitleText = when {
+        preview != null && preview.isFromMe -> "Εσείς: ${preview.text}"
+        preview != null -> preview.text
+        isLoopback -> "Τοπική συνεδρία δοκιμής"
+        isDm -> "Κρυπτογραφημένη συνομιλία"
         else -> "Ομαδική συνομιλία"
     }
 
-    Card(
-        onClick = onClick,
-        modifier = modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
-        shape = RoundedCornerShape(12.dp)
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            )
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically
+        Surface(
+            shape = CircleShape,
+            color = if (unreadCount > 0) {
+                MaterialTheme.colorScheme.primaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceVariant
+            },
+            modifier = Modifier.size(46.dp)
         ) {
-            Surface(
-                shape = CircleShape,
-                color = when {
-                    isDm -> MaterialTheme.colorScheme.primaryContainer
-                    isLoopback -> MaterialTheme.colorScheme.secondaryContainer
-                    else -> MaterialTheme.colorScheme.tertiaryContainer
-                },
-                modifier = Modifier.size(40.dp)
+            Box(contentAlignment = Alignment.Center) {
+                Text(
+                    text = initials,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = if (unreadCount > 0) {
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    }
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.width(14.dp))
+
+        Column(modifier = Modifier.weight(1f)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Icon(
-                        imageVector = when {
-                            isDm -> Icons.Default.Person
-                            isLoopback -> Icons.Default.PlayArrow
-                            else -> Icons.Default.AccountCircle
-                        },
-                        contentDescription = null,
-                        modifier = Modifier.size(20.dp),
-                        tint = when {
-                            isDm -> MaterialTheme.colorScheme.onPrimaryContainer
-                            isLoopback -> MaterialTheme.colorScheme.onSecondaryContainer
-                            else -> MaterialTheme.colorScheme.onTertiaryContainer
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = if (unreadCount > 0) FontWeight.SemiBold else FontWeight.Medium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                if (timeLabel.isNotEmpty()) {
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = timeLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (unreadCount > 0) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
                         }
                     )
                 }
             }
 
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.height(3.dp))
 
-            Column(modifier = Modifier.weight(1f)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text(
-                    text = title,
+                    text = subtitleText,
                     style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold,
+                    fontWeight = if (unreadCount > 0) FontWeight.Medium else FontWeight.Normal,
+                    color = if (unreadCount > 0) {
+                        MaterialTheme.colorScheme.onSurface
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
                     maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
                 )
-                Spacer(modifier = Modifier.height(2.dp))
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(2.dp)
-                ) {
-                    Text(
-                        text = subtitle,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                        fontSize = 10.sp,
-                        maxLines = 1
-                    )
-                    Text(
-                        text = "Topic: ${conversation.topic.take(10)}...",
-                        style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                        fontSize = 10.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-
-            if (unreadCount > 0) {
-                Spacer(modifier = Modifier.width(8.dp))
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Image(
-                        painter = painterResource(id = R.drawable.ic_notification_message_badge),
-                        contentDescription = "Νέο μήνυμα",
-                        modifier = Modifier.size(22.dp)
-                    )
+                if (unreadCount > 0) {
+                    Spacer(modifier = Modifier.width(8.dp))
                     Surface(
                         shape = CircleShape,
                         color = MaterialTheme.colorScheme.primary
                     ) {
                         Text(
                             text = if (unreadCount > 99) "99+" else unreadCount.toString(),
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Bold,
                             color = MaterialTheme.colorScheme.onPrimary,
-                            fontSize = 10.sp
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
                         )
                     }
                 }
             }
-
-            if (!isLoopback) {
-                IconButton(
-                    onClick = onEditNickname,
-                    modifier = Modifier.size(36.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Edit,
-                        contentDescription = "Επεξεργασία ψευδωνύμου",
-                        modifier = Modifier.size(16.dp),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.width(4.dp))
-
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.ArrowForward,
-                contentDescription = null,
-                modifier = Modifier.size(16.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant
-            )
         }
     }
 }

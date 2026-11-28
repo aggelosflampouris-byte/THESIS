@@ -4,28 +4,47 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.ui.graphics.Color
 
-val MessagingPrimary = Color(0xFF315C54)
+// Acento principal sobrio estilo mensajeria nativa; evita saturaciones artificiales.
+val MessagingPrimary = Color(0xFF2A5C55)
 
 val MessagingLightScheme = lightColorScheme(
     primary = MessagingPrimary,
-    secondary = Color(0xFF52645F),
-    tertiary = Color(0xFF6D5E40),
-    background = Color(0xFFF8F9F7),
-    surface = Color(0xFFF8F9F7),
-    primaryContainer = Color(0xFFD4E8E1),
-    onPrimaryContainer = Color(0xFF0F3831),
-    secondaryContainer = Color(0xFFDBE5E0),
-    onSecondaryContainer = Color(0xFF192A26),
-    surfaceVariant = Color(0xFFE2E7E4)
+    onPrimary = Color.White,
+    secondary = Color(0xFF536360),
+    onSecondary = Color.White,
+    tertiary = Color(0xFF5D5E58),
+    background = Color(0xFFFFFFFF),
+    onBackground = Color(0xFF171A19),
+    surface = Color(0xFFFFFFFF),
+    onSurface = Color(0xFF171A19),
+    primaryContainer = Color(0xFFDCECE8),
+    onPrimaryContainer = Color(0xFF0E2F2A),
+    secondaryContainer = Color(0xFFE9EEEC),
+    onSecondaryContainer = Color(0xFF1E2926),
+    surfaceVariant = Color(0xFFF2F4F3),
+    onSurfaceVariant = Color(0xFF5F6865),
+    outlineVariant = Color(0xFFE2E6E4),
+    error = Color(0xFFB3261E),
+    onError = Color.White
 )
 
 val MessagingDarkScheme = darkColorScheme(
-    primary = Color(0xFFA3D0C2),
-    secondary = Color(0xFFB8CBC3),
-    tertiary = Color(0xFFE0C999),
-    primaryContainer = Color(0xFF1E463E),
-    onPrimaryContainer = Color(0xFFD4E8E1),
-    secondaryContainer = Color(0xFF344641),
-    onSecondaryContainer = Color(0xFFDBE5E0),
-    surfaceVariant = Color(0xFF2B3A36)
+    primary = Color(0xFF8CC5BC),
+    onPrimary = Color(0xFF0A2A25),
+    secondary = Color(0xFFAEC0BC),
+    onSecondary = Color(0xFF1A2825),
+    tertiary = Color(0xFFBFC2B8),
+    background = Color(0xFF111315),
+    onBackground = Color(0xFFECEFED),
+    surface = Color(0xFF111315),
+    onSurface = Color(0xFFECEFED),
+    primaryContainer = Color(0xFF1B3B36),
+    onPrimaryContainer = Color(0xFFD6ECE8),
+    secondaryContainer = Color(0xFF22282B),
+    onSecondaryContainer = Color(0xFFDCE4E1),
+    surfaceVariant = Color(0xFF1C2023),
+    onSurfaceVariant = Color(0xFF98A29F),
+    outlineVariant = Color(0xFF2A3034),
+    error = Color(0xFFF2B8B5),
+    onError = Color(0xFF601410)
 )

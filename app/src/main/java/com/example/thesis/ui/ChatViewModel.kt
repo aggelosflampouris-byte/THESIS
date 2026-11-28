@@ -125,6 +125,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     val updateStatus: StateFlow<UpdateStatus> = appUpdateManager.updateStatus
     val unreadCounts: StateFlow<Map<String, Int>> = sessionContainer.unreadCounts
     val nicknameSnapshot: StateFlow<NicknameSnapshot> = sessionContainer.nicknameSnapshot
+    val conversationPreviews: StateFlow<Map<String, com.example.thesis.repository.ConversationPreview>> =
+        repository.conversationPreviews
     val peerReadTimestamps: StateFlow<Map<String, Long>> = repository.peerReadTimestamps
     val callEventsByConversation: StateFlow<Map<String, List<ChatCallEvent>>> = repository.callEventsByConversation
     val callState: StateFlow<CallUiState> = sessionContainer.callSessionManager.callState

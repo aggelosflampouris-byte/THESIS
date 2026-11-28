@@ -79,6 +79,7 @@ import java.util.Locale
 @Composable
 internal fun LogsTelemetryScreen(
     logs: List<ActionLogEntry>,
+    modifier: Modifier = Modifier,
     sessions: List<ActionLogSession> = emptyList(),
     walletAddress: String? = null,
     inboxId: String? = null,
@@ -95,8 +96,7 @@ internal fun LogsTelemetryScreen(
     onSharePdfReport: () -> Unit = {},
     onRunCryptoAudit: () -> Unit = {},
     onRunBatchBenchmark: () -> Unit = {},
-    onEmitBlockchainPoC: () -> Unit = {},
-    modifier: Modifier = Modifier
+    onEmitBlockchainPoC: () -> Unit = {}
 ) {
     var selectedTagFilter by rememberSaveable { mutableStateOf("ALL") }
     var selectedSessionFilter by rememberSaveable { mutableStateOf("ALL") }

@@ -2,9 +2,11 @@ package com.example.thesis.ui.screens
 
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -23,7 +25,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -32,25 +34,32 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -71,12 +80,14 @@ import com.example.thesis.call.ChatCallOutcome
 import com.example.thesis.repository.ReadReceiptPolicy
 import com.example.thesis.repository.extractMediaAttachment
 import com.example.thesis.repository.extractVoiceNote
+import com.example.thesis.ui.util.ChatFormatting
 import com.example.thesis.voice.VoicePlaybackState
 import com.example.thesis.voice.VoiceRecordingState
 import com.example.thesis.xmtp.MediaAttachment
 import com.example.thesis.xmtp.MediaAttachmentCodec
 import com.example.thesis.xmtp.VoiceNote
 import com.example.thesis.xmtp.VoiceNoteCodec
+import kotlinx.coroutines.launch
 import org.xmtp.android.library.libxmtp.DecodedMessage
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -125,11 +136,16 @@ internal fun MessagingChatScreen(
     onTakePhoto: () -> Unit = {},
     onPickDocument: () -> Unit = {},
     onOpenMediaAttachment: (MediaAttachment) -> Unit = {},
+    onCopyMessageText: (String) -> Unit = {},
     onDraftChange: (String) -> Unit,
     onSendMessage: (String) -> Unit,
     onRetryMessage: (String) -> Unit = onSendMessage
 ) {
     val listState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
+    val showScrollToBottom by remember {
+        derivedStateOf { listState.canScrollForward }
+    }
     val lastSeenOwnMessageId = remember(messages, localInboxId, peerLastReadTimestampMs) {
         messages.lastOrNull { msg ->
             ReadReceiptPolicy.isMessageSeenByPeer(
@@ -217,13 +233,41 @@ internal fun MessagingChatScreen(
                     LazyColumn(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(vertical = 10.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                        contentPadding = PaddingValues(top = 12.dp, bottom = 12.dp)
                     ) {
-                        items(
+                        itemsIndexed(
                             timelineItems,
-                            key = { it.itemKey }
-                        ) { item ->
+                            key = { _, item -> item.itemKey }
+                        ) { index, item ->
+                            val prevItem = if (index > 0) timelineItems[index - 1] else null
+                            val showDateDivider = item.timestampMs > 0L && (
+                                prevItem == null ||
+                                    prevItem.timestampMs <= 0L ||
+                                    !ChatFormatting.isSameCalendarDay(prevItem.timestampMs, item.timestampMs)
+                                )
+                            if (showDateDivider) {
+                                ChatDateDivider(label = ChatFormatting.formatChatDateDivider(item.timestampMs))
+                            }
+
+                            val groupedWithPrev = if (
+                                !showDateDivider &&
+                                prevItem is ChatTimelineItem.TextMessage &&
+                                item is ChatTimelineItem.TextMessage
+                            ) {
+                                ChatFormatting.shouldGroupMessages(
+                                    prevSender = prevItem.message.senderInboxId,
+                                    prevTsMs = prevItem.timestampMs,
+                                    curSender = item.message.senderInboxId,
+                                    curTsMs = item.timestampMs
+                                )
+                            } else {
+                                false
+                            }
+
+                            if (index > 0 && !showDateDivider) {
+                                Spacer(modifier = Modifier.height(if (groupedWithPrev) 3.dp else 10.dp))
+                            }
+
                             when (item) {
                                 is ChatTimelineItem.TextMessage -> {
                                     val message = item.message
@@ -236,15 +280,15 @@ internal fun MessagingChatScreen(
                                     MessagingMessageBubble(
                                         message = message,
                                         isOwnMessage = isOwn,
+                                        isGroupedWithPrevious = groupedWithPrev,
                                         isSeen = isSeen,
-                                        isLastSeenOwnMessage = isSeen && message.id == lastSeenOwnMessageId,
-                                        seenAtMs = peerLastReadTimestampMs,
                                         maxBubbleWidth = maxBubbleWidth,
                                         retryEnabled = !isShredding,
                                         voicePlaybackState = voicePlaybackState,
                                         onToggleVoicePlayback = onToggleVoicePlayback,
                                         onSeekVoicePlayback = onSeekVoicePlayback,
                                         onOpenMediaAttachment = onOpenMediaAttachment,
+                                        onCopyMessageText = onCopyMessageText,
                                         onRetry = { onRetryMessage(message.body) }
                                     )
                                 }
@@ -259,111 +303,159 @@ internal fun MessagingChatScreen(
                             }
                         }
                     }
+                    if (showScrollToBottom) {
+                        Surface(
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(end = 4.dp, bottom = 10.dp)
+                                .size(38.dp)
+                                .clip(CircleShape)
+                                .clickable {
+                                    if (timelineItems.isNotEmpty()) {
+                                        coroutineScope.launch {
+                                            listState.animateScrollToItem(timelineItems.lastIndex)
+                                        }
+                                    }
+                                },
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.surface,
+                            shadowElevation = 2.dp,
+                            border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant)
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Default.KeyboardArrowDown,
+                                    contentDescription = "Μετάβαση στο τέλος",
+                                    modifier = Modifier.size(20.dp),
+                                    tint = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                    }
                 }
             }
 
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                tonalElevation = 2.dp
+                color = MaterialTheme.colorScheme.surface
             ) {
-                if (voiceRecordingState.isRecording) {
-                    VoiceRecordingInputBar(
-                        recordingState = voiceRecordingState,
-                        onCancel = onCancelVoiceRecording,
-                        onSend = onStopAndSendVoiceRecording
-                    )
-                } else {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 6.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.Bottom
-                    ) {
-                        IconButton(
-                            onClick = onPickPhoto,
-                            enabled = !isShredding && !isUploadingMedia,
-                            modifier = Modifier.size(36.dp)
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant)
+                    if (voiceRecordingState.isRecording) {
+                        VoiceRecordingInputBar(
+                            recordingState = voiceRecordingState,
+                            onCancel = onCancelVoiceRecording,
+                            onSend = onStopAndSendVoiceRecording
+                        )
+                    } else {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.Bottom
                         ) {
-                            if (isUploadingMedia) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(18.dp),
-                                    strokeWidth = 2.dp,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                            } else {
+                            IconButton(
+                                onClick = onPickPhoto,
+                                enabled = !isShredding && !isUploadingMedia,
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                if (isUploadingMedia) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(18.dp),
+                                        strokeWidth = 2.dp,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                } else {
+                                    Icon(
+                                        painter = painterResource(R.drawable.ic_photo_library),
+                                        contentDescription = "Φωτογραφία από συλλογή",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(21.dp)
+                                    )
+                                }
+                            }
+                            IconButton(
+                                onClick = onTakePhoto,
+                                enabled = !isShredding && !isUploadingMedia,
+                                modifier = Modifier.size(36.dp)
+                            ) {
                                 Icon(
-                                    painter = painterResource(R.drawable.ic_photo_library),
-                                    contentDescription = "Φωτογραφία από συλλογή",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(22.dp)
+                                    painter = painterResource(R.drawable.ic_photo_camera),
+                                    contentDescription = "Κάμερα",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(21.dp)
                                 )
                             }
-                        }
-                        IconButton(
-                            onClick = onTakePhoto,
-                            enabled = !isShredding && !isUploadingMedia,
-                            modifier = Modifier.size(36.dp)
-                        ) {
-                            Icon(
-                                painter = painterResource(R.drawable.ic_photo_camera),
-                                contentDescription = "Κάμερα",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(22.dp)
+                            IconButton(
+                                onClick = onPickDocument,
+                                enabled = !isShredding && !isUploadingMedia,
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_attach_file),
+                                    contentDescription = "Επισύναψη αρχείου",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(21.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(6.dp))
+                            OutlinedTextField(
+                                value = draft,
+                                onValueChange = onDraftChange,
+                                placeholder = {
+                                    Text(
+                                        "Μήνυμα…",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                },
+                                modifier = Modifier.weight(1f),
+                                maxLines = 4,
+                                keyboardOptions = KeyboardOptions(
+                                    keyboardType = KeyboardType.Text,
+                                    imeAction = ImeAction.Default
+                                ),
+                                // Mantenemos el campo habilitado durante el envio para no perder el foco ni cerrar el teclado.
+                                enabled = !isShredding,
+                                shape = RoundedCornerShape(24.dp),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                                    focusedBorderColor = Color.Transparent,
+                                    unfocusedBorderColor = Color.Transparent
+                                )
                             )
-                        }
-                        IconButton(
-                            onClick = onPickDocument,
-                            enabled = !isShredding && !isUploadingMedia,
-                            modifier = Modifier.size(36.dp)
-                        ) {
-                            Icon(
-                                painter = painterResource(R.drawable.ic_attach_file),
-                                contentDescription = "Επισύναψη αρχείου",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(22.dp)
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(4.dp))
-                        OutlinedTextField(
-                            value = draft,
-                            onValueChange = onDraftChange,
-                            placeholder = { Text("Γράψτε μήνυμα...", fontSize = 13.sp) },
-                            modifier = Modifier.weight(1f),
-                            maxLines = 4,
-                            keyboardOptions = KeyboardOptions(
-                                keyboardType = KeyboardType.Text,
-                                imeAction = ImeAction.Default
-                            ),
-                            // Mantenemos el campo habilitado durante el envio para no perder el foco ni cerrar el teclado.
-                            enabled = !isShredding,
-                            shape = RoundedCornerShape(20.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        val hasDraftText = draft.isNotBlank()
-                        IconButton(
-                            onClick = {
+                            Spacer(modifier = Modifier.width(8.dp))
+                            val hasDraftText = draft.isNotBlank()
+                            FilledIconButton(
+                                onClick = {
+                                    if (hasDraftText) {
+                                        val content = draft.trim()
+                                        if (content.isNotEmpty()) onSendMessage(content)
+                                    } else {
+                                        onStartVoiceRecording()
+                                    }
+                                },
+                                enabled = !isShredding,
+                                modifier = Modifier.size(44.dp),
+                                colors = IconButtonDefaults.filledIconButtonColors(
+                                    containerColor = MaterialTheme.colorScheme.primary,
+                                    contentColor = MaterialTheme.colorScheme.onPrimary
+                                )
+                            ) {
                                 if (hasDraftText) {
-                                    val content = draft.trim()
-                                    if (content.isNotEmpty()) onSendMessage(content)
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.Send,
+                                        contentDescription = "Αποστολή",
+                                        modifier = Modifier.size(20.dp)
+                                    )
                                 } else {
-                                    onStartVoiceRecording()
+                                    Icon(
+                                        painter = painterResource(R.drawable.ic_mic_on),
+                                        contentDescription = "Φωνητικό μήνυμα",
+                                        modifier = Modifier.size(20.dp)
+                                    )
                                 }
-                            },
-                            enabled = !isShredding,
-                            modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                        ) {
-                            if (hasDraftText) {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.Send,
-                                    contentDescription = "Αποστολή",
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                            } else {
-                                Icon(
-                                    painter = painterResource(R.drawable.ic_mic_on),
-                                    contentDescription = "Φωνητικό μήνυμα",
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
                             }
                         }
                     }
@@ -583,18 +675,42 @@ private fun CallFeedbackChatCard(
 }
 
 @Composable
+private fun ChatDateDivider(label: String) {
+    if (label.isBlank()) return
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 10.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Surface(
+            shape = RoundedCornerShape(999.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant
+        ) {
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
 private fun MessagingMessageBubble(
     message: DecodedMessage,
     isOwnMessage: Boolean,
+    isGroupedWithPrevious: Boolean = false,
     isSeen: Boolean = false,
-    isLastSeenOwnMessage: Boolean = false,
-    seenAtMs: Long? = null,
     maxBubbleWidth: Dp,
     retryEnabled: Boolean = true,
     voicePlaybackState: VoicePlaybackState = VoicePlaybackState(),
     onToggleVoicePlayback: (String, VoiceNote) -> Unit = { _, _ -> },
     onSeekVoicePlayback: (String, Float) -> Unit = { _, _ -> },
     onOpenMediaAttachment: (MediaAttachment) -> Unit = {},
+    onCopyMessageText: (String) -> Unit = {},
     onRetry: () -> Unit
 ) {
     val voiceNote = remember(message.id) { message.extractVoiceNote() }
@@ -603,47 +719,45 @@ private fun MessagingMessageBubble(
         val date = message.sentAt ?: if (message.sentAtNs > 0L) Date(message.sentAtNs / 1_000_000L) else Date()
         SimpleDateFormat("HH:mm", Locale.getDefault()).format(date)
     }
-    val seenTimeLabel = remember(seenAtMs) {
-        seenAtMs?.takeIf { it > 0L }?.let {
-            SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(it))
-        }
-    }
-    val status = when (message.deliveryStatus) {
-        DecodedMessage.MessageDeliveryStatus.FAILED -> "Δεν στάλθηκε"
-        DecodedMessage.MessageDeliveryStatus.UNPUBLISHED -> "Αποστολή…"
-        DecodedMessage.MessageDeliveryStatus.PUBLISHED -> when {
-            isSeen && isLastSeenOwnMessage && seenTimeLabel != null -> "Διαβάστηκε $seenTimeLabel"
-            isSeen -> "Διαβάστηκε"
-            else -> "Στάλθηκε"
-        }
-        DecodedMessage.MessageDeliveryStatus.ALL -> null
-    }
     val isFailed = message.deliveryStatus == DecodedMessage.MessageDeliveryStatus.FAILED
     val contentColor = if (isOwnMessage) {
         MaterialTheme.colorScheme.onPrimaryContainer
     } else {
-        MaterialTheme.colorScheme.onSurfaceVariant
+        MaterialTheme.colorScheme.onSurface
     }
+    val bubbleShape = RoundedCornerShape(
+        topStart = if (!isOwnMessage && isGroupedWithPrevious) 6.dp else 18.dp,
+        topEnd = if (isOwnMessage && isGroupedWithPrevious) 6.dp else 18.dp,
+        bottomEnd = if (isOwnMessage) 4.dp else 18.dp,
+        bottomStart = if (isOwnMessage) 18.dp else 4.dp
+    )
 
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = if (isOwnMessage) Alignment.End else Alignment.Start
     ) {
         Surface(
-            modifier = Modifier.widthIn(
-                min = if (voiceNote != null || mediaAttachment != null) 220.dp else 60.dp,
-                max = maxBubbleWidth
-            ),
-            shape = RoundedCornerShape(
-                topStart = 16.dp,
-                topEnd = 16.dp,
-                bottomEnd = if (isOwnMessage) 4.dp else 16.dp,
-                bottomStart = if (isOwnMessage) 16.dp else 4.dp
-            ),
+            modifier = Modifier
+                .widthIn(
+                    min = if (voiceNote != null || mediaAttachment != null) 220.dp else 64.dp,
+                    max = maxBubbleWidth
+                )
+                .clip(bubbleShape)
+                .then(
+                    if (voiceNote == null && mediaAttachment == null) {
+                        Modifier.combinedClickable(
+                            onClick = {},
+                            onLongClick = { onCopyMessageText(message.body) }
+                        )
+                    } else {
+                        Modifier
+                    }
+                ),
+            shape = bubbleShape,
             color = if (isOwnMessage) MaterialTheme.colorScheme.primaryContainer
             else MaterialTheme.colorScheme.surfaceVariant
         ) {
-            Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+            Column(modifier = Modifier.padding(horizontal = 13.dp, vertical = 9.dp)) {
                 if (voiceNote != null) {
                     val isCurrent = voicePlaybackState.activeMessageId == message.id
                     val isPlaying = isCurrent && voicePlaybackState.isPlaying
@@ -726,7 +840,7 @@ private fun MessagingMessageBubble(
                             Spacer(modifier = Modifier.height(4.dp))
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
+                                horizontalArrangement = Arrangement.Start,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 val displayedTime = if (isCurrent && (isPlaying || voicePlaybackState.positionMs > 0L)) {
@@ -738,14 +852,8 @@ private fun MessagingMessageBubble(
                                     text = displayedTime,
                                     fontSize = 11.sp,
                                     fontFamily = FontFamily.Monospace,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = contentColor
-                                )
-                                Text(
-                                    text = "MLS E2EE",
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = contentColor.copy(alpha = 0.7f)
+                                    fontWeight = FontWeight.Medium,
+                                    color = contentColor.copy(alpha = 0.8f)
                                 )
                             }
                         }
@@ -771,25 +879,6 @@ private fun MessagingMessageBubble(
                                 .clip(RoundedCornerShape(10.dp))
                                 .clickable { onOpenMediaAttachment(mediaAttachment) }
                         )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "📷 $sizeLabel",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = contentColor
-                            )
-                            Text(
-                                text = "MLS E2EE",
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = contentColor.copy(alpha = 0.7f)
-                            )
-                        }
                     } else {
                         Surface(
                             modifier = Modifier
@@ -820,7 +909,7 @@ private fun MessagingMessageBubble(
                                         overflow = TextOverflow.Ellipsis
                                     )
                                     Text(
-                                        text = "${mediaAttachment.mimeType} • $sizeLabel • MLS E2EE",
+                                        text = "${mediaAttachment.mimeType} • $sizeLabel",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = contentColor.copy(alpha = 0.75f),
                                         maxLines = 1,
@@ -846,55 +935,47 @@ private fun MessagingMessageBubble(
                     )
                 }
 
-                if (isOwnMessage && status != null) {
-                    val isPublished = message.deliveryStatus == DecodedMessage.MessageDeliveryStatus.PUBLISHED
-                    val statusTint = when {
-                        isFailed -> MaterialTheme.colorScheme.error
-                        isSeen -> MaterialTheme.colorScheme.primary
-                        else -> contentColor.copy(alpha = 0.75f)
-                    }
-                    Spacer(Modifier.height(4.dp))
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Text(
-                            text = timeLabel,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = contentColor.copy(alpha = 0.75f),
-                            fontSize = 10.sp
-                        )
-                        if (isPublished && isSeen) {
-                            Icon(
-                                painter = painterResource(id = R.drawable.ic_check_double),
-                                contentDescription = "Διαβάστηκε",
-                                modifier = Modifier.size(14.dp),
-                                tint = statusTint
-                            )
-                        } else if (isPublished) {
-                            Icon(
-                                imageVector = Icons.Default.Check,
-                                contentDescription = "Στάλθηκε",
-                                modifier = Modifier.size(13.dp),
-                                tint = statusTint
-                            )
-                        }
-                        Text(
-                            text = status,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = if (isSeen) FontWeight.SemiBold else FontWeight.Normal,
-                            color = statusTint,
-                            fontSize = 10.sp
-                        )
-                    }
-                } else {
-                    Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier.align(Alignment.End),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
                     Text(
                         text = timeLabel,
                         style = MaterialTheme.typography.labelSmall,
-                        color = contentColor.copy(alpha = 0.75f),
-                        fontSize = 10.sp
+                        color = contentColor.copy(alpha = 0.7f)
                     )
+                    if (isOwnMessage) {
+                        when (message.deliveryStatus) {
+                            DecodedMessage.MessageDeliveryStatus.FAILED -> Text(
+                                text = "Απέτυχε",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error
+                            )
+                            DecodedMessage.MessageDeliveryStatus.UNPUBLISHED -> Text(
+                                text = "…",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = contentColor.copy(alpha = 0.65f)
+                            )
+                            DecodedMessage.MessageDeliveryStatus.PUBLISHED -> if (isSeen) {
+                                Icon(
+                                    painter = painterResource(id = R.drawable.ic_check_double),
+                                    contentDescription = "Διαβάστηκε",
+                                    modifier = Modifier.size(14.dp),
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = "Στάλθηκε",
+                                    modifier = Modifier.size(13.dp),
+                                    tint = contentColor.copy(alpha = 0.7f)
+                                )
+                            }
+                            DecodedMessage.MessageDeliveryStatus.ALL -> {}
+                        }
+                    }
                 }
             }
         }

@@ -92,6 +92,12 @@ data class IncomingCallSignal(
     val signal: CallSignal
 )
 
+data class ConversationPreview(
+    val text: String,
+    val timestampMs: Long,
+    val isFromMe: Boolean
+)
+
 /**
  * Production reactive repository orchestrating MLS 1-on-1 and Group conversations, bridging [XmtpEngine]
  * to presentation layers using Unidirectional Data Flow (UDF), structured concurrency, and backpressure safety.
@@ -203,6 +209,9 @@ class ConversationRepository(
     private val _localReadTimestamps = MutableStateFlow<Map<String, Long>>(emptyMap())
     val localReadTimestamps: StateFlow<Map<String, Long>> = _localReadTimestamps.asStateFlow()
 
+    private val _conversationPreviews = MutableStateFlow<Map<String, ConversationPreview>>(emptyMap())
+    val conversationPreviews: StateFlow<Map<String, ConversationPreview>> = _conversationPreviews.asStateFlow()
+
     @Volatile
     private var hasSeededMessageBaseline: Boolean = seenMessageStorage.isBaselineEstablished()
 
@@ -229,6 +238,7 @@ class ConversationRepository(
                                 // Extraemos acuses de lectura y apodos antes de descartar tramas no textuales.
                                 processControlMessages(msg.conversationId, listOf(msg), emitLiveCallSignals = true)
                                 if (!msg.isDisplayableUserMessage()) return@collect
+                                updatePreviewFromMessage(msg, client.inboxId)
                                 if (recordSeenId(msg.id)) {
                                     _incomingMessages.tryEmit(msg)
                                 }
@@ -333,6 +343,7 @@ class ConversationRepository(
         val currentList = initialCached.toMutableList()
         if (currentList.isNotEmpty()) {
             send(currentList.toList())
+            launch(ioDispatcher) { refreshConversationPreviews(currentList.toList(), client.inboxId) }
         }
 
         // 2. Initial sync with network ledger discovering both ALLOWED and UNKNOWN incoming invites
@@ -341,6 +352,9 @@ class ConversationRepository(
             currentList.clear()
             currentList.addAll(syncedList)
             send(currentList.toList())
+            launch(ioDispatcher) { refreshConversationPreviews(currentList.toList(), client.inboxId) }
+        } else if (syncedList.isNotEmpty()) {
+            launch(ioDispatcher) { refreshConversationPreviews(syncedList, client.inboxId) }
         }
 
         // Real-time network stream with resilient reconnection backoff
@@ -704,6 +718,7 @@ class ConversationRepository(
         seenMessageStorage.clear()
         _peerReadTimestamps.value = emptyMap()
         _localReadTimestamps.value = emptyMap()
+        _conversationPreviews.value = emptyMap()
     }
 
     // Recargamos la linea base desde almacenamiento tras restaurar mensajes vistos en una migracion.
@@ -711,6 +726,64 @@ class ConversationRepository(
         seenMessageIds.clear()
         seenMessageIds.addAll(seenMessageStorage.loadSeenIds())
         hasSeededMessageBaseline = seenMessageStorage.isBaselineEstablished()
+    }
+
+    private fun formatMessagePreviewText(msg: DecodedMessage): String {
+        if (msg.isVoiceNoteMessage()) return "Φωνητικό μήνυμα"
+        msg.extractMediaAttachment()?.let { att ->
+            return if (MediaAttachmentCodec.isImageMimeType(att.mimeType)) {
+                "Φωτογραφία"
+            } else {
+                "Αρχείο: ${att.fileName}"
+            }
+        }
+        return msg.body.trim().replace(Regex("\\s+"), " ")
+    }
+
+    private suspend fun refreshConversationPreviews(conversations: List<Conversation>, localInboxId: String) {
+        if (conversations.isEmpty()) return
+        val nextMap = LinkedHashMap<String, ConversationPreview>(_conversationPreviews.value)
+        for (conv in conversations) {
+            val latest = runCatching {
+                conv.messages(limit = 15)
+                    .filter { it.isDisplayableUserMessage() }
+                    .maxByOrNull { it.resolvedTimestampMs() }
+            }.getOrNull() ?: continue
+            val ts = latest.resolvedTimestampMs()
+            val text = formatMessagePreviewText(latest)
+            if (text.isNotBlank()) {
+                val isFromMe = localInboxId.isNotBlank() && latest.senderInboxId.equals(localInboxId, ignoreCase = true)
+                val prev = nextMap[conv.id]
+                if (prev == null || ts >= prev.timestampMs) {
+                    nextMap[conv.id] = ConversationPreview(text = text, timestampMs = ts, isFromMe = isFromMe)
+                }
+            }
+        }
+        _conversationPreviews.value = nextMap
+    }
+
+    private fun updatePreviewFromMessage(msg: DecodedMessage, localInboxId: String) {
+        val convId = msg.conversationId
+        if (convId.isBlank()) return
+        val text = formatMessagePreviewText(msg)
+        if (text.isBlank()) return
+        val ts = msg.resolvedTimestampMs().takeIf { it > 0L } ?: System.currentTimeMillis()
+        val isFromMe = localInboxId.isNotBlank() && msg.senderInboxId.equals(localInboxId, ignoreCase = true)
+        _conversationPreviews.update { current ->
+            val existing = current[convId]
+            if (existing != null && ts < existing.timestampMs) {
+                current
+            } else {
+                current + (convId to ConversationPreview(text = text, timestampMs = ts, isFromMe = isFromMe))
+            }
+        }
+    }
+
+    private fun updateOwnPreview(conversationId: String, text: String, timestampMs: Long) {
+        if (conversationId.isBlank() || text.isBlank()) return
+        _conversationPreviews.update { current ->
+            current + (conversationId to ConversationPreview(text = text, timestampMs = timestampMs, isFromMe = true))
+        }
     }
 
     suspend fun syncConversation(conversation: Conversation): Result<Unit> = withContext(ioDispatcher) {
@@ -911,6 +984,7 @@ class ConversationRepository(
             }
 
             // Trigger flow update to transition message to PUBLISHED state with server timestamp
+            updateOwnPreview(conversation.id, text.trim(), System.currentTimeMillis())
             messageRefreshTrigger.emit(conversation.id)
             Log.i(TAG, "TX COMMITTED [conversation=REDACTED]")
             msgId
@@ -968,6 +1042,7 @@ class ConversationRepository(
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
                 }
+                updateOwnPreview(conversation.id, "Φωνητικό μήνυμα", System.currentTimeMillis())
                 messageRefreshTrigger.emit(conversation.id)
                 msgId
             }
@@ -986,6 +1061,12 @@ class ConversationRepository(
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
                 }
+                val previewLabel = if (MediaAttachmentCodec.isImageMimeType(attachment.mimeType)) {
+                    "Φωτογραφία"
+                } else {
+                    "Αρχείο: ${attachment.fileName}"
+                }
+                updateOwnPreview(conversation.id, previewLabel, System.currentTimeMillis())
                 messageRefreshTrigger.emit(conversation.id)
                 msgId
             }

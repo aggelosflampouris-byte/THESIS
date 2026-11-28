@@ -22,9 +22,20 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -36,6 +47,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.unit.dp
 import com.example.thesis.ui.ChatViewModel
 import com.example.thesis.ui.components.MessagingTopBar
 import com.example.thesis.ui.components.QrDownloadFullDialog
@@ -48,11 +61,12 @@ import com.example.thesis.security.ScreenSecurityManager
 import com.example.thesis.security.ScreenSecurityPolicy
 import com.example.thesis.ui.dialogs.AppUpdateDialog
 import com.example.thesis.ui.dialogs.EditContactNicknameDialog
+import com.example.thesis.ui.dialogs.EditMyNicknameDialog
 import com.example.thesis.ui.dialogs.GDPRShredConfirmationDialog
 import org.xmtp.android.library.Conversation
-import com.example.thesis.ui.dialogs.IdentityDetailsDialog
 import com.example.thesis.ui.dialogs.MLSProtocolInspectorDialog
 import com.example.thesis.ui.dialogs.MediaAttachmentViewerDialog
+import com.example.thesis.ui.dialogs.MyIdentityQrDialog
 import com.example.thesis.ui.dialogs.NewConversationDialog
 import com.example.thesis.media.MediaAttachmentProcessor
 import com.example.thesis.xmtp.MediaAttachment
@@ -65,6 +79,7 @@ import com.example.thesis.ui.screens.MessagingChatScreen
 import com.example.thesis.ui.screens.MessagingConnectionError
 import com.example.thesis.ui.screens.MessagingLoadingScreen
 import com.example.thesis.ui.screens.MessagingStartScreen
+import com.example.thesis.ui.screens.SettingsScreen
 import com.example.thesis.ui.theme.ThesisTheme
 import com.example.thesis.call.CallNotificationManager
 import com.example.thesis.call.CallUiState
@@ -167,6 +182,11 @@ class MainActivity : FragmentActivity() {
     }
 }
 
+private enum class HomeTab {
+    CHATS,
+    SETTINGS
+}
+
 @Composable
 fun ThesisMessagingApp(viewModel: ChatViewModel) {
     val engineState by viewModel.engineState.collectAsState()
@@ -185,9 +205,13 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     var isCallOverlayMinimized by rememberSaveable(callState.callId) { mutableStateOf(false) }
 
     val updateStatus by viewModel.updateStatus.collectAsState()
+    var selectedHomeTab by rememberSaveable { mutableStateOf(HomeTab.CHATS) }
+    var isSearchOpen by rememberSaveable { mutableStateOf(false) }
+    var searchQuery by rememberSaveable { mutableStateOf("") }
     var showUpdateDialog by rememberSaveable { mutableStateOf(false) }
     var showNewConversationDialog by rememberSaveable { mutableStateOf(false) }
-    var showIdentityDialog by rememberSaveable { mutableStateOf(false) }
+    var showMyIdentityQrDialog by rememberSaveable { mutableStateOf(false) }
+    var showEditMyNicknameDialog by rememberSaveable { mutableStateOf(false) }
     var showShredConfirmationDialog by rememberSaveable { mutableStateOf(false) }
     var showLogsScreen by rememberSaveable { mutableStateOf(false) }
     var showProtocolInspectorDialog by rememberSaveable { mutableStateOf(false) }
@@ -200,6 +224,17 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    var hasCameraPermission by remember { mutableStateOf(viewModel.hasCameraPermission()) }
+    val qrCameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasCameraPermission = granted || viewModel.hasCameraPermission()
+        if (!hasCameraPermission) {
+            scope.launch {
+                snackbarHostState.showSnackbar("Απαιτείται άδεια κάμερας για σάρωση QR.")
+            }
+        }
+    }
 
     LaunchedEffect(updateStatus) {
         when (val status = updateStatus) {
@@ -276,7 +311,6 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
             DeviceAuthHelper.authenticateForSensitiveExport(
                 activity = hostActivity,
                 onAuthenticated = {
-                    showIdentityDialog = false
                     viewModel.openSenderTransfer()
                 },
                 onRequiresManualFallback = {
@@ -390,8 +424,12 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     }
 
     LaunchedEffect(selectedConversation) {
-        if (selectedConversation != null && showLogsScreen) {
-            showLogsScreen = false
+        if (selectedConversation != null) {
+            if (showLogsScreen) showLogsScreen = false
+            if (isSearchOpen) {
+                isSearchOpen = false
+                searchQuery = ""
+            }
         }
     }
 
@@ -419,13 +457,30 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
         viewModel.selectConversation(null)
     }
 
-    BackHandler(enabled = !showLogsScreen && selectedConversation == null && callState is CallUiState.Idle) {
+    BackHandler(enabled = !showLogsScreen && selectedConversation == null && isSearchOpen) {
+        searchQuery = ""
+        isSearchOpen = false
+    }
+
+    BackHandler(enabled = !showLogsScreen && selectedConversation == null && !isSearchOpen && selectedHomeTab != HomeTab.CHATS) {
+        selectedHomeTab = HomeTab.CHATS
+    }
+
+    BackHandler(
+        enabled = !showLogsScreen &&
+            selectedConversation == null &&
+            !isSearchOpen &&
+            selectedHomeTab == HomeTab.CHATS &&
+            callState is CallUiState.Idle
+    ) {
         // Finalizamos la actividad al salir con Atras para que la siguiente apertura cree una nueva sesion de registros.
         (context as? FragmentActivity)?.finish()
     }
 
     if (showNewConversationDialog) {
         NewConversationDialog(
+            canUseCamera = hasCameraPermission,
+            onRequestCameraPermission = { qrCameraPermissionLauncher.launch(Manifest.permission.CAMERA) },
             onDismiss = { showNewConversationDialog = false },
             onStartConversation = { target, contactNick ->
                 showNewConversationDialog = false
@@ -455,37 +510,34 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
         )
     }
 
-    if (showIdentityDialog) {
-        IdentityDetailsDialog(
+    if (showMyIdentityQrDialog) {
+        MyIdentityQrDialog(
             address = walletAddress,
             inboxId = inboxId,
-            myNickname = nicknameSnapshot.myNickname,
-            currentVersion = viewModel.getCurrentVersionName(),
-            isCheckingUpdate = updateStatus is UpdateStatus.Checking,
-            notificationsEnabled = viewModel.hasNotificationPermission(),
-            isServiceNotificationVisible = viewModel.isBackgroundServiceChannelVisible(),
-            onSaveMyNickname = { nick -> viewModel.updateMyNickname(nick) },
-            onCheckForUpdates = { viewModel.checkForUpdates(manual = true) },
-            onOpenNotificationSettings = { viewModel.openNotificationSettings() },
-            onOpenServiceNotificationSettings = { viewModel.openBackgroundServiceChannelSettings() },
-            onTransferToNewDevice = requestDeviceTransferSend,
-            onReceiveFromOldDevice = {
-                showIdentityDialog = false
-                viewModel.startReceiverTransfer()
-            },
             onCopyAddress = {
                 walletAddress?.let { addr ->
                     copyToClipboard(context, "Ethereum Address", addr)
-                    scope.launch { snackbarHostState.showSnackbar("Η διεύθυνση πορτοφολιού αντιγράφηκε στο πρόχειρο") }
+                    scope.launch { snackbarHostState.showSnackbar("Η διεύθυνση πορτοφολιού αντιγράφηκε") }
                 }
             },
             onCopyInboxId = {
                 inboxId?.let { id ->
                     copyToClipboard(context, "XMTP Inbox ID", id)
-                    scope.launch { snackbarHostState.showSnackbar("Το XMTP Inbox ID αντιγράφηκε στο πρόχειρο") }
+                    scope.launch { snackbarHostState.showSnackbar("Το Inbox ID αντιγράφηκε") }
                 }
             },
-            onDismiss = { showIdentityDialog = false }
+            onDismiss = { showMyIdentityQrDialog = false }
+        )
+    }
+
+    if (showEditMyNicknameDialog) {
+        EditMyNicknameDialog(
+            currentNickname = nicknameSnapshot.myNickname,
+            onSave = { nick ->
+                showEditMyNicknameDialog = false
+                viewModel.updateMyNickname(nick)
+            },
+            onDismiss = { showEditMyNicknameDialog = false }
         )
     }
 
@@ -528,7 +580,6 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                 TextButton(
                     onClick = {
                         showExportNoLockConfirmDialog = false
-                        showIdentityDialog = false
                         viewModel.openSenderTransfer()
                     }
                 ) {
@@ -597,24 +648,30 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                 onSharePdfReport = onSharePdfReport
             )
         } else {
+            val isHomeReady = engineState is XmtpEngineState.Ready && selectedConversation == null
             Scaffold(
                 snackbarHost = { SnackbarHost(snackbarHostState) },
                 contentWindowInsets = WindowInsets.safeDrawing,
                 topBar = {
                     MessagingTopBar(
                         selectedConversation = selectedConversation,
-                        walletAddress = walletAddress,
                         nicknameSnapshot = nicknameSnapshot,
                         engineState = engineState,
+                        isSettingsTab = isHomeReady && selectedHomeTab == HomeTab.SETTINGS,
+                        isSearchOpen = isHomeReady && selectedHomeTab == HomeTab.CHATS && isSearchOpen,
+                        searchQuery = searchQuery,
                         isSyncing = isSyncing,
                         isShredding = isShredding,
                         isCallActive = callState !is CallUiState.Idle,
+                        onSearchOpenChange = { isSearchOpen = it },
+                        onSearchQueryChange = { searchQuery = it },
                         onBack = { viewModel.selectConversation(null) },
                         onSync = { viewModel.syncConversations() },
-                        onOpenIdentity = { showIdentityDialog = true },
-                        onOpenShred = { showShredConfirmationDialog = true },
                         onOpenLogs = { showLogsScreen = true },
                         onOpenProtocolInspector = { showProtocolInspectorDialog = true },
+                        onEditContactNickname = {
+                            selectedConversation?.let { nicknameEditTarget = it }
+                        },
                         onStartVoiceCall = {
                             val targetConv = selectedConversation
                             if (targetConv != null) {
@@ -632,6 +689,62 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                             }
                         }
                     )
+                },
+                bottomBar = {
+                    if (isHomeReady) {
+                        Column {
+                            HorizontalDivider(
+                                thickness = 0.5.dp,
+                                color = MaterialTheme.colorScheme.outlineVariant
+                            )
+                            NavigationBar(
+                                containerColor = MaterialTheme.colorScheme.surface,
+                                tonalElevation = 0.dp
+                            ) {
+                                NavigationBarItem(
+                                    selected = selectedHomeTab == HomeTab.CHATS,
+                                    onClick = { selectedHomeTab = HomeTab.CHATS },
+                                    icon = {
+                                        Icon(
+                                            painter = painterResource(id = R.drawable.ic_chat_bubble),
+                                            contentDescription = null,
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                    },
+                                    label = { Text("Συνομιλίες") }
+                                )
+                                NavigationBarItem(
+                                    selected = selectedHomeTab == HomeTab.SETTINGS,
+                                    onClick = {
+                                        isSearchOpen = false
+                                        searchQuery = ""
+                                        selectedHomeTab = HomeTab.SETTINGS
+                                    },
+                                    icon = {
+                                        Icon(
+                                            imageVector = Icons.Default.Settings,
+                                            contentDescription = null
+                                        )
+                                    },
+                                    label = { Text("Ρυθμίσεις") }
+                                )
+                            }
+                        }
+                    }
+                },
+                floatingActionButton = {
+                    if (isHomeReady && selectedHomeTab == HomeTab.CHATS) {
+                        FloatingActionButton(
+                            onClick = { showNewConversationDialog = true },
+                            containerColor = MaterialTheme.colorScheme.primary,
+                            contentColor = MaterialTheme.colorScheme.onPrimary
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Add,
+                                contentDescription = "Νέα συνομιλία"
+                            )
+                        }
+                    }
                 }
             ) { padding ->
                 // Consumimos los insets del Scaffold para que imePadding() en el chat no duplique el margen inferior.
@@ -740,21 +853,36 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                                         runWithRecordAudioPermission {
                                             viewModel.startVoiceRecording()
                                         }
+                                    },
+                                    onCopyMessageText = { text ->
+                                        copyToClipboard(context, "Message", text, sensitive = false)
+                                        scope.launch {
+                                            snackbarHostState.showSnackbar("Το μήνυμα αντιγράφηκε")
+                                        }
                                     }
+                                )
+                            } else if (selectedHomeTab == HomeTab.SETTINGS) {
+                                SettingsScreenHost(
+                                    viewModel = viewModel,
+                                    walletAddress = walletAddress,
+                                    inboxId = inboxId,
+                                    myNickname = nicknameSnapshot.myNickname,
+                                    updateStatus = updateStatus,
+                                    isShredding = isShredding,
+                                    onEditMyNickname = { showEditMyNicknameDialog = true },
+                                    onOpenIdentityQr = { showMyIdentityQrDialog = true },
+                                    onTransferToNewDevice = requestDeviceTransferSend,
+                                    onReceiveFromOldDevice = { viewModel.startReceiverTransfer() },
+                                    onOpenQrDownload = { showQrDownloadDialog = true },
+                                    onOpenLogs = { showLogsScreen = true },
+                                    onOpenShred = { showShredConfirmationDialog = true }
                                 )
                             } else {
                                 InboxDashboardScreenHost(
                                     viewModel = viewModel,
-                                    engineState = engineState,
                                     nicknameSnapshot = nicknameSnapshot,
-                                    isShredding = isShredding,
-                                    updateStatus = updateStatus,
-                                    onOpenLogs = { showLogsScreen = true },
-                                    onNewConversation = { showNewConversationDialog = true },
-                                    onEditContactNickname = { conv -> nicknameEditTarget = conv },
-                                    onCopyDownloadUrl = onCopyDownloadUrl,
-                                    onOpenDownloadUrl = onOpenDownloadUrl,
-                                    onExpandQr = { showQrDownloadDialog = true }
+                                    searchQuery = searchQuery,
+                                    onEditContactNickname = { conv -> nicknameEditTarget = conv }
                                 )
                             }
                         }
@@ -856,7 +984,8 @@ private fun MessagingChatScreenHost(
     onDraftChange: (String) -> Unit,
     onSendMessage: (String) -> Unit,
     onStartVoiceCall: (Conversation.Dm) -> Unit,
-    onStartVoiceRecording: () -> Unit
+    onStartVoiceRecording: () -> Unit,
+    onCopyMessageText: (String) -> Unit
 ) {
     // Limitamos mensajes, estado de audio y adjuntos multimedia a esta vista para evitar recomposiciones en la raiz.
     val messages by viewModel.messages.collectAsState()
@@ -1004,6 +1133,7 @@ private fun MessagingChatScreenHost(
         },
         onPickDocument = { documentPickerLauncher.launch(arrayOf("*/*")) },
         onOpenMediaAttachment = { attachment -> viewingAttachment = attachment },
+        onCopyMessageText = onCopyMessageText,
         onDraftChange = onDraftChange,
         onSendMessage = onSendMessage,
         onRetryMessage = { body -> viewModel.sendMessage(body) }
@@ -1034,41 +1164,67 @@ private fun MessagingChatScreenHost(
 @Composable
 private fun InboxDashboardScreenHost(
     viewModel: ChatViewModel,
-    engineState: XmtpEngineState,
     nicknameSnapshot: NicknameSnapshot,
-    isShredding: Boolean,
-    updateStatus: UpdateStatus,
-    onOpenLogs: () -> Unit,
-    onNewConversation: () -> Unit,
-    onEditContactNickname: (Conversation) -> Unit,
-    onCopyDownloadUrl: () -> Unit,
-    onOpenDownloadUrl: () -> Unit,
-    onExpandQr: () -> Unit
+    searchQuery: String,
+    onEditContactNickname: (Conversation) -> Unit
 ) {
-    // Recolectamos la lista de conversaciones y contador de registros solo cuando el panel es visible.
+    // Recolectamos conversaciones, avances de mensajes y no leidos solo cuando la pestana Chats es visible.
     val conversations by viewModel.conversations.collectAsState()
+    val previews by viewModel.conversationPreviews.collectAsState()
     val unreadCounts by viewModel.unreadCounts.collectAsState()
-    val isCreatingConversation by viewModel.isCreatingConversation.collectAsState()
-    val actionLogs by viewModel.actionLogs.collectAsState()
 
     InboxDashboardScreen(
         conversations = conversations,
+        previews = previews,
         unreadCounts = unreadCounts,
         nicknameSnapshot = nicknameSnapshot,
-        engineState = engineState,
-        isCreatingConversation = isCreatingConversation,
-        isShredding = isShredding,
-        actionLogs = actionLogs,
+        searchQuery = searchQuery,
+        onSelectConversation = { conv -> viewModel.selectConversation(conv) },
+        onEditContactNickname = onEditContactNickname
+    )
+}
+
+@Composable
+private fun SettingsScreenHost(
+    viewModel: ChatViewModel,
+    walletAddress: String?,
+    inboxId: String?,
+    myNickname: String?,
+    updateStatus: UpdateStatus,
+    isShredding: Boolean,
+    onEditMyNickname: () -> Unit,
+    onOpenIdentityQr: () -> Unit,
+    onTransferToNewDevice: () -> Unit,
+    onReceiveFromOldDevice: () -> Unit,
+    onOpenQrDownload: () -> Unit,
+    onOpenLogs: () -> Unit,
+    onOpenShred: () -> Unit
+) {
+    val actionLogs by viewModel.actionLogs.collectAsState()
+    val isCreatingConversation by viewModel.isCreatingConversation.collectAsState()
+
+    SettingsScreen(
+        myNickname = myNickname,
+        walletAddress = walletAddress,
+        inboxId = inboxId,
         currentVersion = viewModel.getCurrentVersionName(),
         updateStatus = updateStatus,
-        onOpenLogs = onOpenLogs,
-        onNewConversation = onNewConversation,
+        notificationsEnabled = viewModel.hasNotificationPermission(),
+        isServiceNotificationVisible = viewModel.isBackgroundServiceChannelVisible(),
+        logsCount = actionLogs.size,
+        isCreatingLoopback = isCreatingConversation,
+        isShredding = isShredding,
+        onEditMyNickname = onEditMyNickname,
+        onOpenIdentityQr = onOpenIdentityQr,
+        onOpenNotificationSettings = { viewModel.openNotificationSettings() },
+        onOpenServiceNotificationSettings = { viewModel.openBackgroundServiceChannelSettings() },
+        onTransferToNewDevice = onTransferToNewDevice,
+        onReceiveFromOldDevice = onReceiveFromOldDevice,
+        onCheckForUpdates = { viewModel.checkForUpdates(manual = true) },
+        onOpenQrDownload = onOpenQrDownload,
         onStartLoopback = { viewModel.startSelfConversation() },
-        onSelectConversation = { conv -> viewModel.selectConversation(conv) },
-        onEditContactNickname = onEditContactNickname,
-        onCopyDownloadUrl = onCopyDownloadUrl,
-        onOpenDownloadUrl = onOpenDownloadUrl,
-        onExpandQr = onExpandQr
+        onOpenLogs = onOpenLogs,
+        onOpenShred = onOpenShred
     )
 }
 
