@@ -125,7 +125,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     val updateStatus: StateFlow<UpdateStatus> = appUpdateManager.updateStatus
     val unreadCounts: StateFlow<Map<String, Int>> = sessionContainer.unreadCounts
     val nicknameSnapshot: StateFlow<NicknameSnapshot> = sessionContainer.nicknameSnapshot
-    val mediaViewCounts: StateFlow<Map<String, Int>> = sessionContainer.mediaViewLimitStore.openedCounts
     val peerReadTimestamps: StateFlow<Map<String, Long>> = repository.peerReadTimestamps
     val callEventsByConversation: StateFlow<Map<String, List<ChatCallEvent>>> = repository.callEventsByConversation
     val callState: StateFlow<CallUiState> = sessionContainer.callSessionManager.callState
@@ -1617,23 +1616,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    // Consumimos y persistimos de forma sincrona una visualizacion de medio temporal antes de abrirlo.
-    fun consumeTemporaryMediaView(messageId: String, maxViews: Int): Int? {
-        val viewNumber = sessionContainer.mediaViewLimitStore.recordView(messageId, maxViews) ?: return null
-        logAction(
-            tag = "MEDIA",
-            message = "Temporary media opened ($viewNumber/$maxViews) [msg=${messageId.take(8)}]"
-        )
-        return viewNumber
-    }
-
     // Comprimimos/validamos el archivo seleccionado y lo enviamos cifrado por MLS sin servidores intermedios.
-    fun sendMediaFromUri(
-        uri: Uri,
-        caption: String = "",
-        tempCaptureFile: File? = null,
-        maxViews: Int = 0
-    ) {
+    fun sendMediaFromUri(uri: Uri, caption: String = "", tempCaptureFile: File? = null) {
         if (_isShredding.value || _isBenchmarking.value || _isUploadingMedia.value) {
             tempCaptureFile?.delete()
             return
@@ -1648,12 +1632,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val prepared = try {
                     withContext(Dispatchers.IO) {
-                        MediaAttachmentProcessor.prepareFromUri(
-                            context = appContext,
-                            uri = uri,
-                            caption = caption,
-                            maxViews = maxViews
-                        )
+                        MediaAttachmentProcessor.prepareFromUri(appContext, uri, caption)
                     }
                 } finally {
                     tempCaptureFile?.delete()
@@ -1667,10 +1646,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
                 sendMutex.withLock {
                     if (_isShredding.value) return@withLock
-                    val tempSuffix = if (attachment.isTemporary) ", TempViews=${attachment.maxViews}" else ""
                     logAction(
                         tag = "MEDIA",
-                        message = "Dispatching MLS E2EE media (${attachment.fileName}, ${attachment.mimeType}, ${MediaAttachmentCodec.formatByteSize(attachment.dataBytes.size)}$tempSuffix)..."
+                        message = "Dispatching MLS E2EE media (${attachment.fileName}, ${attachment.mimeType}, ${MediaAttachmentCodec.formatByteSize(attachment.dataBytes.size)})..."
                     )
                     ThesisTelemetry.measureSuspendOperation("5c. MLS E2EE Media Dispatch") {
                         repository.sendMediaAttachment(conv, attachment)
@@ -1683,10 +1661,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             topic = conv.topic,
                             fallbackSentAtNs = System.currentTimeMillis() * 1_000_000L
                         )
-                        val committedTempTag = if (attachment.isTemporary) " | TempViews=${attachment.maxViews}" else ""
                         logAction(
                             tag = "MEDIA",
-                            message = "TX MEDIA COMMITTED | MsgID: $msgId | Name: ${attachment.fileName} | Mime: ${attachment.mimeType} | Bytes: ${attachment.dataBytes.size} | SHA256: ${attachment.resolvedSha256Hex.take(16)}$committedTempTag"
+                            message = "TX MEDIA COMMITTED | MsgID: $msgId | Name: ${attachment.fileName} | Mime: ${attachment.mimeType} | Bytes: ${attachment.dataBytes.size} | SHA256: ${attachment.resolvedSha256Hex.take(16)}"
                         )
                     }
                     .onFailure { err ->

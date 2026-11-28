@@ -55,34 +55,19 @@ internal object MediaAttachmentProcessor {
         }
     }
 
-    fun isImageUri(context: Context, uri: Uri): Boolean {
-        return runCatching {
-            val (rawDisplayName, _) = queryDisplayMetadata(context, uri)
-            val resolvedMime = resolveMimeType(context, uri, rawDisplayName)
-            MediaAttachmentCodec.isImageMimeType(resolvedMime)
-        }.getOrDefault(false)
-    }
-
-    fun prepareFromUri(
-        context: Context,
-        uri: Uri,
-        caption: String = "",
-        maxViews: Int = MediaViewLimitPolicy.UNLIMITED_VIEWS
-    ): Result<MediaAttachment> {
+    fun prepareFromUri(context: Context, uri: Uri, caption: String = ""): Result<MediaAttachment> {
         return runCatching {
             val resolver = context.contentResolver
             val (rawDisplayName, reportedSize) = queryDisplayMetadata(context, uri)
             val resolvedMime = resolveMimeType(context, uri, rawDisplayName)
             val cleanCaption = caption.trim().take(MediaAttachmentCodec.MAX_CAPTION_CHARS)
-            val safeMaxViews = MediaViewLimitPolicy.sanitizeMaxViews(maxViews)
 
             if (MediaAttachmentCodec.isImageMimeType(resolvedMime)) {
                 prepareCompressedImage(
                     context = context,
                     uri = uri,
                     rawDisplayName = rawDisplayName,
-                    caption = cleanCaption,
-                    maxViews = safeMaxViews
+                    caption = cleanCaption
                 )
             } else {
                 if (reportedSize > MediaAttachmentCodec.MAX_MEDIA_BYTES.toLong()) {
@@ -97,7 +82,6 @@ internal object MediaAttachmentProcessor {
                     mimeType = resolvedMime.ifBlank { "application/octet-stream" },
                     widthPx = 0,
                     heightPx = 0,
-                    maxViews = safeMaxViews,
                     caption = cleanCaption,
                     sha256Hex = CryptoUtils.sha256Hex(bytes),
                     dataBytes = bytes
@@ -158,8 +142,7 @@ internal object MediaAttachmentProcessor {
         context: Context,
         uri: Uri,
         rawDisplayName: String?,
-        caption: String,
-        maxViews: Int = MediaViewLimitPolicy.UNLIMITED_VIEWS
+        caption: String
     ): MediaAttachment {
         val resolver = context.contentResolver
         val orientation = runCatching {
@@ -225,7 +208,6 @@ internal object MediaAttachmentProcessor {
                 mimeType = "image/jpeg",
                 widthPx = workingBitmap.width,
                 heightPx = workingBitmap.height,
-                maxViews = maxViews,
                 caption = caption,
                 sha256Hex = CryptoUtils.sha256Hex(encodedBytes),
                 dataBytes = encodedBytes

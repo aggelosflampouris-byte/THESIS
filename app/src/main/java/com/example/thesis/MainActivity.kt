@@ -53,10 +53,8 @@ import org.xmtp.android.library.Conversation
 import com.example.thesis.ui.dialogs.IdentityDetailsDialog
 import com.example.thesis.ui.dialogs.MLSProtocolInspectorDialog
 import com.example.thesis.ui.dialogs.MediaAttachmentViewerDialog
-import com.example.thesis.ui.dialogs.MediaSendModeDialog
 import com.example.thesis.ui.dialogs.NewConversationDialog
 import com.example.thesis.media.MediaAttachmentProcessor
-import com.example.thesis.media.MediaViewLimitPolicy
 import com.example.thesis.xmtp.MediaAttachment
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -844,16 +842,6 @@ private fun LogsTelemetryScreenHost(
     )
 }
 
-private data class ViewingMediaState(
-    val attachment: MediaAttachment,
-    val viewNumber: Int? = null
-)
-
-private data class PendingImageSend(
-    val uri: Uri,
-    val tempCaptureFile: File? = null
-)
-
 @Composable
 private fun MessagingChatScreenHost(
     viewModel: ChatViewModel,
@@ -877,12 +865,10 @@ private fun MessagingChatScreenHost(
     val voiceRecordingState by viewModel.voiceRecordingState.collectAsState()
     val voicePlaybackState by viewModel.voicePlaybackState.collectAsState()
     val isUploadingMedia by viewModel.isUploadingMedia.collectAsState()
-    val mediaViewCounts by viewModel.mediaViewCounts.collectAsState()
 
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var viewingMedia by remember { mutableStateOf<ViewingMediaState?>(null) }
-    var pendingImageSend by remember { mutableStateOf<PendingImageSend?>(null) }
+    var viewingAttachment by remember { mutableStateOf<MediaAttachment?>(null) }
     var pendingSaveAttachment by remember { mutableStateOf<MediaAttachment?>(null) }
     // Conservamos la ruta temporal entre recreaciones de Activity mientras la app de camara esta abierta.
     var pendingCameraCapturePath by rememberSaveable { mutableStateOf<String?>(null) }
@@ -891,7 +877,9 @@ private fun MessagingChatScreenHost(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri != null) {
-            pendingImageSend = PendingImageSend(uri = uri)
+            val caption = draft.trim()
+            if (caption.isNotEmpty()) onDraftChange("")
+            viewModel.sendMediaFromUri(uri, caption)
         }
     }
 
@@ -899,17 +887,9 @@ private fun MessagingChatScreenHost(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null) {
-            if (MediaAttachmentProcessor.isImageUri(context, uri)) {
-                pendingImageSend = PendingImageSend(uri = uri)
-            } else {
-                val caption = draft.trim()
-                if (caption.isNotEmpty()) onDraftChange("")
-                viewModel.sendMediaFromUri(
-                    uri = uri,
-                    caption = caption,
-                    maxViews = MediaViewLimitPolicy.UNLIMITED_VIEWS
-                )
-            }
+            val caption = draft.trim()
+            if (caption.isNotEmpty()) onDraftChange("")
+            viewModel.sendMediaFromUri(uri, caption)
         }
     }
 
@@ -924,7 +904,9 @@ private fun MessagingChatScreenHost(
                 "${context.packageName}.fileprovider",
                 file
             )
-            pendingImageSend = PendingImageSend(uri = uri, tempCaptureFile = file)
+            val caption = draft.trim()
+            if (caption.isNotEmpty()) onDraftChange("")
+            viewModel.sendMediaFromUri(uri, caption, tempCaptureFile = file)
         } else {
             file?.delete()
         }
@@ -997,7 +979,6 @@ private fun MessagingChatScreenHost(
         isSyncing = isSyncing,
         isShredding = isShredding,
         isUploadingMedia = isUploadingMedia,
-        mediaViewCounts = mediaViewCounts,
         voiceRecordingState = voiceRecordingState,
         voicePlaybackState = voicePlaybackState,
         onSync = { viewModel.syncConversations() },
@@ -1022,60 +1003,15 @@ private fun MessagingChatScreenHost(
             }
         },
         onPickDocument = { documentPickerLauncher.launch(arrayOf("*/*")) },
-        onOpenMediaAttachment = { messageId, attachment ->
-            if (attachment.isTemporary) {
-                val viewNumber = viewModel.consumeTemporaryMediaView(messageId, attachment.maxViews)
-                if (viewNumber != null) {
-                    viewingMedia = ViewingMediaState(attachment = attachment, viewNumber = viewNumber)
-                } else {
-                    scope.launch {
-                        snackbarHostState.showSnackbar("Το προσωρινό μέσο έχει λήξει.")
-                    }
-                }
-            } else {
-                viewingMedia = ViewingMediaState(attachment = attachment, viewNumber = null)
-            }
-        },
+        onOpenMediaAttachment = { attachment -> viewingAttachment = attachment },
         onDraftChange = onDraftChange,
         onSendMessage = onSendMessage,
         onRetryMessage = { body -> viewModel.sendMessage(body) }
     )
 
-    pendingImageSend?.let { pending ->
-        MediaSendModeDialog(
-            onSendPermanent = {
-                val caption = draft.trim()
-                if (caption.isNotEmpty()) onDraftChange("")
-                pendingImageSend = null
-                viewModel.sendMediaFromUri(
-                    uri = pending.uri,
-                    caption = caption,
-                    tempCaptureFile = pending.tempCaptureFile,
-                    maxViews = MediaViewLimitPolicy.UNLIMITED_VIEWS
-                )
-            },
-            onSendTemporary = {
-                val caption = draft.trim()
-                if (caption.isNotEmpty()) onDraftChange("")
-                pendingImageSend = null
-                viewModel.sendMediaFromUri(
-                    uri = pending.uri,
-                    caption = caption,
-                    tempCaptureFile = pending.tempCaptureFile,
-                    maxViews = MediaViewLimitPolicy.DEFAULT_TEMPORARY_VIEWS
-                )
-            },
-            onDismiss = {
-                pending.tempCaptureFile?.delete()
-                pendingImageSend = null
-            }
-        )
-    }
-
-    viewingMedia?.let { currentMedia ->
+    viewingAttachment?.let { currentAttachment ->
         MediaAttachmentViewerDialog(
-            attachment = currentMedia.attachment,
-            temporaryViewNumber = currentMedia.viewNumber,
+            attachment = currentAttachment,
             onSave = { item ->
                 pendingSaveAttachment = item
                 saveDocumentLauncher.launch(item.fileName)
@@ -1090,7 +1026,7 @@ private fun MessagingChatScreenHost(
                     }
                 }
             },
-            onDismiss = { viewingMedia = null }
+            onDismiss = { viewingAttachment = null }
         )
     }
 }

@@ -29,14 +29,10 @@ data class MediaAttachment(
     val mimeType: String,
     val widthPx: Int = 0,
     val heightPx: Int = 0,
-    val maxViews: Int = 0,
     val caption: String = "",
     val sha256Hex: String = "",
     val dataBytes: ByteArray
 ) {
-    val isTemporary: Boolean
-        get() = maxViews > 0
-
     val resolvedSha256Hex: String
         get() = if (sha256Hex.isNotBlank()) sha256Hex else CryptoUtils.sha256Hex(dataBytes)
 
@@ -49,7 +45,6 @@ data class MediaAttachment(
             mimeType == other.mimeType &&
             widthPx == other.widthPx &&
             heightPx == other.heightPx &&
-            maxViews == other.maxViews &&
             caption == other.caption &&
             resolvedSha256Hex == other.resolvedSha256Hex &&
             dataBytes.contentEquals(other.dataBytes)
@@ -61,7 +56,6 @@ data class MediaAttachment(
         result = 31 * result + mimeType.hashCode()
         result = 31 * result + widthPx
         result = 31 * result + heightPx
-        result = 31 * result + maxViews
         result = 31 * result + caption.hashCode()
         result = 31 * result + resolvedSha256Hex.hashCode()
         result = 31 * result + dataBytes.contentHashCode()
@@ -93,8 +87,7 @@ class MediaAttachmentCodec : ContentCodec<MediaAttachment> {
         private const val MAGIC_0: Byte = 0x54 // 'T'
         private const val MAGIC_1: Byte = 0x4D // 'M'
         const val WIRE_VERSION: Int = 1
-        const val WIRE_VERSION_V2: Int = 2
-        const val MAX_VIEW_LIMIT: Int = 10
+        private const val LEGACY_WIRE_VERSION_V2: Int = 2
         const val MAX_MEDIA_BYTES: Int = 768 * 1024
         const val MAX_FILENAME_CHARS: Int = 120
         private const val MAX_FILENAME_BYTES: Int = 256
@@ -104,14 +97,9 @@ class MediaAttachmentCodec : ContentCodec<MediaAttachment> {
         const val MAX_DIMENSION_PX: Int = 8192
 
         fun encodeBytes(attachment: MediaAttachment): ByteArray {
-            require(attachment.version == WIRE_VERSION || attachment.version == WIRE_VERSION_V2) {
+            require(attachment.version == WIRE_VERSION) {
                 "Unsupported MediaAttachment wire version: ${attachment.version}"
             }
-            require(attachment.maxViews in 0..MAX_VIEW_LIMIT) {
-                "Invalid maxViews: ${attachment.maxViews}"
-            }
-            // Conservamos el formato V1 para adjuntos normales para mantener compatibilidad con versiones previas.
-            val effectiveVersion = if (attachment.maxViews > 0) WIRE_VERSION_V2 else WIRE_VERSION
             val cleanName = sanitizeFileName(attachment.fileName)
             val cleanMime = attachment.mimeType.trim()
             require(cleanMime.isNotBlank()) { "MediaAttachment mimeType cannot be blank" }
@@ -153,16 +141,13 @@ class MediaAttachmentCodec : ContentCodec<MediaAttachment> {
             DataOutputStream(baos).use { out ->
                 out.writeByte(MAGIC_0.toInt())
                 out.writeByte(MAGIC_1.toInt())
-                out.writeInt(effectiveVersion)
+                out.writeInt(attachment.version)
                 out.writeInt(nameBytes.size)
                 out.write(nameBytes)
                 out.writeInt(mimeBytes.size)
                 out.write(mimeBytes)
                 out.writeInt(attachment.widthPx)
                 out.writeInt(attachment.heightPx)
-                if (effectiveVersion == WIRE_VERSION_V2) {
-                    out.writeInt(attachment.maxViews)
-                }
                 out.writeInt(captionBytes.size)
                 if (captionBytes.isNotEmpty()) {
                     out.write(captionBytes)
@@ -184,7 +169,7 @@ class MediaAttachmentCodec : ContentCodec<MediaAttachment> {
                 require(m0 == MAGIC_0 && m1 == MAGIC_1) { "Invalid MediaAttachment header magic" }
 
                 val version = input.readInt()
-                require(version == WIRE_VERSION || version == WIRE_VERSION_V2) {
+                require(version == WIRE_VERSION || version == LEGACY_WIRE_VERSION_V2) {
                     "Unsupported MediaAttachment wire version: $version"
                 }
 
@@ -207,12 +192,9 @@ class MediaAttachmentCodec : ContentCodec<MediaAttachment> {
                     "Invalid decoded dimensions: ${widthPx}x$heightPx"
                 }
 
-                val maxViews = if (version == WIRE_VERSION_V2) {
-                    input.readInt().also { parsed ->
-                        require(parsed in 0..MAX_VIEW_LIMIT) { "Invalid decoded maxViews: $parsed" }
-                    }
-                } else {
-                    0
+                // Saltamos el entero heredado de vistas limitadas si llega un payload v2 antiguo.
+                if (version == LEGACY_WIRE_VERSION_V2) {
+                    input.readInt()
                 }
 
                 val captionLen = input.readInt()
@@ -240,12 +222,11 @@ class MediaAttachmentCodec : ContentCodec<MediaAttachment> {
                 require(recomputedSha == shaHex) { "MediaAttachment SHA-256 verification failed" }
 
                 return MediaAttachment(
-                    version = version,
+                    version = WIRE_VERSION,
                     fileName = fileName,
                     mimeType = mimeType,
                     widthPx = widthPx,
                     heightPx = heightPx,
-                    maxViews = maxViews,
                     caption = caption,
                     sha256Hex = shaHex,
                     dataBytes = dataBytes
@@ -294,15 +275,7 @@ class MediaAttachmentCodec : ContentCodec<MediaAttachment> {
         fun formatFallbackPreview(attachment: MediaAttachment): String {
             val sizeLabel = formatByteSize(attachment.dataBytes.size)
             val suffix = if (attachment.caption.isNotBlank()) " — ${attachment.caption}" else ""
-            val isImage = isImageMimeType(attachment.mimeType)
-            if (attachment.isTemporary) {
-                return if (isImage) {
-                    "⏱ Προσωρινή εικόνα (${attachment.maxViews}×, $sizeLabel)$suffix"
-                } else {
-                    "⏱ Προσωρινό αρχείο (${attachment.maxViews}×): ${attachment.fileName} ($sizeLabel)$suffix"
-                }
-            }
-            return if (isImage) {
+            return if (isImageMimeType(attachment.mimeType)) {
                 "📷 Εικόνα ($sizeLabel)$suffix"
             } else {
                 "📎 Αρχείο: ${attachment.fileName} ($sizeLabel)$suffix"
