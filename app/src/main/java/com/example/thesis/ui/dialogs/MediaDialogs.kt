@@ -50,6 +50,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.example.thesis.R
+import com.example.thesis.media.MediaViewLimitPolicy
 import com.example.thesis.security.ScreenSecurityPolicy
 import com.example.thesis.xmtp.MediaAttachment
 import com.example.thesis.xmtp.MediaAttachmentCodec
@@ -57,6 +58,7 @@ import com.example.thesis.xmtp.MediaAttachmentCodec
 @Composable
 internal fun MediaAttachmentViewerDialog(
     attachment: MediaAttachment,
+    temporaryViewNumber: Int? = null,
     onSave: (MediaAttachment) -> Unit,
     onShare: (MediaAttachment) -> Unit,
     onDismiss: () -> Unit
@@ -128,27 +130,38 @@ internal fun MediaAttachmentViewerDialog(
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
+                            val headerSubtitle = if (attachment.isTemporary) {
+                                MediaViewLimitPolicy.formatViewerBanner(
+                                    viewNumber = temporaryViewNumber ?: 1,
+                                    maxViews = attachment.maxViews
+                                )
+                            } else {
+                                "$sizeLabel • SHA-256: ${attachment.resolvedSha256Hex.take(12)}… • MLS E2EE"
+                            }
                             Text(
-                                text = "$sizeLabel • SHA-256: ${attachment.resolvedSha256Hex.take(12)}… • MLS E2EE",
+                                text = headerSubtitle,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = subtitleTint,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
-                        IconButton(onClick = { onSave(attachment) }) {
-                            Icon(
-                                painter = painterResource(R.drawable.ic_download),
-                                contentDescription = "Αποθήκευση",
-                                tint = headerTint
-                            )
-                        }
-                        IconButton(onClick = { onShare(attachment) }) {
-                            Icon(
-                                painter = painterResource(R.drawable.ic_share),
-                                contentDescription = "Κοινοποίηση",
-                                tint = headerTint
-                            )
+                        // En medios temporales deshabilitamos guardar y compartir para respetar el limite de vistas.
+                        if (!attachment.isTemporary) {
+                            IconButton(onClick = { onSave(attachment) }) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_download),
+                                    contentDescription = "Αποθήκευση",
+                                    tint = headerTint
+                                )
+                            }
+                            IconButton(onClick = { onShare(attachment) }) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_share),
+                                    contentDescription = "Κοινοποίηση",
+                                    tint = headerTint
+                                )
+                            }
                         }
                     }
                 }
@@ -225,24 +238,34 @@ internal fun MediaAttachmentViewerDialog(
                                     textAlign = TextAlign.Center
                                 )
                                 Spacer(modifier = Modifier.height(6.dp))
-                                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                    Button(onClick = { onSave(attachment) }) {
-                                        Icon(
-                                            painter = painterResource(R.drawable.ic_download),
-                                            contentDescription = null,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text("Αποθήκευση")
-                                    }
-                                    OutlinedButton(onClick = { onShare(attachment) }) {
-                                        Icon(
-                                            painter = painterResource(R.drawable.ic_share),
-                                            contentDescription = null,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(6.dp))
-                                        Text("Κοινοποίηση")
+                                if (attachment.isTemporary) {
+                                    Text(
+                                        text = "Προσωρινό αρχείο MLS E2EE — απενεργοποιημένη αποθήκευση/κοινοποίηση",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontWeight = FontWeight.SemiBold,
+                                        textAlign = TextAlign.Center
+                                    )
+                                } else {
+                                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                        Button(onClick = { onSave(attachment) }) {
+                                            Icon(
+                                                painter = painterResource(R.drawable.ic_download),
+                                                contentDescription = null,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text("Αποθήκευση")
+                                        }
+                                        OutlinedButton(onClick = { onShare(attachment) }) {
+                                            Icon(
+                                                painter = painterResource(R.drawable.ic_share),
+                                                contentDescription = null,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text("Κοινοποίηση")
+                                        }
                                     }
                                 }
                             }

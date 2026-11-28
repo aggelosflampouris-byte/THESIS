@@ -68,6 +68,7 @@ import com.example.thesis.R
 import com.example.thesis.call.CallHistoryPolicy
 import com.example.thesis.call.ChatCallEvent
 import com.example.thesis.call.ChatCallOutcome
+import com.example.thesis.media.MediaViewLimitPolicy
 import com.example.thesis.repository.ReadReceiptPolicy
 import com.example.thesis.repository.extractMediaAttachment
 import com.example.thesis.repository.extractVoiceNote
@@ -112,6 +113,8 @@ internal fun MessagingChatScreen(
     isSyncing: Boolean = false,
     isShredding: Boolean = false,
     isUploadingMedia: Boolean = false,
+    mediaViewCounts: Map<String, Int> = emptyMap(),
+    selectedMediaMaxViews: Int = MediaViewLimitPolicy.UNLIMITED_VIEWS,
     voiceRecordingState: VoiceRecordingState = VoiceRecordingState(),
     voicePlaybackState: VoicePlaybackState = VoicePlaybackState(),
     onSync: () -> Unit = {},
@@ -121,10 +124,11 @@ internal fun MessagingChatScreen(
     onStopAndSendVoiceRecording: () -> Unit = {},
     onToggleVoicePlayback: (String, VoiceNote) -> Unit = { _, _ -> },
     onSeekVoicePlayback: (String, Float) -> Unit = { _, _ -> },
+    onSelectMediaMaxViews: (Int) -> Unit = {},
     onPickPhoto: () -> Unit = {},
     onTakePhoto: () -> Unit = {},
     onPickDocument: () -> Unit = {},
-    onOpenMediaAttachment: (MediaAttachment) -> Unit = {},
+    onOpenMediaAttachment: (String, MediaAttachment) -> Unit = { _, _ -> },
     onDraftChange: (String) -> Unit,
     onSendMessage: (String) -> Unit,
     onRetryMessage: (String) -> Unit = onSendMessage
@@ -239,12 +243,15 @@ internal fun MessagingChatScreen(
                                         isSeen = isSeen,
                                         isLastSeenOwnMessage = isSeen && message.id == lastSeenOwnMessageId,
                                         seenAtMs = peerLastReadTimestampMs,
+                                        openedViewCount = mediaViewCounts[message.id] ?: 0,
                                         maxBubbleWidth = maxBubbleWidth,
                                         retryEnabled = !isShredding,
                                         voicePlaybackState = voicePlaybackState,
                                         onToggleVoicePlayback = onToggleVoicePlayback,
                                         onSeekVoicePlayback = onSeekVoicePlayback,
-                                        onOpenMediaAttachment = onOpenMediaAttachment,
+                                        onOpenMediaAttachment = { attachment ->
+                                            onOpenMediaAttachment(message.id, attachment)
+                                        },
                                         onRetry = { onRetryMessage(message.body) }
                                     )
                                 }
@@ -273,97 +280,160 @@ internal fun MessagingChatScreen(
                         onSend = onStopAndSendVoiceRecording
                     )
                 } else {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 6.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.Bottom
-                    ) {
-                        IconButton(
-                            onClick = onPickPhoto,
-                            enabled = !isShredding && !isUploadingMedia,
-                            modifier = Modifier.size(36.dp)
+                    val mediaIconTint = if (selectedMediaMaxViews > 0) {
+                        MaterialTheme.colorScheme.tertiary
+                    } else {
+                        MaterialTheme.colorScheme.primary
+                    }
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            if (isUploadingMedia) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(18.dp),
-                                    strokeWidth = 2.dp,
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                            } else {
+                            Text(
+                                text = "Προσωρινό:",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (selectedMediaMaxViews > 0) {
+                                    MaterialTheme.colorScheme.tertiary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 11.sp
+                            )
+                            MediaViewLimitPolicy.PRESET_VIEW_LIMITS.forEach { preset ->
+                                val selected = selectedMediaMaxViews == preset
+                                val chipBg = when {
+                                    selected && preset > 0 -> MaterialTheme.colorScheme.tertiaryContainer
+                                    selected -> MaterialTheme.colorScheme.primaryContainer
+                                    else -> MaterialTheme.colorScheme.surface
+                                }
+                                val chipFg = when {
+                                    selected && preset > 0 -> MaterialTheme.colorScheme.onTertiaryContainer
+                                    selected -> MaterialTheme.colorScheme.onPrimaryContainer
+                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                                val chipBorder = when {
+                                    selected && preset > 0 -> MaterialTheme.colorScheme.tertiary
+                                    selected -> MaterialTheme.colorScheme.primary
+                                    else -> MaterialTheme.colorScheme.outlineVariant
+                                }
+                                Surface(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .clickable(enabled = !isShredding && !isUploadingMedia) {
+                                            onSelectMediaMaxViews(preset)
+                                        },
+                                    shape = RoundedCornerShape(14.dp),
+                                    color = chipBg,
+                                    border = BorderStroke(1.dp, chipBorder)
+                                ) {
+                                    Text(
+                                        text = MediaViewLimitPolicy.formatPresetLabel(preset),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = chipFg,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                        fontSize = 11.sp,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
+                        }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 6.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.Bottom
+                        ) {
+                            IconButton(
+                                onClick = onPickPhoto,
+                                enabled = !isShredding && !isUploadingMedia,
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                if (isUploadingMedia) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(18.dp),
+                                        strokeWidth = 2.dp,
+                                        color = mediaIconTint
+                                    )
+                                } else {
+                                    Icon(
+                                        painter = painterResource(R.drawable.ic_photo_library),
+                                        contentDescription = "Φωτογραφία από συλλογή",
+                                        tint = mediaIconTint,
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                }
+                            }
+                            IconButton(
+                                onClick = onTakePhoto,
+                                enabled = !isShredding && !isUploadingMedia,
+                                modifier = Modifier.size(36.dp)
+                            ) {
                                 Icon(
-                                    painter = painterResource(R.drawable.ic_photo_library),
-                                    contentDescription = "Φωτογραφία από συλλογή",
-                                    tint = MaterialTheme.colorScheme.primary,
+                                    painter = painterResource(R.drawable.ic_photo_camera),
+                                    contentDescription = "Κάμερα",
+                                    tint = mediaIconTint,
                                     modifier = Modifier.size(22.dp)
                                 )
                             }
-                        }
-                        IconButton(
-                            onClick = onTakePhoto,
-                            enabled = !isShredding && !isUploadingMedia,
-                            modifier = Modifier.size(36.dp)
-                        ) {
-                            Icon(
-                                painter = painterResource(R.drawable.ic_photo_camera),
-                                contentDescription = "Κάμερα",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(22.dp)
+                            IconButton(
+                                onClick = onPickDocument,
+                                enabled = !isShredding && !isUploadingMedia,
+                                modifier = Modifier.size(36.dp)
+                            ) {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_attach_file),
+                                    contentDescription = "Επισύναψη αρχείου",
+                                    tint = mediaIconTint,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(4.dp))
+                            OutlinedTextField(
+                                value = draft,
+                                onValueChange = onDraftChange,
+                                placeholder = { Text("Γράψτε μήνυμα...", fontSize = 13.sp) },
+                                modifier = Modifier.weight(1f),
+                                maxLines = 4,
+                                keyboardOptions = KeyboardOptions(
+                                    keyboardType = KeyboardType.Text,
+                                    imeAction = ImeAction.Default
+                                ),
+                                // Mantenemos el campo habilitado durante el envio para no perder el foco ni cerrar el teclado.
+                                enabled = !isShredding,
+                                shape = RoundedCornerShape(20.dp)
                             )
-                        }
-                        IconButton(
-                            onClick = onPickDocument,
-                            enabled = !isShredding && !isUploadingMedia,
-                            modifier = Modifier.size(36.dp)
-                        ) {
-                            Icon(
-                                painter = painterResource(R.drawable.ic_attach_file),
-                                contentDescription = "Επισύναψη αρχείου",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(22.dp)
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(4.dp))
-                        OutlinedTextField(
-                            value = draft,
-                            onValueChange = onDraftChange,
-                            placeholder = { Text("Γράψτε μήνυμα...", fontSize = 13.sp) },
-                            modifier = Modifier.weight(1f),
-                            maxLines = 4,
-                            keyboardOptions = KeyboardOptions(
-                                keyboardType = KeyboardType.Text,
-                                imeAction = ImeAction.Default
-                            ),
-                            // Mantenemos el campo habilitado durante el envio para no perder el foco ni cerrar el teclado.
-                            enabled = !isShredding,
-                            shape = RoundedCornerShape(20.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        val hasDraftText = draft.isNotBlank()
-                        IconButton(
-                            onClick = {
+                            Spacer(modifier = Modifier.width(6.dp))
+                            val hasDraftText = draft.isNotBlank()
+                            IconButton(
+                                onClick = {
+                                    if (hasDraftText) {
+                                        val content = draft.trim()
+                                        if (content.isNotEmpty()) onSendMessage(content)
+                                    } else {
+                                        onStartVoiceRecording()
+                                    }
+                                },
+                                enabled = !isShredding,
+                                modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                            ) {
                                 if (hasDraftText) {
-                                    val content = draft.trim()
-                                    if (content.isNotEmpty()) onSendMessage(content)
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.Send,
+                                        contentDescription = "Αποστολή",
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
                                 } else {
-                                    onStartVoiceRecording()
+                                    Icon(
+                                        painter = painterResource(R.drawable.ic_mic_on),
+                                        contentDescription = "Φωνητικό μήνυμα",
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
                                 }
-                            },
-                            enabled = !isShredding,
-                            modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                        ) {
-                            if (hasDraftText) {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.Send,
-                                    contentDescription = "Αποστολή",
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                            } else {
-                                Icon(
-                                    painter = painterResource(R.drawable.ic_mic_on),
-                                    contentDescription = "Φωνητικό μήνυμα",
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
                             }
                         }
                     }
@@ -589,6 +659,7 @@ private fun MessagingMessageBubble(
     isSeen: Boolean = false,
     isLastSeenOwnMessage: Boolean = false,
     seenAtMs: Long? = null,
+    openedViewCount: Int = 0,
     maxBubbleWidth: Dp,
     retryEnabled: Boolean = true,
     voicePlaybackState: VoicePlaybackState = VoicePlaybackState(),
@@ -757,86 +828,181 @@ private fun MessagingMessageBubble(
                     val sizeLabel = remember(mediaAttachment.dataBytes) {
                         MediaAttachmentCodec.formatByteSize(mediaAttachment.dataBytes.size)
                     }
-                    val thumbnailBitmap = remember(message.id) {
-                        if (isImage) decodeChatThumbnail(mediaAttachment.dataBytes) else null
-                    }
-                    if (thumbnailBitmap != null) {
-                        Image(
-                            bitmap = thumbnailBitmap,
-                            contentDescription = mediaAttachment.fileName,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(min = 120.dp, max = 230.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .clickable { onOpenMediaAttachment(mediaAttachment) }
-                        )
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text(
-                                text = "📷 $sizeLabel",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = contentColor
-                            )
-                            Text(
-                                text = "MLS E2EE",
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = contentColor.copy(alpha = 0.7f)
-                            )
+                    if (mediaAttachment.isTemporary) {
+                        val isExpired = MediaViewLimitPolicy.isExpired(mediaAttachment.maxViews, openedViewCount)
+                        val remaining = MediaViewLimitPolicy.remainingViews(mediaAttachment.maxViews, openedViewCount)
+                        val tempTitle = when {
+                            isImage && isExpired -> "Προσωρινή φωτογραφία • Έληξε"
+                            isImage -> "Προσωρινή φωτογραφία"
+                            isExpired -> "Προσωρινό αρχείο • Έληξε"
+                            else -> "Προσωρινό αρχείο: ${mediaAttachment.fileName}"
                         }
-                    } else {
+                        val tempSubtitle = if (isExpired) {
+                            MediaViewLimitPolicy.formatExpiredSubtitle(mediaAttachment.maxViews)
+                        } else {
+                            "${MediaViewLimitPolicy.formatRemainingSubtitle(mediaAttachment.maxViews, openedViewCount)} • $sizeLabel • MLS E2EE"
+                        }
+                        val badgeColor = if (isExpired) {
+                            contentColor.copy(alpha = 0.25f)
+                        } else {
+                            MaterialTheme.colorScheme.primary
+                        }
+                        val badgeTextColor = if (isExpired) {
+                            contentColor.copy(alpha = 0.7f)
+                        } else {
+                            MaterialTheme.colorScheme.onPrimary
+                        }
+                        // En medios temporales no decodificamos ni mostramos miniatura en el chat para proteger el limite de vistas.
                         Surface(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(10.dp))
-                                .clickable { onOpenMediaAttachment(mediaAttachment) },
+                                .let { base ->
+                                    if (isExpired) {
+                                        base
+                                    } else {
+                                        base.clickable { onOpenMediaAttachment(mediaAttachment) }
+                                    }
+                                },
                             shape = RoundedCornerShape(10.dp),
-                            color = contentColor.copy(alpha = 0.08f)
+                            color = contentColor.copy(alpha = if (isExpired) 0.05f else 0.10f),
+                            border = BorderStroke(
+                                1.dp,
+                                if (isExpired) {
+                                    contentColor.copy(alpha = 0.18f)
+                                } else {
+                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                                }
+                            )
                         ) {
                             Row(
                                 modifier = Modifier.padding(10.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(10.dp)
                             ) {
-                                Icon(
-                                    painter = painterResource(R.drawable.ic_description),
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(28.dp)
-                                )
+                                Surface(
+                                    shape = CircleShape,
+                                    color = badgeColor,
+                                    modifier = Modifier.size(36.dp)
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        Text(
+                                            text = if (isExpired) "0×" else "${remaining}×",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = badgeTextColor
+                                        )
+                                    }
+                                }
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = mediaAttachment.fileName,
+                                        text = tempTitle,
                                         style = MaterialTheme.typography.bodyMedium,
                                         fontWeight = FontWeight.SemiBold,
-                                        color = contentColor,
+                                        color = if (isExpired) contentColor.copy(alpha = 0.65f) else contentColor,
                                         maxLines = 2,
                                         overflow = TextOverflow.Ellipsis
                                     )
                                     Text(
-                                        text = "${mediaAttachment.mimeType} • $sizeLabel • MLS E2EE",
+                                        text = tempSubtitle,
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = contentColor.copy(alpha = 0.75f),
-                                        maxLines = 1,
+                                        color = contentColor.copy(alpha = if (isExpired) 0.55f else 0.78f),
+                                        maxLines = 2,
                                         overflow = TextOverflow.Ellipsis
                                     )
                                 }
                             }
                         }
-                    }
-                    if (mediaAttachment.caption.isNotBlank()) {
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = mediaAttachment.caption,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = contentColor
-                        )
+                        if (!isExpired && mediaAttachment.caption.isNotBlank()) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = mediaAttachment.caption,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = contentColor
+                            )
+                        }
+                    } else {
+                        val thumbnailBitmap = remember(message.id) {
+                            if (isImage) decodeChatThumbnail(mediaAttachment.dataBytes) else null
+                        }
+                        if (thumbnailBitmap != null) {
+                            Image(
+                                bitmap = thumbnailBitmap,
+                                contentDescription = mediaAttachment.fileName,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(min = 120.dp, max = 230.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable { onOpenMediaAttachment(mediaAttachment) }
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "📷 $sizeLabel",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = contentColor
+                                )
+                                Text(
+                                    text = "MLS E2EE",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = contentColor.copy(alpha = 0.7f)
+                                )
+                            }
+                        } else {
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable { onOpenMediaAttachment(mediaAttachment) },
+                                shape = RoundedCornerShape(10.dp),
+                                color = contentColor.copy(alpha = 0.08f)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Icon(
+                                        painter = painterResource(R.drawable.ic_description),
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = mediaAttachment.fileName,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = contentColor,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = "${mediaAttachment.mimeType} • $sizeLabel • MLS E2EE",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = contentColor.copy(alpha = 0.75f),
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        if (mediaAttachment.caption.isNotBlank()) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = mediaAttachment.caption,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = contentColor
+                            )
+                        }
                     }
                 } else {
                     Text(

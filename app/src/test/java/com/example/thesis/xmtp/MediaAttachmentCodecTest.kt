@@ -123,5 +123,89 @@ class MediaAttachmentCodecTest {
         )
         assertEquals("📎 Αρχείο: doc.pdf (1.0 KB)", filePreview)
     }
+
+    @Test
+    fun roundTrip_temporaryMediaAttachmentPreservesMaxViewsAndUsesWireV2() {
+        val samplePayload = ByteArray(1024) { idx -> (idx * 31 + 7).toByte() }
+        val original = MediaAttachment(
+            fileName = "secret.jpg",
+            mimeType = "image/jpeg",
+            widthPx = 1080,
+            heightPx = 1440,
+            maxViews = 2,
+            caption = "Προσωρινή φωτογραφία",
+            dataBytes = samplePayload
+        )
+
+        val encoded = MediaAttachmentCodec.encodeBytes(original)
+        val decoded = MediaAttachmentCodec.decodeBytes(encoded)
+
+        assertEquals(MediaAttachmentCodec.WIRE_VERSION_V2, decoded.version)
+        assertEquals(2, decoded.maxViews)
+        assertTrue(decoded.isTemporary)
+        assertEquals(original.caption, decoded.caption)
+        assertArrayEquals(samplePayload, decoded.dataBytes)
+    }
+
+    @Test
+    fun encodeBytes_normalMediaStaysWireV1ForBackwardCompatibility() {
+        val payload = ByteArray(256) { it.toByte() }
+        val original = MediaAttachment(
+            fileName = "standard.png",
+            mimeType = "image/png",
+            maxViews = 0,
+            dataBytes = payload
+        )
+
+        val decoded = MediaAttachmentCodec.decodeBytes(MediaAttachmentCodec.encodeBytes(original))
+
+        assertEquals(MediaAttachmentCodec.WIRE_VERSION, decoded.version)
+        assertEquals(0, decoded.maxViews)
+        assertFalse(decoded.isTemporary)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun encodeBytes_rejectsNegativeMaxViews() {
+        MediaAttachmentCodec.encodeBytes(
+            MediaAttachment(
+                fileName = "neg.jpg",
+                mimeType = "image/jpeg",
+                maxViews = -1,
+                dataBytes = ByteArray(32)
+            )
+        )
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun encodeBytes_rejectsExcessiveMaxViews() {
+        MediaAttachmentCodec.encodeBytes(
+            MediaAttachment(
+                fileName = "too-many.jpg",
+                mimeType = "image/jpeg",
+                maxViews = MediaAttachmentCodec.MAX_VIEW_LIMIT + 1,
+                dataBytes = ByteArray(32)
+            )
+        )
+    }
+
+    @Test
+    fun formatFallbackPreview_marksTemporaryMediaClearly() {
+        val img = MediaAttachment(
+            fileName = "temp.jpg",
+            mimeType = "image/jpeg",
+            maxViews = 2,
+            caption = "Δες το",
+            dataBytes = ByteArray(2048)
+        )
+        assertEquals("⏱ Προσωρινή εικόνα (2×, 2.0 KB) — Δες το", MediaAttachmentCodec.formatFallbackPreview(img))
+
+        val doc = MediaAttachment(
+            fileName = "notes.pdf",
+            mimeType = "application/pdf",
+            maxViews = 1,
+            dataBytes = ByteArray(512)
+        )
+        assertEquals("⏱ Προσωρινό αρχείο (1×): notes.pdf (512 B)", MediaAttachmentCodec.formatFallbackPreview(doc))
+    }
 }
 

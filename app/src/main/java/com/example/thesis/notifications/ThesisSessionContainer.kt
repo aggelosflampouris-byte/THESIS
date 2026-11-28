@@ -16,6 +16,7 @@ import com.example.thesis.call.CallNotificationManager
 import com.example.thesis.call.CallSessionManager
 import com.example.thesis.diagnostics.ActionLogStore
 import com.example.thesis.media.MediaAttachmentProcessor
+import com.example.thesis.media.SharedPrefsMediaViewLimitStore
 import com.example.thesis.repository.extractMediaAttachment
 import com.example.thesis.repository.extractVoiceNote
 import com.example.thesis.ui.ActionLogEntry
@@ -55,6 +56,7 @@ internal class ThesisSessionContainer(context: Context) {
     val notificationStateStore = SharedPrefsNotificationStateStore(appContext)
     val nicknameStore = SharedPrefsNicknameStore(appContext)
     val nicknameSnapshot: StateFlow<NicknameSnapshot> = nicknameStore.snapshot
+    val mediaViewLimitStore = SharedPrefsMediaViewLimitStore(appContext)
     val repository = ConversationRepository(
         engine = engine,
         repositoryScope = appScope,
@@ -183,6 +185,7 @@ internal class ThesisSessionContainer(context: Context) {
         activeConversationId = null
         repository.resetNotificationBaseline()
         nicknameStore.clear()
+        mediaViewLimitStore.clear()
         ScreenSecurityManager.purgeLegacyPreference(appContext)
         // Conservamos el archivo de transferencia entrante cuando reseteamos sesion previa justo antes de importarlo.
         if (purgeTransferCache) {

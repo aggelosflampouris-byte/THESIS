@@ -29,6 +29,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -842,6 +843,11 @@ private fun LogsTelemetryScreenHost(
     )
 }
 
+private data class ViewingMediaState(
+    val attachment: MediaAttachment,
+    val viewNumber: Int? = null
+)
+
 @Composable
 private fun MessagingChatScreenHost(
     viewModel: ChatViewModel,
@@ -865,10 +871,12 @@ private fun MessagingChatScreenHost(
     val voiceRecordingState by viewModel.voiceRecordingState.collectAsState()
     val voicePlaybackState by viewModel.voicePlaybackState.collectAsState()
     val isUploadingMedia by viewModel.isUploadingMedia.collectAsState()
+    val mediaViewCounts by viewModel.mediaViewCounts.collectAsState()
 
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    var viewingAttachment by remember { mutableStateOf<MediaAttachment?>(null) }
+    var viewingMedia by remember { mutableStateOf<ViewingMediaState?>(null) }
+    var selectedMediaMaxViews by rememberSaveable(activeConv.id) { mutableIntStateOf(0) }
     var pendingSaveAttachment by remember { mutableStateOf<MediaAttachment?>(null) }
     // Conservamos la ruta temporal entre recreaciones de Activity mientras la app de camara esta abierta.
     var pendingCameraCapturePath by rememberSaveable { mutableStateOf<String?>(null) }
@@ -878,8 +886,10 @@ private fun MessagingChatScreenHost(
     ) { uri ->
         if (uri != null) {
             val caption = draft.trim()
+            val maxViews = selectedMediaMaxViews
             if (caption.isNotEmpty()) onDraftChange("")
-            viewModel.sendMediaFromUri(uri, caption)
+            if (maxViews > 0) selectedMediaMaxViews = 0
+            viewModel.sendMediaFromUri(uri, caption, maxViews = maxViews)
         }
     }
 
@@ -888,8 +898,10 @@ private fun MessagingChatScreenHost(
     ) { uri ->
         if (uri != null) {
             val caption = draft.trim()
+            val maxViews = selectedMediaMaxViews
             if (caption.isNotEmpty()) onDraftChange("")
-            viewModel.sendMediaFromUri(uri, caption)
+            if (maxViews > 0) selectedMediaMaxViews = 0
+            viewModel.sendMediaFromUri(uri, caption, maxViews = maxViews)
         }
     }
 
@@ -905,8 +917,10 @@ private fun MessagingChatScreenHost(
                 file
             )
             val caption = draft.trim()
+            val maxViews = selectedMediaMaxViews
             if (caption.isNotEmpty()) onDraftChange("")
-            viewModel.sendMediaFromUri(uri, caption, tempCaptureFile = file)
+            if (maxViews > 0) selectedMediaMaxViews = 0
+            viewModel.sendMediaFromUri(uri, caption, tempCaptureFile = file, maxViews = maxViews)
         } else {
             file?.delete()
         }
@@ -979,6 +993,8 @@ private fun MessagingChatScreenHost(
         isSyncing = isSyncing,
         isShredding = isShredding,
         isUploadingMedia = isUploadingMedia,
+        mediaViewCounts = mediaViewCounts,
+        selectedMediaMaxViews = selectedMediaMaxViews,
         voiceRecordingState = voiceRecordingState,
         voicePlaybackState = voicePlaybackState,
         onSync = { viewModel.syncConversations() },
@@ -990,6 +1006,7 @@ private fun MessagingChatScreenHost(
         onStopAndSendVoiceRecording = { viewModel.stopAndSendVoiceRecording() },
         onToggleVoicePlayback = { msgId, note -> viewModel.toggleVoicePlayback(msgId, note) },
         onSeekVoicePlayback = { msgId, fraction -> viewModel.seekVoicePlayback(msgId, fraction) },
+        onSelectMediaMaxViews = { selectedMediaMaxViews = it },
         onPickPhoto = {
             photoPickerLauncher.launch(
                 PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
@@ -1003,15 +1020,29 @@ private fun MessagingChatScreenHost(
             }
         },
         onPickDocument = { documentPickerLauncher.launch(arrayOf("*/*")) },
-        onOpenMediaAttachment = { attachment -> viewingAttachment = attachment },
+        onOpenMediaAttachment = { messageId, attachment ->
+            if (attachment.isTemporary) {
+                val viewNumber = viewModel.consumeTemporaryMediaView(messageId, attachment.maxViews)
+                if (viewNumber != null) {
+                    viewingMedia = ViewingMediaState(attachment = attachment, viewNumber = viewNumber)
+                } else {
+                    scope.launch {
+                        snackbarHostState.showSnackbar("Το προσωρινό μέσο έχει λήξει.")
+                    }
+                }
+            } else {
+                viewingMedia = ViewingMediaState(attachment = attachment, viewNumber = null)
+            }
+        },
         onDraftChange = onDraftChange,
         onSendMessage = onSendMessage,
         onRetryMessage = { body -> viewModel.sendMessage(body) }
     )
 
-    viewingAttachment?.let { currentAttachment ->
+    viewingMedia?.let { currentMedia ->
         MediaAttachmentViewerDialog(
-            attachment = currentAttachment,
+            attachment = currentMedia.attachment,
+            temporaryViewNumber = currentMedia.viewNumber,
             onSave = { item ->
                 pendingSaveAttachment = item
                 saveDocumentLauncher.launch(item.fileName)
@@ -1026,7 +1057,7 @@ private fun MessagingChatScreenHost(
                     }
                 }
             },
-            onDismiss = { viewingAttachment = null }
+            onDismiss = { viewingMedia = null }
         )
     }
 }
