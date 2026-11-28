@@ -13,16 +13,20 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -53,37 +57,155 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.thesis.R
 import com.example.thesis.identity.NicknamePolicy
+import com.example.thesis.identity.NicknameSnapshot
+import com.example.thesis.repository.GroupDetailsSnapshot
+import com.example.thesis.repository.GroupManagementPolicy
+import com.example.thesis.repository.GroupMemberInfo
 import com.example.thesis.security.ScreenSecurityManager
 import com.example.thesis.ui.components.QrCodeView
 import com.example.thesis.ui.components.QrScannerView
+import com.example.thesis.ui.util.ChatFormatting
 import com.example.thesis.ui.util.readClipboardText
 import com.example.thesis.updater.AppUpdateInfo
 import com.example.thesis.updater.UpdateStatus
-import com.example.thesis.util.CryptoUtils
+import com.example.thesis.xmtp.cachedGroupName
 import org.xmtp.android.library.Conversation
+import org.xmtp.android.library.libxmtp.PermissionLevel
 import java.io.File
 import java.util.Locale
 
+internal data class KnownContactOption(
+    val inboxId: String,
+    val displayName: String
+)
+
+// Campo compartido con validacion, escaner QR y pegado rapido para Inbox ID o direccion Ethereum.
+@Composable
+private fun PeerIdentifierInputSection(
+    value: String,
+    onValueChange: (String) -> Unit,
+    showQrScanner: Boolean,
+    onShowQrScannerChange: (Boolean) -> Unit,
+    canUseCamera: Boolean,
+    onRequestCameraPermission: () -> Unit,
+    scanPrompt: String,
+    fieldLabel: String
+) {
+    val context = LocalContext.current
+    val isValid = remember(value) {
+        value.isBlank() || GroupManagementPolicy.parsePeerIdentifier(value) != null
+    }
+    if (showQrScanner && canUseCamera) {
+        Text(
+            text = scanPrompt,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        QrScannerView(
+            onPairingUriDetected = { scanned ->
+                onValueChange(scanned.trim())
+                onShowQrScannerChange(false)
+            },
+            validator = { raw -> GroupManagementPolicy.parsePeerIdentifier(raw) != null },
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(220.dp)
+                .clip(RoundedCornerShape(12.dp))
+        )
+        OutlinedButton(
+            onClick = { onShowQrScannerChange(false) },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("Εισαγωγή χειροκίνητα")
+        }
+    } else {
+        OutlinedTextField(
+            value = value,
+            onValueChange = onValueChange,
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text(fieldLabel) },
+            placeholder = { Text("0x… ή 64-hex Inbox ID") },
+            singleLine = true,
+            isError = value.isNotBlank() && !isValid,
+            supportingText = {
+                if (value.isNotBlank() && !isValid) {
+                    Text("Απαιτείται διεύθυνση 0x… ή 64-hex Inbox ID.")
+                }
+            },
+            keyboardOptions = KeyboardOptions(
+                keyboardType = KeyboardType.Ascii,
+                imeAction = ImeAction.Done
+            )
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = {
+                    if (canUseCamera) {
+                        onShowQrScannerChange(true)
+                    } else {
+                        onRequestCameraPermission()
+                    }
+                },
+                modifier = Modifier.weight(1f)
+            ) {
+                Icon(
+                    painter = painterResource(R.drawable.ic_qr_code_scanner),
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text("Σάρωση QR", maxLines = 1)
+            }
+            OutlinedButton(
+                onClick = { readClipboardText(context)?.let { onValueChange(it.trim()) } },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("Επικόλληση", maxLines = 1)
+            }
+        }
+    }
+}
+
 @Composable
 internal fun NewConversationDialog(
+    knownContacts: List<KnownContactOption> = emptyList(),
     canUseCamera: Boolean = false,
     onRequestCameraPermission: () -> Unit = {},
     onDismiss: () -> Unit,
-    onStartConversation: (String, String?) -> Unit
+    onStartConversation: (String, String?) -> Unit,
+    onStartGroup: (String, List<String>) -> Unit = { _, _ -> }
 ) {
+    var isGroupMode by rememberSaveable { mutableStateOf(false) }
     var peerInput by rememberSaveable { mutableStateOf("") }
     var nicknameInput by rememberSaveable { mutableStateOf("") }
+    var groupNameInput by rememberSaveable { mutableStateOf("") }
+    var selectedContactIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var customGroupMembers by remember { mutableStateOf<List<String>>(emptyList()) }
     var showQrScanner by rememberSaveable { mutableStateOf(false) }
-    val isValidInput = remember(peerInput) {
-        val trimmed = peerInput.trim()
-        CryptoUtils.isValidEthereumAddress(trimmed) || CryptoUtils.isValidInboxId(trimmed)
+
+    val isDmValid = remember(peerInput) {
+        GroupManagementPolicy.parsePeerIdentifier(peerInput) != null
     }
-    val context = LocalContext.current
+    val canAddCustomMember = remember(peerInput) {
+        GroupManagementPolicy.parsePeerIdentifier(peerInput) != null
+    }
+    val combinedGroupMembers = remember(selectedContactIds, customGroupMembers) {
+        (selectedContactIds.toList() + customGroupMembers).distinctBy { it.lowercase(Locale.ROOT) }
+    }
+    val isGroupValid = remember(groupNameInput, combinedGroupMembers) {
+        val cleanName = GroupManagementPolicy.sanitizeGroupName(groupNameInput)
+        cleanName != null &&
+            !GroupManagementPolicy.isLoopbackGroupName(cleanName) &&
+            combinedGroupMembers.isNotEmpty()
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         properties = ScreenSecurityManager.dialogProperties(),
-        title = { Text("Νέα Συνομιλία") },
+        title = { Text(if (isGroupMode) "Νέα Ομάδα MLS" else "Νέα Συνομιλία") },
         text = {
             Column(
                 modifier = Modifier
@@ -91,110 +213,181 @@ internal fun NewConversationDialog(
                     .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                if (showQrScanner && canUseCamera) {
-                    Text(
-                        text = "Σαρώστε το QR ταυτότητας της επαφής σας.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    QrScannerView(
-                        onPairingUriDetected = { scanned ->
-                            peerInput = scanned.trim()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    FilterChip(
+                        selected = !isGroupMode,
+                        onClick = {
+                            isGroupMode = false
                             showQrScanner = false
                         },
-                        validator = { raw ->
-                            val candidate = raw.trim()
-                            CryptoUtils.isValidEthereumAddress(candidate) || CryptoUtils.isValidInboxId(candidate)
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(220.dp)
-                            .clip(RoundedCornerShape(12.dp))
+                        label = { Text("Συνομιλία") },
+                        modifier = Modifier.weight(1f)
                     )
-                    OutlinedButton(
-                        onClick = { showQrScanner = false },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Εισαγωγή χειροκίνητα")
-                    }
-                } else {
-                    Text("Εισάγετε διεύθυνση, Inbox ID ή σαρώστε QR επαφής:")
+                    FilterChip(
+                        selected = isGroupMode,
+                        onClick = {
+                            isGroupMode = true
+                            showQrScanner = false
+                        },
+                        label = { Text("Ομάδα") },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
 
-                    OutlinedTextField(
+                if (!isGroupMode) {
+                    if (!showQrScanner) {
+                        Text(
+                            text = "Εισάγετε διεύθυνση, Inbox ID ή σαρώστε QR επαφής:",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    PeerIdentifierInputSection(
                         value = peerInput,
                         onValueChange = { peerInput = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("Διεύθυνση (0x...) ή Inbox ID") },
-                        placeholder = { Text("0x… ή 64-hex Inbox ID") },
-                        singleLine = true,
-                        isError = peerInput.isNotBlank() && !isValidInput,
-                        supportingText = {
-                            if (peerInput.isNotBlank() && !isValidInput) {
-                                Text("Απαιτείται διεύθυνση 0x… ή 64-hex Inbox ID.")
-                            }
-                        },
-                        keyboardOptions = KeyboardOptions(
-                            keyboardType = KeyboardType.Ascii,
-                            imeAction = ImeAction.Done
-                        )
+                        showQrScanner = showQrScanner,
+                        onShowQrScannerChange = { showQrScanner = it },
+                        canUseCamera = canUseCamera,
+                        onRequestCameraPermission = onRequestCameraPermission,
+                        scanPrompt = "Σαρώστε το QR ταυτότητας της επαφής σας.",
+                        fieldLabel = "Διεύθυνση (0x...) ή Inbox ID"
                     )
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedButton(
-                            onClick = {
-                                if (canUseCamera) {
-                                    showQrScanner = true
-                                } else {
-                                    onRequestCameraPermission()
-                                }
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(
-                                painter = painterResource(R.drawable.ic_qr_code_scanner),
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp)
+                    if (!showQrScanner) {
+                        OutlinedTextField(
+                            value = nicknameInput,
+                            onValueChange = { nicknameInput = it.take(NicknamePolicy.MAX_NICKNAME_LENGTH) },
+                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text("Όνομα επαφής (προαιρετικό)") },
+                            placeholder = { Text("π.χ. Μαρία") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Text,
+                                imeAction = ImeAction.Done
                             )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Σάρωση QR", maxLines = 1)
-                        }
-                        OutlinedButton(
-                            onClick = { readClipboardText(context)?.let { peerInput = it.trim() } },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("Επικόλληση", maxLines = 1)
-                        }
+                        )
                     }
-
+                } else {
                     OutlinedTextField(
-                        value = nicknameInput,
-                        onValueChange = { nicknameInput = it.take(NicknamePolicy.MAX_NICKNAME_LENGTH) },
+                        value = groupNameInput,
+                        onValueChange = { groupNameInput = it.take(GroupManagementPolicy.MAX_GROUP_NAME_LENGTH) },
                         modifier = Modifier.fillMaxWidth(),
-                        label = { Text("Όνομα επαφής (προαιρετικό)") },
-                        placeholder = { Text("π.χ. Μαρία") },
+                        label = { Text("Όνομα ομάδας") },
+                        placeholder = { Text("π.χ. Ομάδα Εργασίας") },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(
                             keyboardType = KeyboardType.Text,
-                            imeAction = ImeAction.Done
+                            imeAction = ImeAction.Next
                         )
                     )
+
+                    if (knownContacts.isNotEmpty()) {
+                        Text(
+                            text = "Επιλογή από επαφές:",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            knownContacts.forEach { contact ->
+                                val normalized = contact.inboxId.lowercase(Locale.ROOT)
+                                val selected = normalized in selectedContactIds
+                                FilterChip(
+                                    selected = selected,
+                                    onClick = {
+                                        selectedContactIds = if (selected) {
+                                            selectedContactIds - normalized
+                                        } else {
+                                            selectedContactIds + normalized
+                                        }
+                                    },
+                                    label = { Text(contact.displayName, maxLines = 1) }
+                                )
+                            }
+                        }
+                    }
+
+                    Text(
+                        text = "Προσθήκη μέλους (${combinedGroupMembers.size} επιλεγμένα):",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    PeerIdentifierInputSection(
+                        value = peerInput,
+                        onValueChange = { peerInput = it },
+                        showQrScanner = showQrScanner,
+                        onShowQrScannerChange = { showQrScanner = it },
+                        canUseCamera = canUseCamera,
+                        onRequestCameraPermission = onRequestCameraPermission,
+                        scanPrompt = "Σαρώστε το QR του μέλους που θέλετε να προσθέσετε.",
+                        fieldLabel = "Διεύθυνση (0x...) ή Inbox ID μέλους"
+                    )
+                    if (!showQrScanner) {
+                        OutlinedButton(
+                            onClick = {
+                                val candidate = peerInput.trim()
+                                if (candidate.isNotEmpty() &&
+                                    customGroupMembers.none { it.equals(candidate, ignoreCase = true) }
+                                ) {
+                                    customGroupMembers = customGroupMembers + candidate
+                                }
+                                peerInput = ""
+                            },
+                            enabled = canAddCustomMember,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Προσθήκη στη λίστα")
+                        }
+                    }
+
+                    if (customGroupMembers.isNotEmpty()) {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            customGroupMembers.forEach { rawId ->
+                                val masked = if (rawId.length >= 14) {
+                                    "${rawId.take(6)}…${rawId.takeLast(4)}"
+                                } else {
+                                    rawId
+                                }
+                                FilterChip(
+                                    selected = true,
+                                    onClick = { customGroupMembers = customGroupMembers - rawId },
+                                    label = { Text(masked) },
+                                    trailingIcon = {
+                                        Icon(
+                                            imageVector = Icons.Default.Close,
+                                            contentDescription = "Αφαίρεση",
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                    }
+                                )
+                            }
+                        }
+                    }
                 }
             }
         },
         confirmButton = {
             TextButton(
                 onClick = {
-                    onStartConversation(
-                        peerInput.trim(),
-                        NicknamePolicy.sanitize(nicknameInput)
-                    )
+                    if (isGroupMode) {
+                        onStartGroup(groupNameInput.trim(), combinedGroupMembers)
+                    } else {
+                        onStartConversation(
+                            peerInput.trim(),
+                            NicknamePolicy.sanitize(nicknameInput)
+                        )
+                    }
                 },
-                enabled = isValidInput
+                enabled = if (isGroupMode) isGroupValid else isDmValid
             ) {
-                Text("Σύνδεση")
+                Text(if (isGroupMode) "Δημιουργία" else "Σύνδεση")
             }
         },
         dismissButton = {
@@ -397,6 +590,7 @@ internal fun MLSProtocolInspectorDialog(
     localInboxId: String,
     messageCount: Int,
     contactNickname: String? = null,
+    memberCount: Int? = null,
     onEditContactNickname: (() -> Unit)? = null,
     onDismiss: () -> Unit,
     onCopyTopic: () -> Unit
@@ -432,11 +626,21 @@ internal fun MLSProtocolInspectorDialog(
                 InspectorParamRow(label = "Cipher Suite", value = "DHKEM-X25519-AES128GCM-SHA256")
                 InspectorParamRow(
                     label = "Session Topology",
-                    value = when (conversation.type) {
-                        Conversation.Type.GROUP -> "MLS Group Ratchet (Loopback/Multi)"
-                        Conversation.Type.DM -> "MLS 1-on-1 Direct Message"
+                    value = when (conversation) {
+                        is Conversation.Dm -> "MLS 1-on-1 Direct Message"
+                        is Conversation.Group -> if (GroupManagementPolicy.isLoopbackGroupName(conversation.group.cachedGroupName())) {
+                            "MLS Loopback Group (1-Device)"
+                        } else {
+                            "MLS Group Ratchet (TreeKEM)"
+                        }
                     }
                 )
+                if (conversation is Conversation.Group && memberCount != null && memberCount > 0) {
+                    InspectorParamRow(
+                        label = "Group Members",
+                        value = GroupManagementPolicy.formatGroupMemberCountSubtitle(memberCount)
+                    )
+                }
                 InspectorParamRow(
                     label = "Local Client Inbox",
                     value = if (localInboxId.length >= 12) "${localInboxId.take(6)}...${localInboxId.takeLast(6)}" else localInboxId
@@ -573,6 +777,354 @@ internal fun EditContactNicknameDialog(
             }
         }
     )
+}
+
+// Dialogo minimalista para gestionar nombre, miembros, incorporaciones y salida de un grupo MLS.
+@Composable
+internal fun GroupInfoDialog(
+    groupDetails: GroupDetailsSnapshot?,
+    fallbackTitle: String,
+    nicknameSnapshot: NicknameSnapshot,
+    knownContacts: List<KnownContactOption>,
+    isUpdating: Boolean,
+    canUseCamera: Boolean,
+    onRequestCameraPermission: () -> Unit,
+    onRenameGroup: (String) -> Unit,
+    onAddMember: (String) -> Unit,
+    onRemoveMember: (String) -> Unit,
+    onLeaveGroup: () -> Unit,
+    onOpenProtocolInspector: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val activeTitle = groupDetails?.name?.ifBlank { fallbackTitle } ?: fallbackTitle
+    var isEditingName by rememberSaveable { mutableStateOf(false) }
+    var renameInput by rememberSaveable(activeTitle) { mutableStateOf(activeTitle) }
+    var showAddMember by rememberSaveable { mutableStateOf(false) }
+    var memberInput by rememberSaveable { mutableStateOf("") }
+    var showQrScanner by rememberSaveable { mutableStateOf(false) }
+    var confirmLeave by rememberSaveable { mutableStateOf(false) }
+
+    val canManage = groupDetails != null && GroupManagementPolicy.canManageMembers(groupDetails)
+    val members = groupDetails?.members.orEmpty()
+    val availableContacts = remember(knownContacts, members) {
+        val currentIds = members.map { it.inboxId.lowercase(Locale.ROOT) }.toSet()
+        knownContacts.filter { it.inboxId.lowercase(Locale.ROOT) !in currentIds }
+    }
+    val canSubmitMember = remember(memberInput) {
+        GroupManagementPolicy.parsePeerIdentifier(memberInput) != null
+    }
+    val canSubmitRename = remember(renameInput, activeTitle) {
+        val clean = GroupManagementPolicy.sanitizeGroupName(renameInput)
+        clean != null && !GroupManagementPolicy.isLoopbackGroupName(clean) && clean != activeTitle
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        properties = ScreenSecurityManager.dialogProperties(),
+        title = { Text("Πληροφορίες ομάδας") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                if (groupDetails == null || isUpdating) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+
+                if (isEditingName && canManage) {
+                    OutlinedTextField(
+                        value = renameInput,
+                        onValueChange = { renameInput = it.take(GroupManagementPolicy.MAX_GROUP_NAME_LENGTH) },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Όνομα ομάδας") },
+                        singleLine = true,
+                        enabled = !isUpdating
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        TextButton(
+                            onClick = {
+                                renameInput = activeTitle
+                                isEditingName = false
+                            }
+                        ) {
+                            Text("Ακύρωση")
+                        }
+                        TextButton(
+                            onClick = {
+                                onRenameGroup(renameInput)
+                                isEditingName = false
+                            },
+                            enabled = canSubmitRename && !isUpdating
+                        ) {
+                            Text("Αποθήκευση")
+                        }
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = activeTitle,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = GroupManagementPolicy.formatGroupMemberCountSubtitle(members.size),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        if (canManage) {
+                            IconButton(
+                                onClick = {
+                                    renameInput = activeTitle
+                                    isEditingName = true
+                                },
+                                enabled = !isUpdating
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Edit,
+                                    contentDescription = "Μετονομασία ομάδας",
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant)
+
+                Text(
+                    text = "Μέλη (${members.size})",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                members.forEach { member ->
+                    GroupMemberRow(
+                        member = member,
+                        nicknameSnapshot = nicknameSnapshot,
+                        canRemove = groupDetails != null &&
+                            !isUpdating &&
+                            GroupManagementPolicy.canRemoveMember(groupDetails, member),
+                        onRemove = { onRemoveMember(member.inboxId) }
+                    )
+                }
+
+                if (canManage) {
+                    if (!showAddMember) {
+                        OutlinedButton(
+                            onClick = { showAddMember = true },
+                            enabled = !isUpdating,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Προσθήκη μέλους")
+                        }
+                    } else {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "Προσθήκη μέλους",
+                                        style = MaterialTheme.typography.labelLarge
+                                    )
+                                    TextButton(
+                                        onClick = {
+                                            showAddMember = false
+                                            showQrScanner = false
+                                            memberInput = ""
+                                        }
+                                    ) {
+                                        Text("Κλείσιμο")
+                                    }
+                                }
+
+                                if (availableContacts.isNotEmpty() && !showQrScanner) {
+                                    FlowRow(
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        availableContacts.forEach { contact ->
+                                            FilterChip(
+                                                selected = false,
+                                                enabled = !isUpdating,
+                                                onClick = {
+                                                    onAddMember(contact.inboxId)
+                                                    showAddMember = false
+                                                },
+                                                label = { Text("+ ${contact.displayName}") }
+                                            )
+                                        }
+                                    }
+                                }
+
+                                PeerIdentifierInputSection(
+                                    value = memberInput,
+                                    onValueChange = { memberInput = it },
+                                    showQrScanner = showQrScanner,
+                                    onShowQrScannerChange = { showQrScanner = it },
+                                    canUseCamera = canUseCamera,
+                                    onRequestCameraPermission = onRequestCameraPermission,
+                                    scanPrompt = "Σαρώστε το QR του νέου μέλους.",
+                                    fieldLabel = "Διεύθυνση (0x...) ή Inbox ID"
+                                )
+                                if (!showQrScanner) {
+                                    Button(
+                                        onClick = {
+                                            val candidate = memberInput.trim()
+                                            memberInput = ""
+                                            showAddMember = false
+                                            onAddMember(candidate)
+                                        },
+                                        enabled = canSubmitMember && !isUpdating,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Text("Προσθήκη")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outlineVariant)
+
+                TextButton(
+                    onClick = onOpenProtocolInspector,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Πληροφορίες & Πρωτόκολλο MLS")
+                }
+
+                if (groupDetails?.isActive != false) {
+                    if (!confirmLeave) {
+                        TextButton(
+                            onClick = { confirmLeave = true },
+                            enabled = !isUpdating,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "Αποχώρηση από την ομάδα",
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = { confirmLeave = false },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Ακύρωση")
+                            }
+                            Button(
+                                onClick = {
+                                    confirmLeave = false
+                                    onLeaveGroup()
+                                },
+                                enabled = !isUpdating,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Επιβεβαίωση")
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Κλείσιμο") }
+        }
+    )
+}
+
+@Composable
+private fun GroupMemberRow(
+    member: GroupMemberInfo,
+    nicknameSnapshot: NicknameSnapshot,
+    canRemove: Boolean,
+    onRemove: () -> Unit
+) {
+    val label = remember(member.inboxId, nicknameSnapshot) {
+        GroupManagementPolicy.resolveSenderDisplayLabel(member.inboxId, nicknameSnapshot)
+    }
+    val displayLabel = if (member.isLocalUser) "$label (Εσείς)" else label
+    val initials = remember(label) { ChatFormatting.extractAvatarInitials(label) }
+    val roleLabel = when (member.permissionLevel) {
+        PermissionLevel.SUPER_ADMIN -> "Κύριος διαχειριστής"
+        PermissionLevel.ADMIN -> "Διαχειριστής"
+        PermissionLevel.MEMBER -> "Μέλος"
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Surface(
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            modifier = Modifier.size(34.dp)
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Text(
+                    text = initials,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        Spacer(modifier = Modifier.width(10.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = displayLabel,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1
+            )
+            Text(
+                text = roleLabel,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        if (canRemove) {
+            IconButton(
+                onClick = onRemove,
+                modifier = Modifier.size(32.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Close,
+                    contentDescription = "Αφαίρεση μέλους",
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
 }
 
 @Composable

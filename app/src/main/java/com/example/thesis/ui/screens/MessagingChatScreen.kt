@@ -7,6 +7,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -77,6 +78,8 @@ import com.example.thesis.R
 import com.example.thesis.call.CallHistoryPolicy
 import com.example.thesis.call.ChatCallEvent
 import com.example.thesis.call.ChatCallOutcome
+import com.example.thesis.identity.NicknameSnapshot
+import com.example.thesis.repository.GroupManagementPolicy
 import com.example.thesis.repository.ReadReceiptPolicy
 import com.example.thesis.repository.extractMediaAttachment
 import com.example.thesis.repository.extractVoiceNote
@@ -118,6 +121,8 @@ internal fun MessagingChatScreen(
     callEvents: List<ChatCallEvent> = emptyList(),
     peerDisplayName: String = "Επαφή",
     localInboxId: String,
+    isGroupConversation: Boolean = false,
+    nicknameSnapshot: NicknameSnapshot = NicknameSnapshot(),
     peerLastReadTimestampMs: Long? = null,
     draft: String,
     isSyncing: Boolean = false,
@@ -230,6 +235,7 @@ internal fun MessagingChatScreen(
                         }
                     }
                 } else {
+                    val isDarkTheme = isSystemInDarkTheme()
                     LazyColumn(
                         state = listState,
                         modifier = Modifier.fillMaxSize(),
@@ -277,11 +283,27 @@ internal fun MessagingChatScreen(
                                         localInboxId = localInboxId,
                                         peerLastReadTimestampMs = peerLastReadTimestampMs
                                     )
+                                    val showSenderHeader = isGroupConversation && !isOwn && !groupedWithPrev
+                                    val senderDisplayName = if (showSenderHeader) {
+                                        GroupManagementPolicy.resolveSenderDisplayLabel(
+                                            message.senderInboxId,
+                                            nicknameSnapshot
+                                        )
+                                    } else {
+                                        null
+                                    }
+                                    val senderColor = if (showSenderHeader) {
+                                        resolveGroupSenderColor(message.senderInboxId, isDarkTheme)
+                                    } else {
+                                        Color.Unspecified
+                                    }
                                     MessagingMessageBubble(
                                         message = message,
                                         isOwnMessage = isOwn,
                                         isGroupedWithPrevious = groupedWithPrev,
                                         isSeen = isSeen,
+                                        senderDisplayName = senderDisplayName,
+                                        senderColor = senderColor,
                                         maxBubbleWidth = maxBubbleWidth,
                                         retryEnabled = !isShredding,
                                         voicePlaybackState = voicePlaybackState,
@@ -704,6 +726,8 @@ private fun MessagingMessageBubble(
     isOwnMessage: Boolean,
     isGroupedWithPrevious: Boolean = false,
     isSeen: Boolean = false,
+    senderDisplayName: String? = null,
+    senderColor: Color = Color.Unspecified,
     maxBubbleWidth: Dp,
     retryEnabled: Boolean = true,
     voicePlaybackState: VoicePlaybackState = VoicePlaybackState(),
@@ -736,6 +760,17 @@ private fun MessagingMessageBubble(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = if (isOwnMessage) Alignment.End else Alignment.Start
     ) {
+        if (!isOwnMessage && !senderDisplayName.isNullOrBlank()) {
+            Text(
+                text = senderDisplayName,
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = senderColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(start = 6.dp, bottom = 2.dp)
+            )
+        }
         Surface(
             modifier = Modifier
                 .widthIn(
@@ -1001,4 +1036,27 @@ private fun decodeChatThumbnail(bytes: ByteArray, targetPx: Int = 720): ImageBit
         val opts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)?.asImageBitmap()
     }.getOrNull()
+}
+
+private val LIGHT_GROUP_SENDER_COLORS = listOf(
+    Color(0xFF2A5C55),
+    Color(0xFF3F51B5),
+    Color(0xFF8E44AD),
+    Color(0xFFB2592B),
+    Color(0xFF1E6B7B)
+)
+
+private val DARK_GROUP_SENDER_COLORS = listOf(
+    Color(0xFF8CC5BC),
+    Color(0xFF9FA8DA),
+    Color(0xFFCE93D8),
+    Color(0xFFE59866),
+    Color(0xFF80CBC4)
+)
+
+// Asignamos un color determinista y discreto a cada remitente del grupo segun su Inbox ID.
+private fun resolveGroupSenderColor(senderInboxId: String, darkTheme: Boolean): Color {
+    val palette = if (darkTheme) DARK_GROUP_SENDER_COLORS else LIGHT_GROUP_SENDER_COLORS
+    val index = (senderInboxId.lowercase(Locale.ROOT).hashCode() and Int.MAX_VALUE) % palette.size
+    return palette[index]
 }

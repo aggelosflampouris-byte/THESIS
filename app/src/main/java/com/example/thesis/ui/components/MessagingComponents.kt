@@ -55,6 +55,7 @@ import androidx.compose.ui.unit.dp
 import com.example.thesis.R
 import com.example.thesis.identity.NicknamePolicy
 import com.example.thesis.identity.NicknameSnapshot
+import com.example.thesis.repository.GroupManagementPolicy
 import com.example.thesis.ui.util.ChatFormatting
 import com.example.thesis.xmtp.XmtpEngineState
 import com.example.thesis.xmtp.cachedGroupName
@@ -73,12 +74,14 @@ internal fun MessagingTopBar(
     isSyncing: Boolean = false,
     isShredding: Boolean = false,
     isCallActive: Boolean = false,
+    groupMemberCount: Int? = null,
     onSearchOpenChange: (Boolean) -> Unit = {},
     onSearchQueryChange: (String) -> Unit = {},
     onBack: () -> Unit,
     onSync: () -> Unit,
     onOpenLogs: () -> Unit = {},
     onOpenProtocolInspector: () -> Unit = {},
+    onOpenGroupInfo: () -> Unit = {},
     onEditContactNickname: () -> Unit = {},
     onStartVoiceCall: () -> Unit = {},
     onStartVideoCall: () -> Unit = {}
@@ -92,7 +95,8 @@ internal fun MessagingTopBar(
                     selectedConversation != null -> {
                         val isDm = selectedConversation is Conversation.Dm
                         val isLoopback = selectedConversation is Conversation.Group &&
-                            selectedConversation.group.cachedGroupName() == "MLS Research Loopback"
+                            GroupManagementPolicy.isLoopbackGroupName(selectedConversation.group.cachedGroupName())
+                        val isGroup = !isDm && !isLoopback
                         val contactKey = if (isDm) selectedConversation.dm.peerInboxId else selectedConversation.id
                         val fallbackLabel = if (isDm) {
                             val peer = selectedConversation.dm.peerInboxId
@@ -101,7 +105,11 @@ internal fun MessagingTopBar(
                             selectedConversation.topic.take(16)
                         }
                         val groupName = (selectedConversation as? Conversation.Group)?.group?.cachedGroupName()
-                        val resolvedNick = NicknamePolicy.resolveContactNickname(contactKey, nicknameSnapshot)
+                        val resolvedNick = if (isDm) {
+                            NicknamePolicy.resolveContactNickname(contactKey, nicknameSnapshot)
+                        } else {
+                            null
+                        }
                         val headerTitle = when {
                             resolvedNick != null -> resolvedNick
                             isDm -> fallbackLabel
@@ -109,12 +117,20 @@ internal fun MessagingTopBar(
                             !groupName.isNullOrBlank() -> groupName
                             else -> "Ομαδική συνομιλία"
                         }
+                        val headerSubtitle = when {
+                            isGroup && groupMemberCount != null && groupMemberCount > 0 ->
+                                "${GroupManagementPolicy.formatGroupMemberCountSubtitle(groupMemberCount)} • Κρυπτογραφημένη ομάδα"
+                            isGroup -> "Κρυπτογραφημένη ομάδα"
+                            else -> "Κρυπτογραφημένη συνομιλία"
+                        }
                         val initials = if (isLoopback) "LB" else ChatFormatting.extractAvatarInitials(headerTitle)
 
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable { onOpenProtocolInspector() },
+                                .clickable {
+                                    if (isGroup) onOpenGroupInfo() else onOpenProtocolInspector()
+                                },
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Surface(
@@ -123,11 +139,20 @@ internal fun MessagingTopBar(
                                 modifier = Modifier.size(34.dp)
                             ) {
                                 Box(contentAlignment = Alignment.Center) {
-                                    Text(
-                                        text = initials,
-                                        style = MaterialTheme.typography.labelLarge,
-                                        color = MaterialTheme.colorScheme.onPrimaryContainer
-                                    )
+                                    if (isGroup) {
+                                        Icon(
+                                            painter = painterResource(id = R.drawable.ic_group),
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp),
+                                            tint = MaterialTheme.colorScheme.onPrimaryContainer
+                                        )
+                                    } else {
+                                        Text(
+                                            text = initials,
+                                            style = MaterialTheme.typography.labelLarge,
+                                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                                        )
+                                    }
                                 }
                             }
                             Spacer(modifier = Modifier.width(10.dp))
@@ -140,7 +165,7 @@ internal fun MessagingTopBar(
                                     overflow = TextOverflow.Ellipsis
                                 )
                                 Text(
-                                    text = "Κρυπτογραφημένη συνομιλία",
+                                    text = headerSubtitle,
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 1,
@@ -248,16 +273,27 @@ internal fun MessagingTopBar(
                             expanded = showChatMenu,
                             onDismissRequest = { showChatMenu = false }
                         ) {
+                            val isDmMenu = selectedConversation is Conversation.Dm
+                            val isLoopbackMenu = selectedConversation is Conversation.Group &&
+                                GroupManagementPolicy.isLoopbackGroupName(selectedConversation.group.cachedGroupName())
+                            val isGroupMenu = !isDmMenu && !isLoopbackMenu
+                            if (isGroupMenu) {
+                                DropdownMenuItem(
+                                    text = { Text("Πληροφορίες ομάδας") },
+                                    onClick = {
+                                        showChatMenu = false
+                                        onOpenGroupInfo()
+                                    }
+                                )
+                            }
                             DropdownMenuItem(
-                                text = { Text("Πληροφορίες & Πρωτόκολλο MLS") },
+                                text = { Text(if (isGroupMenu) "Πρωτόκολλο MLS" else "Πληροφορίες & Πρωτόκολλο MLS") },
                                 onClick = {
                                     showChatMenu = false
                                     onOpenProtocolInspector()
                                 }
                             )
-                            val isLoopback = selectedConversation is Conversation.Group &&
-                                selectedConversation.group.cachedGroupName() == "MLS Research Loopback"
-                            if (!isLoopback) {
+                            if (isDmMenu) {
                                 DropdownMenuItem(
                                     text = { Text("Ψευδώνυμο επαφής") },
                                     onClick = {
@@ -417,7 +453,7 @@ internal fun messagingStatusText(message: String): String {
     return when {
         normalized.contains("crypto-shredded") || normalized.contains("shred") ->
             "Η οριστική διαγραφή ολοκληρώθηκε (GDPR Art. 17)."
-        normalized.contains("loopback") || normalized.contains("ενεργή") ->
+        normalized.contains("loopback") ->
             "Η συνεδρία δοκιμής Loopback MLS είναι έτοιμη."
         normalized.contains("αποτυχ") || normalized.contains("σφάλμα") ->
             "Η ενέργεια δεν ολοκληρώθηκε. Προσπαθήστε ξανά."

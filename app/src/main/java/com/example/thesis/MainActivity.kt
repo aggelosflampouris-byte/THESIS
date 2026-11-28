@@ -57,12 +57,15 @@ import com.example.thesis.ui.components.UpdateAvailableBanner
 import com.example.thesis.ui.components.messagingStatusText
 import com.example.thesis.identity.NicknamePolicy
 import com.example.thesis.identity.NicknameSnapshot
+import com.example.thesis.repository.GroupManagementPolicy
 import com.example.thesis.security.ScreenSecurityManager
 import com.example.thesis.security.ScreenSecurityPolicy
 import com.example.thesis.ui.dialogs.AppUpdateDialog
 import com.example.thesis.ui.dialogs.EditContactNicknameDialog
 import com.example.thesis.ui.dialogs.EditMyNicknameDialog
 import com.example.thesis.ui.dialogs.GDPRShredConfirmationDialog
+import com.example.thesis.ui.dialogs.GroupInfoDialog
+import com.example.thesis.ui.dialogs.KnownContactOption
 import org.xmtp.android.library.Conversation
 import com.example.thesis.ui.dialogs.MLSProtocolInspectorDialog
 import com.example.thesis.ui.dialogs.MediaAttachmentViewerDialog
@@ -205,6 +208,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     var isCallOverlayMinimized by rememberSaveable(callState.callId) { mutableStateOf(false) }
 
     val updateStatus by viewModel.updateStatus.collectAsState()
+    val activeGroupDetails by viewModel.activeGroupDetails.collectAsState()
     var selectedHomeTab by rememberSaveable { mutableStateOf(HomeTab.CHATS) }
     var isSearchOpen by rememberSaveable { mutableStateOf(false) }
     var searchQuery by rememberSaveable { mutableStateOf("") }
@@ -215,6 +219,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     var showShredConfirmationDialog by rememberSaveable { mutableStateOf(false) }
     var showLogsScreen by rememberSaveable { mutableStateOf(false) }
     var showProtocolInspectorDialog by rememberSaveable { mutableStateOf(false) }
+    var showGroupInfoDialog by rememberSaveable { mutableStateOf(false) }
     var showQrDownloadDialog by rememberSaveable { mutableStateOf(false) }
     var showExportNoLockConfirmDialog by rememberSaveable { mutableStateOf(false) }
     var nicknameEditTarget by remember { mutableStateOf<Conversation?>(null) }
@@ -424,6 +429,7 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     }
 
     LaunchedEffect(selectedConversation) {
+        showGroupInfoDialog = false
         if (selectedConversation != null) {
             if (showLogsScreen) showLogsScreen = false
             if (isSearchOpen) {
@@ -478,14 +484,39 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
     }
 
     if (showNewConversationDialog) {
-        NewConversationDialog(
+        NewConversationDialogHost(
+            viewModel = viewModel,
+            nicknameSnapshot = nicknameSnapshot,
             canUseCamera = hasCameraPermission,
             onRequestCameraPermission = { qrCameraPermissionLauncher.launch(Manifest.permission.CAMERA) },
             onDismiss = { showNewConversationDialog = false },
             onStartConversation = { target, contactNick ->
                 showNewConversationDialog = false
                 viewModel.startNewConversation(target, contactNick)
+            },
+            onStartGroup = { groupName, memberIds ->
+                showNewConversationDialog = false
+                viewModel.startNewGroup(groupName, memberIds)
             }
+        )
+    }
+
+    val activeGroupConv = selectedConversation as? Conversation.Group
+    if (showGroupInfoDialog &&
+        activeGroupConv != null &&
+        !GroupManagementPolicy.isLoopbackGroupName(activeGroupConv.group.cachedGroupName())
+    ) {
+        GroupInfoDialogHost(
+            viewModel = viewModel,
+            group = activeGroupConv.group,
+            nicknameSnapshot = nicknameSnapshot,
+            canUseCamera = hasCameraPermission,
+            onRequestCameraPermission = { qrCameraPermissionLauncher.launch(Manifest.permission.CAMERA) },
+            onOpenProtocolInspector = {
+                showGroupInfoDialog = false
+                showProtocolInspectorDialog = true
+            },
+            onDismiss = { showGroupInfoDialog = false }
         )
     }
 
@@ -663,12 +694,17 @@ fun ThesisMessagingApp(viewModel: ChatViewModel) {
                         isSyncing = isSyncing,
                         isShredding = isShredding,
                         isCallActive = callState !is CallUiState.Idle,
+                        groupMemberCount = activeGroupDetails?.takeIf { it.conversationId == selectedConversation?.id }?.members?.size,
                         onSearchOpenChange = { isSearchOpen = it },
                         onSearchQueryChange = { searchQuery = it },
                         onBack = { viewModel.selectConversation(null) },
                         onSync = { viewModel.syncConversations() },
                         onOpenLogs = { showLogsScreen = true },
                         onOpenProtocolInspector = { showProtocolInspectorDialog = true },
+                        onOpenGroupInfo = {
+                            showGroupInfoDialog = true
+                            viewModel.refreshActiveGroupDetails()
+                        },
                         onEditContactNickname = {
                             selectedConversation?.let { nicknameEditTarget = it }
                         },
@@ -1087,14 +1123,18 @@ private fun MessagingChatScreenHost(
         }
     }
 
+    val isGroupConversation = activeConv is Conversation.Group &&
+        !GroupManagementPolicy.isLoopbackGroupName(activeConv.group.cachedGroupName())
+
     val peerDisplayName = remember(activeConv, nicknameSnapshot) {
-        if (activeConv is Conversation.Dm) {
-            val peerId = activeConv.dm.peerInboxId
-            NicknamePolicy.resolveContactNickname(peerId, nicknameSnapshot)
-                ?: NicknamePolicy.resolveContactNickname(activeConv.id, nicknameSnapshot)
-                ?: if (peerId.length > 14) "${peerId.take(6)}...${peerId.takeLast(4)}" else peerId
-        } else {
-            "Επαφή"
+        when (activeConv) {
+            is Conversation.Dm -> {
+                val peerId = activeConv.dm.peerInboxId
+                NicknamePolicy.resolveContactNickname(peerId, nicknameSnapshot)
+                    ?: NicknamePolicy.resolveContactNickname(activeConv.id, nicknameSnapshot)
+                    ?: if (peerId.length > 14) "${peerId.take(6)}...${peerId.takeLast(4)}" else peerId
+            }
+            is Conversation.Group -> activeConv.group.cachedGroupName().ifBlank { "Ομαδική συνομιλία" }
         }
     }
 
@@ -1103,7 +1143,9 @@ private fun MessagingChatScreenHost(
         callEvents = callEventsByConversation[activeConv.id].orEmpty(),
         peerDisplayName = peerDisplayName,
         localInboxId = localInboxId,
-        peerLastReadTimestampMs = peerReadTimestamps[activeConv.id],
+        isGroupConversation = isGroupConversation,
+        nicknameSnapshot = nicknameSnapshot,
+        peerLastReadTimestampMs = if (activeConv is Conversation.Dm) peerReadTimestamps[activeConv.id] else null,
         draft = draft,
         isSyncing = isSyncing,
         isShredding = isShredding,
@@ -1240,15 +1282,108 @@ private fun MLSProtocolInspectorDialogHost(
 ) {
     // Observamos el flujo de mensajes solo mientras el inspector de protocolo esta abierto.
     val messages by viewModel.messages.collectAsState()
+    val activeGroupDetails by viewModel.activeGroupDetails.collectAsState()
     val inspectorKey = if (conversation is Conversation.Dm) conversation.dm.peerInboxId else conversation.id
-    val isLoopbackConv = conversation is Conversation.Group && conversation.group.cachedGroupName() == "MLS Research Loopback"
+    val isLoopbackConv = conversation is Conversation.Group &&
+        GroupManagementPolicy.isLoopbackGroupName(conversation.group.cachedGroupName())
+    val groupMembersCount = if (conversation is Conversation.Group && !isLoopbackConv) {
+        activeGroupDetails?.takeIf { it.conversationId == conversation.id }?.members?.size
+    } else {
+        null
+    }
     MLSProtocolInspectorDialog(
         conversation = conversation,
         localInboxId = localInboxId,
         messageCount = messages.size,
-        contactNickname = NicknamePolicy.resolveContactNickname(inspectorKey, nicknameSnapshot),
-        onEditContactNickname = if (isLoopbackConv) null else onEditContactNickname,
+        contactNickname = if (conversation is Conversation.Dm) {
+            NicknamePolicy.resolveContactNickname(inspectorKey, nicknameSnapshot)
+        } else {
+            null
+        },
+        memberCount = groupMembersCount,
+        onEditContactNickname = if (conversation is Conversation.Dm) onEditContactNickname else null,
         onDismiss = onDismiss,
         onCopyTopic = onCopyTopic
     )
+}
+
+@Composable
+private fun NewConversationDialogHost(
+    viewModel: ChatViewModel,
+    nicknameSnapshot: NicknameSnapshot,
+    canUseCamera: Boolean,
+    onRequestCameraPermission: () -> Unit,
+    onDismiss: () -> Unit,
+    onStartConversation: (String, String?) -> Unit,
+    onStartGroup: (String, List<String>) -> Unit
+) {
+    val conversations by viewModel.conversations.collectAsState()
+    val knownContacts = remember(conversations, nicknameSnapshot) {
+        buildKnownContacts(conversations, nicknameSnapshot)
+    }
+    NewConversationDialog(
+        knownContacts = knownContacts,
+        canUseCamera = canUseCamera,
+        onRequestCameraPermission = onRequestCameraPermission,
+        onDismiss = onDismiss,
+        onStartConversation = onStartConversation,
+        onStartGroup = onStartGroup
+    )
+}
+
+@Composable
+private fun GroupInfoDialogHost(
+    viewModel: ChatViewModel,
+    group: org.xmtp.android.library.Group,
+    nicknameSnapshot: NicknameSnapshot,
+    canUseCamera: Boolean,
+    onRequestCameraPermission: () -> Unit,
+    onOpenProtocolInspector: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val groupDetails by viewModel.activeGroupDetails.collectAsState()
+    val isUpdating by viewModel.isUpdatingGroup.collectAsState()
+    val conversations by viewModel.conversations.collectAsState()
+    val knownContacts = remember(conversations, nicknameSnapshot) {
+        buildKnownContacts(conversations, nicknameSnapshot)
+    }
+    GroupInfoDialog(
+        groupDetails = groupDetails?.takeIf { it.conversationId == group.id },
+        fallbackTitle = group.cachedGroupName().ifBlank { "Ομαδική συνομιλία" },
+        nicknameSnapshot = nicknameSnapshot,
+        knownContacts = knownContacts,
+        isUpdating = isUpdating,
+        canUseCamera = canUseCamera,
+        onRequestCameraPermission = onRequestCameraPermission,
+        onRenameGroup = { newName -> viewModel.renameActiveGroup(newName) },
+        onAddMember = { peer -> viewModel.addMemberToActiveGroup(peer) },
+        onRemoveMember = { targetInboxId -> viewModel.removeMemberFromActiveGroup(targetInboxId) },
+        onLeaveGroup = {
+            onDismiss()
+            viewModel.leaveActiveGroup()
+        },
+        onOpenProtocolInspector = onOpenProtocolInspector,
+        onDismiss = onDismiss
+    )
+}
+
+private fun buildKnownContacts(
+    conversations: List<Conversation>,
+    nicknameSnapshot: NicknameSnapshot
+): List<KnownContactOption> {
+    val seen = LinkedHashSet<String>()
+    val result = ArrayList<KnownContactOption>()
+    for (conv in conversations) {
+        if (conv !is Conversation.Dm) continue
+        val peerId = conv.dm.peerInboxId
+        val normalized = NicknamePolicy.normalizeKey(peerId)
+        if (normalized.isEmpty() || !seen.add(normalized)) continue
+        result.add(
+            KnownContactOption(
+                inboxId = peerId,
+                displayName = GroupManagementPolicy.resolveSenderDisplayLabel(peerId, nicknameSnapshot)
+            )
+        )
+    }
+    return result
 }

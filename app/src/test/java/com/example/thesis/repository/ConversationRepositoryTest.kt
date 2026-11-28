@@ -44,6 +44,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.xmtp.android.library.Client
+import org.xmtp.android.library.ConsentState
 import org.xmtp.android.library.Conversation
 import org.xmtp.android.library.Conversations
 import org.xmtp.android.library.Dm
@@ -54,6 +55,11 @@ import org.xmtp.android.library.codecs.ContentTypeReadReceipt
 import org.xmtp.android.library.codecs.ContentTypeText
 import org.xmtp.android.library.codecs.ReadReceipt
 import org.xmtp.android.library.libxmtp.DecodedMessage
+import org.xmtp.android.library.libxmtp.GroupMembershipResult
+import org.xmtp.android.library.libxmtp.GroupPermissionPreconfiguration
+import org.xmtp.android.library.libxmtp.IdentityKind
+import org.xmtp.android.library.libxmtp.Member
+import org.xmtp.android.library.libxmtp.PermissionLevel
 import org.xmtp.android.library.libxmtp.PublicIdentity
 import org.xmtp.proto.mls.message.contents.TranscriptMessages.GroupUpdated
 import java.io.IOException
@@ -1142,5 +1148,160 @@ class ConversationRepositoryTest {
                 match<SendOptions> { it.contentType == ContentTypeCallSignal }
             )
         }
+    }
+
+    @Test
+    fun test_createGroupConversation_successWithMixedIdentifiers() = runTest(testDispatcher) {
+        val localInbox = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        val inboxPeer = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        val ethResolvedInbox = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        every { mockClient.inboxId } returns localInbox
+        every { mockClient.environment } returns org.xmtp.android.library.XMTPEnvironment.PRODUCTION
+        coEvery { mockClient.canMessage(any()) } returns mapOf(testPeerAddress to true)
+        coEvery { mockClient.inboxIdFromIdentity(any()) } returns ethResolvedInbox
+
+        val mockGroup = mockk<Group>(relaxed = true)
+        every { mockGroup.id } returns "group_mls_1"
+        every { mockGroup.topic } returns "xmtp/mls/group_1"
+        coEvery {
+            mockConversations.newGroup(
+                inboxIds = any(),
+                permissions = GroupPermissionPreconfiguration.ADMIN_ONLY,
+                groupName = "Thesis Squad",
+                groupImageUrlSquare = any(),
+                groupDescription = any(),
+                disappearingMessageSettings = any(),
+                appData = any()
+            )
+        } returns mockGroup
+
+        val result = repository.createGroupConversation(
+            groupName = "  Thesis\nSquad  ",
+            rawPeerIdentifiers = listOf(inboxPeer.uppercase(), testPeerAddress.uppercase(), localInbox)
+        )
+
+        assertTrue(result.isSuccess)
+        val created = result.getOrNull() as Conversation.Group
+        assertEquals("group_mls_1", created.id)
+        coVerify(exactly = 1) {
+            mockConversations.newGroup(
+                inboxIds = listOf(inboxPeer, ethResolvedInbox),
+                permissions = GroupPermissionPreconfiguration.ADMIN_ONLY,
+                groupName = "Thesis Squad",
+                groupImageUrlSquare = "",
+                groupDescription = "",
+                disappearingMessageSettings = null,
+                appData = null
+            )
+        }
+        coVerify(exactly = 1) { mockGroup.updateConsentState(ConsentState.ALLOWED) }
+        coVerify(exactly = 1) { mockGroup.sync() }
+    }
+
+    @Test
+    fun test_createGroupConversation_validationFailures() = runTest(testDispatcher) {
+        val localInbox = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        every { mockClient.inboxId } returns localInbox
+        every { mockClient.environment } returns org.xmtp.android.library.XMTPEnvironment.PRODUCTION
+
+        val blankName = repository.createGroupConversation("   ", listOf("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))
+        assertTrue(blankName.isFailure)
+
+        val loopbackName = repository.createGroupConversation(GroupManagementPolicy.LOOPBACK_GROUP_NAME, listOf("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))
+        assertTrue(loopbackName.isFailure)
+
+        val selfOnly = repository.createGroupConversation("Team", listOf(localInbox, testSenderAddress))
+        assertTrue(selfOnly.isFailure)
+
+        coEvery { mockClient.canMessage(any()) } returns mapOf(testPeerAddress to false)
+        val unregistered = repository.createGroupConversation("Team", listOf(testPeerAddress))
+        assertTrue(unregistered.isFailure)
+    }
+
+    @Test
+    fun test_loadGroupDetails_sortsMembersAndResolvesPermissions() = runTest(testDispatcher) {
+        val localInbox = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        val memberInbox = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        val adminInbox = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+        every { mockClient.inboxId } returns localInbox
+
+        val selfMember = mockk<Member>(relaxed = true) {
+            every { inboxId } returns localInbox
+            every { permissionLevel } returns PermissionLevel.SUPER_ADMIN
+            every { identities } returns listOf(mockk<PublicIdentity> {
+                every { kind } returns IdentityKind.ETHEREUM
+                every { identifier } returns testSenderAddress
+            })
+        }
+        val regularMember = mockk<Member>(relaxed = true) {
+            every { inboxId } returns memberInbox
+            every { permissionLevel } returns PermissionLevel.MEMBER
+            every { identities } returns emptyList()
+        }
+        val adminMember = mockk<Member>(relaxed = true) {
+            every { inboxId } returns adminInbox
+            every { permissionLevel } returns PermissionLevel.ADMIN
+            every { identities } returns emptyList()
+        }
+
+        val mockGroup = mockk<Group>(relaxed = true)
+        every { mockGroup.id } returns "group_details_1"
+        coEvery { mockGroup.name() } returns "Core Group"
+        coEvery { mockGroup.description() } returns ""
+        coEvery { mockGroup.isActive() } returns true
+        coEvery { mockGroup.isSuperAdmin(localInbox) } returns true
+        coEvery { mockGroup.isAdmin(localInbox) } returns true
+        coEvery { mockGroup.members() } returns listOf(regularMember, adminMember, selfMember)
+
+        val res = repository.loadGroupDetails(mockGroup)
+        assertTrue(res.isSuccess)
+        val details = res.getOrThrow()
+        assertEquals("Core Group", details.name)
+        assertTrue(details.isLocalSuperAdmin)
+        assertTrue(details.isLocalAdmin)
+        assertEquals(listOf(localInbox, adminInbox, memberInbox), details.members.map { it.inboxId })
+        assertEquals(testSenderAddress, details.members.first().ethAddress)
+    }
+
+    @Test
+    fun test_groupMemberMutationsAndLeaveGroup() = runTest(testDispatcher) {
+        val localInbox = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        val existingInbox = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        val newInbox = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        every { mockClient.inboxId } returns localInbox
+
+        val existingMember = mockk<Member>(relaxed = true) {
+            every { inboxId } returns existingInbox
+            every { permissionLevel } returns PermissionLevel.MEMBER
+            every { identities } returns emptyList()
+        }
+        val mockGroup = mockk<Group>(relaxed = true)
+        every { mockGroup.id } returns "group_mut_1"
+        coEvery { mockGroup.name() } returns "Group A"
+        coEvery { mockGroup.description() } returns ""
+        coEvery { mockGroup.isActive() } returns true
+        coEvery { mockGroup.isSuperAdmin(localInbox) } returns true
+        coEvery { mockGroup.members() } returns listOf(existingMember)
+        coEvery { mockGroup.addMembers(listOf(newInbox)) } returns mockk<GroupMembershipResult>(relaxed = true)
+
+        val dupAdd = repository.addGroupMember(mockGroup, existingInbox)
+        assertTrue(dupAdd.isFailure)
+
+        val okAdd = repository.addGroupMember(mockGroup, newInbox)
+        assertTrue(okAdd.isSuccess)
+        coVerify(exactly = 1) { mockGroup.addMembers(listOf(newInbox)) }
+
+        val okRemove = repository.removeGroupMember(mockGroup, existingInbox)
+        assertTrue(okRemove.isSuccess)
+        coVerify(exactly = 1) { mockGroup.removeMembers(listOf(existingInbox)) }
+
+        val okRename = repository.updateGroupName(mockGroup, "Renamed Squad")
+        assertTrue(okRename.isSuccess)
+        coVerify(exactly = 1) { mockGroup.updateName("Renamed Squad") }
+
+        val okLeave = repository.leaveGroup(mockGroup)
+        assertTrue(okLeave.isSuccess)
+        coVerify(exactly = 1) { mockGroup.leaveGroup() }
+        coVerify(exactly = 1) { mockGroup.updateConsentState(ConsentState.DENIED) }
     }
 }

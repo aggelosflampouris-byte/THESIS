@@ -74,8 +74,12 @@ import org.xmtp.android.library.libxmtp.DecodedMessage
 import org.xmtp.proto.mls.message.contents.TranscriptMessages.GroupUpdated
 import org.xmtp.android.library.libxmtp.PublicIdentity
 import org.xmtp.android.library.libxmtp.IdentityKind
+import org.xmtp.android.library.libxmtp.GroupPermissionPreconfiguration
+import org.xmtp.android.library.libxmtp.PermissionLevel
+import com.example.thesis.xmtp.cachedGroupName
 import java.util.Collections
 import java.util.LinkedHashMap
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -95,7 +99,8 @@ data class IncomingCallSignal(
 data class ConversationPreview(
     val text: String,
     val timestampMs: Long,
-    val isFromMe: Boolean
+    val isFromMe: Boolean,
+    val senderInboxId: String = ""
 )
 
 /**
@@ -646,6 +651,302 @@ class ConversationRepository(
         }
     }
 
+    // Resolvemos una direccion Ethereum o Inbox ID al identificador canonico de XMTP verificando soporte MLS.
+    private suspend fun resolvePeerInboxId(client: Client, parsed: ParsedPeerIdentifier): String {
+        return when (parsed) {
+            is ParsedPeerIdentifier.InboxId -> parsed.inboxId
+            is ParsedPeerIdentifier.EthereumAddress -> {
+                val identity = PublicIdentity(IdentityKind.ETHEREUM, parsed.address)
+                val canMessageMap = try {
+                    client.canMessage(listOf(identity))
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    Log.w(TAG, "canMessage check error: ${e.message}")
+                    emptyMap()
+                }
+                val isRegistered = canMessageMap[parsed.address]
+                    ?: canMessageMap[identity.identifier]
+                    ?: canMessageMap[parsed.address.lowercase(Locale.ROOT)]
+                    ?: true
+                if (!isRegistered) {
+                    throw IllegalStateException(
+                        "Ο χρήστης ${parsed.address} δεν διαθέτει ενεργά κλειδιά MLS στο δίκτυο XMTP (${client.environment.name})."
+                    )
+                }
+                val resolvedInbox = client.inboxIdFromIdentity(identity)?.trim().orEmpty()
+                if (resolvedInbox.isEmpty()) {
+                    throw IllegalStateException(
+                        "Δεν βρέθηκε Inbox ID στο δίκτυο XMTP για τη διεύθυνση ${parsed.address}."
+                    )
+                }
+                resolvedInbox.lowercase(Locale.ROOT)
+            }
+        }
+    }
+
+    // Creamos un grupo MLS con permisos de administracion restringidos al creador tras validar y deduplicar miembros.
+    suspend fun createGroupConversation(
+        groupName: String,
+        rawPeerIdentifiers: List<String>,
+        groupDescription: String = ""
+    ): Result<Conversation> = withContext(ioDispatcher) {
+        val client = xmtpEngine.client
+            ?: return@withContext Result.failure(
+                IllegalStateException("XMTP engine is not ready (current state: ${xmtpEngine.state.value})")
+            )
+
+        val cleanName = GroupManagementPolicy.sanitizeGroupName(groupName)
+            ?: return@withContext Result.failure(
+                IllegalArgumentException("Εισάγετε ένα έγκυρο όνομα ομάδας.")
+            )
+        if (GroupManagementPolicy.isLoopbackGroupName(cleanName)) {
+            return@withContext Result.failure(
+                IllegalArgumentException("Αυτό το όνομα ομάδας προορίζεται μόνο για εσωτερικές δοκιμές.")
+            )
+        }
+
+        val parsedPeers = GroupManagementPolicy.deduplicatePeerIdentifiers(
+            rawList = rawPeerIdentifiers,
+            localInboxId = client.inboxId,
+            localEthAddress = runCatching { client.publicIdentity.identifier }.getOrNull()
+        )
+        if (parsedPeers.isEmpty()) {
+            return@withContext Result.failure(
+                IllegalArgumentException("Προσθέστε τουλάχιστον ένα έγκυρο μέλος στην ομάδα.")
+            )
+        }
+
+        try {
+            val resolvedInboxIds = LinkedHashSet<String>()
+            for (peer in parsedPeers) {
+                val resolved = resolvePeerInboxId(client, peer)
+                if (!resolved.equals(client.inboxId, ignoreCase = true)) {
+                    resolvedInboxIds.add(resolved)
+                }
+            }
+            if (resolvedInboxIds.isEmpty()) {
+                return@withContext Result.failure(
+                    IllegalArgumentException("Προσθέστε τουλάχιστον ένα έγκυρο μέλος στην ομάδα.")
+                )
+            }
+
+            val group = client.conversations.newGroup(
+                inboxIds = resolvedInboxIds.toList(),
+                permissions = GroupPermissionPreconfiguration.ADMIN_ONLY,
+                groupName = cleanName,
+                groupDescription = GroupManagementPolicy.sanitizeGroupDescription(groupDescription)
+            )
+            try {
+                group.updateConsentState(ConsentState.ALLOWED)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                Log.w(TAG, "Could not update group consent state: ${e.message}")
+            }
+            try {
+                group.sync()
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+            }
+            conversationRefreshTrigger.emit(Unit)
+            Result.success(Conversation.Group(group))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to create MLS group: ${e::class.java.simpleName}")
+            Result.failure(e)
+        }
+    }
+
+    // Consultamos metadatos, lista de miembros y privilegios locales actualizados del grupo MLS.
+    suspend fun loadGroupDetails(group: org.xmtp.android.library.Group): Result<GroupDetailsSnapshot> =
+        withContext(ioDispatcher) {
+            val client = xmtpEngine.client
+                ?: return@withContext Result.failure(
+                    IllegalStateException("XMTP engine is not ready (current state: ${xmtpEngine.state.value})")
+                )
+            try {
+                try {
+                    group.sync()
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    Log.w(TAG, "Group sync before details load failed: ${e::class.java.simpleName}")
+                }
+
+                val isActive = runCatching { group.isActive() }.getOrDefault(true)
+                val name = runCatching { group.name() }.getOrNull().orEmpty()
+                    .ifBlank { group.cachedGroupName() }
+                val description = runCatching { group.description() }.getOrDefault("")
+                val isSuperAdmin = runCatching { group.isSuperAdmin(client.inboxId) }.getOrDefault(false)
+                val isAdmin = isSuperAdmin || runCatching { group.isAdmin(client.inboxId) }.getOrDefault(false)
+
+                val mappedMembers = group.members().map { member ->
+                    val ethAddr = member.identities.firstOrNull { it.kind == IdentityKind.ETHEREUM }?.identifier
+                    GroupMemberInfo(
+                        inboxId = member.inboxId,
+                        ethAddress = ethAddr,
+                        permissionLevel = member.permissionLevel,
+                        isLocalUser = member.inboxId.equals(client.inboxId, ignoreCase = true)
+                    )
+                }.sortedWith(
+                    compareBy<GroupMemberInfo>(
+                        { !it.isLocalUser },
+                        {
+                            when (it.permissionLevel) {
+                                PermissionLevel.SUPER_ADMIN -> 0
+                                PermissionLevel.ADMIN -> 1
+                                PermissionLevel.MEMBER -> 2
+                            }
+                        },
+                        { it.inboxId.lowercase(Locale.ROOT) }
+                    )
+                )
+
+                Result.success(
+                    GroupDetailsSnapshot(
+                        conversationId = group.id,
+                        name = name,
+                        description = description,
+                        members = mappedMembers,
+                        isLocalAdmin = isAdmin,
+                        isLocalSuperAdmin = isSuperAdmin,
+                        isActive = isActive
+                    )
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to load group details: ${e::class.java.simpleName}")
+                Result.failure(e)
+            }
+        }
+
+    // Agregamos un participante al grupo verificando formato, existencia en XMTP y ausencia previa.
+    suspend fun addGroupMember(
+        group: org.xmtp.android.library.Group,
+        rawPeerIdentifier: String
+    ): Result<GroupDetailsSnapshot> = withContext(ioDispatcher) {
+        val client = xmtpEngine.client
+            ?: return@withContext Result.failure(
+                IllegalStateException("XMTP engine is not ready (current state: ${xmtpEngine.state.value})")
+            )
+        val parsed = GroupManagementPolicy.parsePeerIdentifier(rawPeerIdentifier)
+            ?: return@withContext Result.failure(
+                IllegalArgumentException("Μη έγκυρη διεύθυνση (0x...) ή Inbox ID.")
+            )
+        try {
+            val resolvedInbox = resolvePeerInboxId(client, parsed)
+            if (resolvedInbox.equals(client.inboxId, ignoreCase = true)) {
+                return@withContext Result.failure(
+                    IllegalArgumentException("Είστε ήδη μέλος αυτής της ομάδας.")
+                )
+            }
+            val currentMembers = group.members()
+            if (currentMembers.any { it.inboxId.equals(resolvedInbox, ignoreCase = true) }) {
+                return@withContext Result.failure(
+                    IllegalStateException("Το μέλος βρίσκεται ήδη στην ομάδα.")
+                )
+            }
+            group.addMembers(listOf(resolvedInbox))
+            try {
+                group.sync()
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+            }
+            conversationRefreshTrigger.emit(Unit)
+            loadGroupDetails(group)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to add group member: ${e::class.java.simpleName}")
+            Result.failure(e)
+        }
+    }
+
+    suspend fun removeGroupMember(
+        group: org.xmtp.android.library.Group,
+        targetInboxId: String
+    ): Result<GroupDetailsSnapshot> = withContext(ioDispatcher) {
+        val client = xmtpEngine.client
+            ?: return@withContext Result.failure(
+                IllegalStateException("XMTP engine is not ready (current state: ${xmtpEngine.state.value})")
+            )
+        val cleanTarget = targetInboxId.trim()
+        if (cleanTarget.isEmpty() || cleanTarget.equals(client.inboxId, ignoreCase = true)) {
+            return@withContext Result.failure(
+                IllegalArgumentException("Μη έγκυρο μέλος προς αφαίρεση.")
+            )
+        }
+        try {
+            group.removeMembers(listOf(cleanTarget))
+            try {
+                group.sync()
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+            }
+            conversationRefreshTrigger.emit(Unit)
+            loadGroupDetails(group)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to remove group member: ${e::class.java.simpleName}")
+            Result.failure(e)
+        }
+    }
+
+    suspend fun updateGroupName(
+        group: org.xmtp.android.library.Group,
+        rawName: String
+    ): Result<GroupDetailsSnapshot> = withContext(ioDispatcher) {
+        val cleanName = GroupManagementPolicy.sanitizeGroupName(rawName)
+            ?: return@withContext Result.failure(
+                IllegalArgumentException("Εισάγετε ένα έγκυρο όνομα ομάδας.")
+            )
+        if (GroupManagementPolicy.isLoopbackGroupName(cleanName)) {
+            return@withContext Result.failure(
+                IllegalArgumentException("Αυτό το όνομα ομάδας προορίζεται μόνο για εσωτερικές δοκιμές.")
+            )
+        }
+        try {
+            group.updateName(cleanName)
+            try {
+                group.sync()
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+            }
+            conversationRefreshTrigger.emit(Unit)
+            loadGroupDetails(group)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to update group name: ${e::class.java.simpleName}")
+            Result.failure(e)
+        }
+    }
+
+    suspend fun leaveGroup(group: org.xmtp.android.library.Group): Result<Unit> = withContext(ioDispatcher) {
+        try {
+            group.leaveGroup()
+            try {
+                group.sync()
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+            }
+            // Marcamos el consentimiento como DENIED tras salir para que el grupo no reaparezca en la bandeja.
+            try {
+                group.updateConsentState(ConsentState.DENIED)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+            }
+            conversationRefreshTrigger.emit(Unit)
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to leave group: ${e::class.java.simpleName}")
+            Result.failure(e)
+        }
+    }
+
     suspend fun pollIncomingMessages(seedOnly: Boolean = false): Result<Int> =
         pollIncomingMessagesAndCollect(seedOnly).map { it.newMessages.size }
 
@@ -755,7 +1056,12 @@ class ConversationRepository(
                 val isFromMe = localInboxId.isNotBlank() && latest.senderInboxId.equals(localInboxId, ignoreCase = true)
                 val prev = nextMap[conv.id]
                 if (prev == null || ts >= prev.timestampMs) {
-                    nextMap[conv.id] = ConversationPreview(text = text, timestampMs = ts, isFromMe = isFromMe)
+                    nextMap[conv.id] = ConversationPreview(
+                        text = text,
+                        timestampMs = ts,
+                        isFromMe = isFromMe,
+                        senderInboxId = latest.senderInboxId
+                    )
                 }
             }
         }
@@ -774,7 +1080,14 @@ class ConversationRepository(
             if (existing != null && ts < existing.timestampMs) {
                 current
             } else {
-                current + (convId to ConversationPreview(text = text, timestampMs = ts, isFromMe = isFromMe))
+                current + (
+                    convId to ConversationPreview(
+                        text = text,
+                        timestampMs = ts,
+                        isFromMe = isFromMe,
+                        senderInboxId = msg.senderInboxId
+                    )
+                )
             }
         }
     }

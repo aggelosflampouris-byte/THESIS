@@ -16,6 +16,8 @@ import androidx.lifecycle.viewModelScope
 import com.example.thesis.identity.NicknamePolicy
 import com.example.thesis.identity.NicknameSnapshot
 import com.example.thesis.identity.ThesisSigner
+import com.example.thesis.repository.GroupDetailsSnapshot
+import com.example.thesis.repository.GroupManagementPolicy
 import com.example.thesis.repository.ReadReceiptPolicy
 import com.example.thesis.repository.isDisplayableUserMessage
 import java.util.concurrent.ConcurrentHashMap
@@ -54,6 +56,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.UUID
 import org.xmtp.android.library.Conversation
+import org.xmtp.android.library.Group
 import com.example.thesis.xmtp.cachedGroupName
 import com.example.thesis.security.KeystoreResult
 import com.example.thesis.transfer.DeviceTransferClient
@@ -148,6 +151,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private var revokeOldAfterImport: Boolean = true
 
     private var messagesJob: Job? = null
+    private var groupDetailsJob: Job? = null
+
+    private val _activeGroupDetails = MutableStateFlow<GroupDetailsSnapshot?>(null)
+    val activeGroupDetails: StateFlow<GroupDetailsSnapshot?> = _activeGroupDetails.asStateFlow()
+
+    private val _isUpdatingGroup = MutableStateFlow(false)
+    val isUpdatingGroup: StateFlow<Boolean> = _isUpdatingGroup.asStateFlow()
 
     private val _isInitializing = MutableStateFlow(false)
     val isInitializing: StateFlow<Boolean> = _isInitializing.asStateFlow()
@@ -713,10 +723,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _selectedConversation.value = conversation
         sessionContainer.setActiveConversationId(conversation?.id)
         messagesJob?.cancel()
+        groupDetailsJob?.cancel()
+        _activeGroupDetails.value = null
         _messages.value = emptyList()
 
         if (conversation != null) {
             announceNicknameIfNeeded(conversation)
+            if (conversation is Conversation.Group && !isLoopbackConversation(conversation)) {
+                refreshActiveGroupDetails(conversation.group)
+            }
             messagesJob = viewModelScope.launch {
                 val currentInboxId = (engine.state.value as? XmtpEngineState.Ready)?.client?.inboxId
                 repository.observeMessages(conversation).collectLatest { msgList ->
@@ -745,7 +760,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun isLoopbackConversation(conversation: Conversation): Boolean =
-        conversation is Conversation.Group && conversation.group.cachedGroupName() == "MLS Research Loopback"
+        conversation is Conversation.Group && GroupManagementPolicy.isLoopbackGroupName(conversation.group.cachedGroupName())
 
     private fun maybeSendReadReceipt(conversation: Conversation, messages: List<DecodedMessage>) {
         val localInboxId = (engine.state.value as? XmtpEngineState.Ready)?.client?.inboxId ?: return
@@ -839,6 +854,133 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } finally {
                 _isCreatingConversation.value = false
+            }
+        }
+    }
+
+    fun startNewGroup(groupName: String, memberIdentifiers: List<String>) {
+        if (_isCreatingConversation.value || _isShredding.value || _isBenchmarking.value) return
+        _isCreatingConversation.value = true
+        viewModelScope.launch {
+            try {
+                logAction("MLS", "Creating MLS Group Chat...")
+                ThesisTelemetry.measureSuspendOperation("4. MLS Group Creation") {
+                    repository.createGroupConversation(groupName, memberIdentifiers)
+                }
+                .onSuccess { conv ->
+                    _statusBanner.value = "Η ομάδα MLS δημιουργήθηκε."
+                    logAction("MLS", "MLS Group created. Topic: ${conv.topic.take(24)}...")
+                    selectConversation(conv)
+                }
+                .onFailure { err ->
+                    _statusBanner.value = err.message ?: "Αποτυχία δημιουργίας ομάδας."
+                    logAction("MLS", "Group creation failed: ${err.message}", isError = true)
+                }
+            } finally {
+                _isCreatingConversation.value = false
+            }
+        }
+    }
+
+    fun refreshActiveGroupDetails(targetGroup: Group? = (_selectedConversation.value as? Conversation.Group)?.group) {
+        val group = targetGroup ?: return
+        if (GroupManagementPolicy.isLoopbackGroupName(group.cachedGroupName())) return
+        groupDetailsJob?.cancel()
+        groupDetailsJob = viewModelScope.launch {
+            repository.loadGroupDetails(group)
+                .onSuccess { snapshot ->
+                    val currentGroupId = (_selectedConversation.value as? Conversation.Group)?.group?.id
+                    if (currentGroupId == group.id) {
+                        _activeGroupDetails.value = snapshot
+                    }
+                }
+                .onFailure { err ->
+                    logAction("MLS", "Failed to load group details: ${err.message}", isError = true)
+                }
+        }
+    }
+
+    private fun runActiveGroupMutation(
+        logSuccessPrefix: String,
+        successBanner: String,
+        failureLogPrefix: String,
+        action: suspend (Group) -> Result<GroupDetailsSnapshot>
+    ) {
+        if (_isUpdatingGroup.value || _isShredding.value) return
+        val group = (_selectedConversation.value as? Conversation.Group)?.group ?: return
+        if (GroupManagementPolicy.isLoopbackGroupName(group.cachedGroupName())) return
+        _isUpdatingGroup.value = true
+        viewModelScope.launch {
+            try {
+                action(group)
+                    .onSuccess { snapshot ->
+                        val currentGroupId = (_selectedConversation.value as? Conversation.Group)?.group?.id
+                        if (currentGroupId == group.id) {
+                            _activeGroupDetails.value = snapshot
+                        }
+                        _statusBanner.value = successBanner
+                        logAction("MLS", "$logSuccessPrefix (${snapshot.members.size} members)")
+                    }
+                    .onFailure { err ->
+                        _statusBanner.value = err.message ?: "Αποτυχία ενημέρωσης ομάδας."
+                        logAction("MLS", "$failureLogPrefix: ${err.message}", isError = true)
+                    }
+            } finally {
+                _isUpdatingGroup.value = false
+            }
+        }
+    }
+
+    fun addMemberToActiveGroup(peerIdentifier: String) {
+        runActiveGroupMutation(
+            logSuccessPrefix = "Added member to MLS group",
+            successBanner = "Το μέλος προστέθηκε στην ομάδα.",
+            failureLogPrefix = "Add group member failed"
+        ) { group ->
+            repository.addGroupMember(group, peerIdentifier)
+        }
+    }
+
+    fun removeMemberFromActiveGroup(targetInboxId: String) {
+        runActiveGroupMutation(
+            logSuccessPrefix = "Removed member from MLS group",
+            successBanner = "Το μέλος αφαιρέθηκε από την ομάδα.",
+            failureLogPrefix = "Remove group member failed"
+        ) { group ->
+            repository.removeGroupMember(group, targetInboxId)
+        }
+    }
+
+    fun renameActiveGroup(newName: String) {
+        runActiveGroupMutation(
+            logSuccessPrefix = "Renamed MLS group",
+            successBanner = "Το όνομα της ομάδας ενημερώθηκε.",
+            failureLogPrefix = "Rename group failed"
+        ) { group ->
+            repository.updateGroupName(group, newName)
+        }
+    }
+
+    fun leaveActiveGroup() {
+        if (_isUpdatingGroup.value || _isShredding.value) return
+        val group = (_selectedConversation.value as? Conversation.Group)?.group ?: return
+        if (GroupManagementPolicy.isLoopbackGroupName(group.cachedGroupName())) return
+        _isUpdatingGroup.value = true
+        viewModelScope.launch {
+            try {
+                repository.leaveGroup(group)
+                    .onSuccess {
+                        _activeGroupDetails.value = null
+                        selectConversation(null)
+                        _statusBanner.value = "Αποχωρήσατε από την ομάδα."
+                        logAction("MLS", "Left MLS group [conv=${group.id.take(12)}...]")
+                    }
+                    .onFailure { err ->
+                        _statusBanner.value = err.message ?: "Αποτυχία αποχώρησης από την ομάδα."
+                        logAction("MLS", "Leave group failed: ${err.message}", isError = true)
+                    }
+            } finally {
+                _isUpdatingGroup.value = false
             }
         }
     }
@@ -1148,6 +1290,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         sessionContainer.voiceNoteRecorder.cancel()
         sessionContainer.voiceNotePlayer.stop()
         messagesJob?.cancel()
+        groupDetailsJob?.cancel()
+        _activeGroupDetails.value = null
         _selectedConversation.value = null
         _messages.value = emptyList()
         _conversations.value = emptyList()

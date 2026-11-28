@@ -36,6 +36,7 @@ import com.example.thesis.R
 import com.example.thesis.identity.NicknamePolicy
 import com.example.thesis.identity.NicknameSnapshot
 import com.example.thesis.repository.ConversationPreview
+import com.example.thesis.repository.GroupManagementPolicy
 import com.example.thesis.ui.util.ChatFormatting
 import com.example.thesis.xmtp.cachedGroupName
 import org.xmtp.android.library.Conversation
@@ -55,7 +56,8 @@ internal fun InboxDashboardScreen(
     val filteredEntries = remember(conversations, previews, nicknameSnapshot, trimmedQuery) {
         conversations.mapIndexed { idx, conv ->
             val isDm = conv is Conversation.Dm
-            val isLoopback = conv is Conversation.Group && conv.group.cachedGroupName() == "MLS Research Loopback"
+            val isLoopback = conv is Conversation.Group &&
+                GroupManagementPolicy.isLoopbackGroupName(conv.group.cachedGroupName())
             val contactKey = if (isDm) conv.dm.peerInboxId else conv.id
             val fallbackLabel = when {
                 isDm -> {
@@ -146,15 +148,18 @@ internal fun InboxDashboardScreen(
                 contentPadding = PaddingValues(top = 4.dp, bottom = 88.dp)
             ) {
                 itemsIndexed(filteredEntries, key = { _, item -> item.first.id }) { index, (conv, title, _) ->
-                    val isLoopback = conv is Conversation.Group && conv.group.cachedGroupName() == "MLS Research Loopback"
+                    val isLoopback = conv is Conversation.Group &&
+                        GroupManagementPolicy.isLoopbackGroupName(conv.group.cachedGroupName())
                     ConversationListRow(
                         title = title,
                         isDm = conv is Conversation.Dm,
                         isLoopback = isLoopback,
                         preview = previews[conv.id],
                         unreadCount = unreadCounts[conv.id] ?: 0,
+                        nicknameSnapshot = nicknameSnapshot,
                         onClick = { onSelectConversation(conv) },
-                        onLongClick = if (!isLoopback) {
+                        // Reservamos el alias local por pulsacion larga solo para contactos 1 a 1.
+                        onLongClick = if (conv is Conversation.Dm) {
                             { onEditContactNickname(conv) }
                         } else null
                     )
@@ -179,6 +184,7 @@ private fun ConversationListRow(
     isLoopback: Boolean,
     preview: ConversationPreview?,
     unreadCount: Int,
+    nicknameSnapshot: NicknameSnapshot,
     onClick: () -> Unit,
     onLongClick: (() -> Unit)?,
     modifier: Modifier = Modifier
@@ -191,6 +197,8 @@ private fun ConversationListRow(
     }
     val subtitleText = when {
         preview != null && preview.isFromMe -> "Εσείς: ${preview.text}"
+        preview != null && !isDm && !isLoopback && preview.senderInboxId.isNotBlank() ->
+            "${GroupManagementPolicy.resolveSenderDisplayLabel(preview.senderInboxId, nicknameSnapshot)}: ${preview.text}"
         preview != null -> preview.text
         isLoopback -> "Τοπική συνεδρία δοκιμής"
         isDm -> "Κρυπτογραφημένη συνομιλία"
@@ -207,6 +215,11 @@ private fun ConversationListRow(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        val avatarContentColor = if (unreadCount > 0) {
+            MaterialTheme.colorScheme.onPrimaryContainer
+        } else {
+            MaterialTheme.colorScheme.onSurfaceVariant
+        }
         Surface(
             shape = CircleShape,
             color = if (unreadCount > 0) {
@@ -217,15 +230,20 @@ private fun ConversationListRow(
             modifier = Modifier.size(46.dp)
         ) {
             Box(contentAlignment = Alignment.Center) {
-                Text(
-                    text = initials,
-                    style = MaterialTheme.typography.titleSmall,
-                    color = if (unreadCount > 0) {
-                        MaterialTheme.colorScheme.onPrimaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    }
-                )
+                if (!isDm && !isLoopback) {
+                    Icon(
+                        painter = painterResource(id = R.drawable.ic_group),
+                        contentDescription = null,
+                        modifier = Modifier.size(22.dp),
+                        tint = avatarContentColor
+                    )
+                } else {
+                    Text(
+                        text = initials,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = avatarContentColor
+                    )
+                }
             }
         }
 
