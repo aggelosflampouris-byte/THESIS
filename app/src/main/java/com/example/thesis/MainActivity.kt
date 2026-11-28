@@ -29,7 +29,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -54,8 +53,10 @@ import org.xmtp.android.library.Conversation
 import com.example.thesis.ui.dialogs.IdentityDetailsDialog
 import com.example.thesis.ui.dialogs.MLSProtocolInspectorDialog
 import com.example.thesis.ui.dialogs.MediaAttachmentViewerDialog
+import com.example.thesis.ui.dialogs.MediaSendModeDialog
 import com.example.thesis.ui.dialogs.NewConversationDialog
 import com.example.thesis.media.MediaAttachmentProcessor
+import com.example.thesis.media.MediaViewLimitPolicy
 import com.example.thesis.xmtp.MediaAttachment
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -848,6 +849,11 @@ private data class ViewingMediaState(
     val viewNumber: Int? = null
 )
 
+private data class PendingImageSend(
+    val uri: Uri,
+    val tempCaptureFile: File? = null
+)
+
 @Composable
 private fun MessagingChatScreenHost(
     viewModel: ChatViewModel,
@@ -876,7 +882,7 @@ private fun MessagingChatScreenHost(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var viewingMedia by remember { mutableStateOf<ViewingMediaState?>(null) }
-    var selectedMediaMaxViews by rememberSaveable(activeConv.id) { mutableIntStateOf(0) }
+    var pendingImageSend by remember { mutableStateOf<PendingImageSend?>(null) }
     var pendingSaveAttachment by remember { mutableStateOf<MediaAttachment?>(null) }
     // Conservamos la ruta temporal entre recreaciones de Activity mientras la app de camara esta abierta.
     var pendingCameraCapturePath by rememberSaveable { mutableStateOf<String?>(null) }
@@ -885,11 +891,7 @@ private fun MessagingChatScreenHost(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri != null) {
-            val caption = draft.trim()
-            val maxViews = selectedMediaMaxViews
-            if (caption.isNotEmpty()) onDraftChange("")
-            if (maxViews > 0) selectedMediaMaxViews = 0
-            viewModel.sendMediaFromUri(uri, caption, maxViews = maxViews)
+            pendingImageSend = PendingImageSend(uri = uri)
         }
     }
 
@@ -897,11 +899,17 @@ private fun MessagingChatScreenHost(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
         if (uri != null) {
-            val caption = draft.trim()
-            val maxViews = selectedMediaMaxViews
-            if (caption.isNotEmpty()) onDraftChange("")
-            if (maxViews > 0) selectedMediaMaxViews = 0
-            viewModel.sendMediaFromUri(uri, caption, maxViews = maxViews)
+            if (MediaAttachmentProcessor.isImageUri(context, uri)) {
+                pendingImageSend = PendingImageSend(uri = uri)
+            } else {
+                val caption = draft.trim()
+                if (caption.isNotEmpty()) onDraftChange("")
+                viewModel.sendMediaFromUri(
+                    uri = uri,
+                    caption = caption,
+                    maxViews = MediaViewLimitPolicy.UNLIMITED_VIEWS
+                )
+            }
         }
     }
 
@@ -916,11 +924,7 @@ private fun MessagingChatScreenHost(
                 "${context.packageName}.fileprovider",
                 file
             )
-            val caption = draft.trim()
-            val maxViews = selectedMediaMaxViews
-            if (caption.isNotEmpty()) onDraftChange("")
-            if (maxViews > 0) selectedMediaMaxViews = 0
-            viewModel.sendMediaFromUri(uri, caption, tempCaptureFile = file, maxViews = maxViews)
+            pendingImageSend = PendingImageSend(uri = uri, tempCaptureFile = file)
         } else {
             file?.delete()
         }
@@ -994,7 +998,6 @@ private fun MessagingChatScreenHost(
         isShredding = isShredding,
         isUploadingMedia = isUploadingMedia,
         mediaViewCounts = mediaViewCounts,
-        selectedMediaMaxViews = selectedMediaMaxViews,
         voiceRecordingState = voiceRecordingState,
         voicePlaybackState = voicePlaybackState,
         onSync = { viewModel.syncConversations() },
@@ -1006,7 +1009,6 @@ private fun MessagingChatScreenHost(
         onStopAndSendVoiceRecording = { viewModel.stopAndSendVoiceRecording() },
         onToggleVoicePlayback = { msgId, note -> viewModel.toggleVoicePlayback(msgId, note) },
         onSeekVoicePlayback = { msgId, fraction -> viewModel.seekVoicePlayback(msgId, fraction) },
-        onSelectMediaMaxViews = { selectedMediaMaxViews = it },
         onPickPhoto = {
             photoPickerLauncher.launch(
                 PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
@@ -1038,6 +1040,37 @@ private fun MessagingChatScreenHost(
         onSendMessage = onSendMessage,
         onRetryMessage = { body -> viewModel.sendMessage(body) }
     )
+
+    pendingImageSend?.let { pending ->
+        MediaSendModeDialog(
+            onSendPermanent = {
+                val caption = draft.trim()
+                if (caption.isNotEmpty()) onDraftChange("")
+                pendingImageSend = null
+                viewModel.sendMediaFromUri(
+                    uri = pending.uri,
+                    caption = caption,
+                    tempCaptureFile = pending.tempCaptureFile,
+                    maxViews = MediaViewLimitPolicy.UNLIMITED_VIEWS
+                )
+            },
+            onSendTemporary = {
+                val caption = draft.trim()
+                if (caption.isNotEmpty()) onDraftChange("")
+                pendingImageSend = null
+                viewModel.sendMediaFromUri(
+                    uri = pending.uri,
+                    caption = caption,
+                    tempCaptureFile = pending.tempCaptureFile,
+                    maxViews = MediaViewLimitPolicy.DEFAULT_TEMPORARY_VIEWS
+                )
+            },
+            onDismiss = {
+                pending.tempCaptureFile?.delete()
+                pendingImageSend = null
+            }
+        )
+    }
 
     viewingMedia?.let { currentMedia ->
         MediaAttachmentViewerDialog(

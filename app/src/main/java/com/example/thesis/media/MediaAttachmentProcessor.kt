@@ -55,6 +55,14 @@ internal object MediaAttachmentProcessor {
         }
     }
 
+    fun isImageUri(context: Context, uri: Uri): Boolean {
+        return runCatching {
+            val (rawDisplayName, _) = queryDisplayMetadata(context, uri)
+            val resolvedMime = resolveMimeType(context, uri, rawDisplayName)
+            MediaAttachmentCodec.isImageMimeType(resolvedMime)
+        }.getOrDefault(false)
+    }
+
     fun prepareFromUri(
         context: Context,
         uri: Uri,

@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.update
 // Politica centralizada para medios temporales estilo vista limitada (ej. 1x, 2x, 3x).
 object MediaViewLimitPolicy {
     const val UNLIMITED_VIEWS: Int = 0
+    const val DEFAULT_TEMPORARY_VIEWS: Int = 2
     const val MAX_VIEW_LIMIT: Int = 10
     val PRESET_VIEW_LIMITS: List<Int> = listOf(0, 1, 2, 3)
 

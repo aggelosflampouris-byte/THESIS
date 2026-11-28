@@ -11,6 +11,7 @@ class MediaViewLimitTest {
     @Test
     fun test_policyCalculationsAndLabels() {
         assertEquals(0, MediaViewLimitPolicy.sanitizeMaxViews(-5))
+        assertEquals(2, MediaViewLimitPolicy.DEFAULT_TEMPORARY_VIEWS)
         assertEquals(2, MediaViewLimitPolicy.sanitizeMaxViews(2))
         assertEquals(MediaViewLimitPolicy.MAX_VIEW_LIMIT, MediaViewLimitPolicy.sanitizeMaxViews(99))
 

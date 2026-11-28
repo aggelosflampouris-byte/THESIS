@@ -114,7 +114,6 @@ internal fun MessagingChatScreen(
     isShredding: Boolean = false,
     isUploadingMedia: Boolean = false,
     mediaViewCounts: Map<String, Int> = emptyMap(),
-    selectedMediaMaxViews: Int = MediaViewLimitPolicy.UNLIMITED_VIEWS,
     voiceRecordingState: VoiceRecordingState = VoiceRecordingState(),
     voicePlaybackState: VoicePlaybackState = VoicePlaybackState(),
     onSync: () -> Unit = {},
@@ -124,7 +123,6 @@ internal fun MessagingChatScreen(
     onStopAndSendVoiceRecording: () -> Unit = {},
     onToggleVoicePlayback: (String, VoiceNote) -> Unit = { _, _ -> },
     onSeekVoicePlayback: (String, Float) -> Unit = { _, _ -> },
-    onSelectMediaMaxViews: (Int) -> Unit = {},
     onPickPhoto: () -> Unit = {},
     onTakePhoto: () -> Unit = {},
     onPickDocument: () -> Unit = {},
@@ -280,160 +278,97 @@ internal fun MessagingChatScreen(
                         onSend = onStopAndSendVoiceRecording
                     )
                 } else {
-                    val mediaIconTint = if (selectedMediaMaxViews > 0) {
-                        MaterialTheme.colorScheme.tertiary
-                    } else {
-                        MaterialTheme.colorScheme.primary
-                    }
-                    Column(modifier = Modifier.fillMaxWidth()) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 10.dp, vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 6.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.Bottom
+                    ) {
+                        IconButton(
+                            onClick = onPickPhoto,
+                            enabled = !isShredding && !isUploadingMedia,
+                            modifier = Modifier.size(36.dp)
                         ) {
-                            Text(
-                                text = "Προσωρινό:",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (selectedMediaMaxViews > 0) {
-                                    MaterialTheme.colorScheme.tertiary
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                },
-                                fontWeight = FontWeight.SemiBold,
-                                fontSize = 11.sp
-                            )
-                            MediaViewLimitPolicy.PRESET_VIEW_LIMITS.forEach { preset ->
-                                val selected = selectedMediaMaxViews == preset
-                                val chipBg = when {
-                                    selected && preset > 0 -> MaterialTheme.colorScheme.tertiaryContainer
-                                    selected -> MaterialTheme.colorScheme.primaryContainer
-                                    else -> MaterialTheme.colorScheme.surface
-                                }
-                                val chipFg = when {
-                                    selected && preset > 0 -> MaterialTheme.colorScheme.onTertiaryContainer
-                                    selected -> MaterialTheme.colorScheme.onPrimaryContainer
-                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
-                                }
-                                val chipBorder = when {
-                                    selected && preset > 0 -> MaterialTheme.colorScheme.tertiary
-                                    selected -> MaterialTheme.colorScheme.primary
-                                    else -> MaterialTheme.colorScheme.outlineVariant
-                                }
-                                Surface(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(14.dp))
-                                        .clickable(enabled = !isShredding && !isUploadingMedia) {
-                                            onSelectMediaMaxViews(preset)
-                                        },
-                                    shape = RoundedCornerShape(14.dp),
-                                    color = chipBg,
-                                    border = BorderStroke(1.dp, chipBorder)
-                                ) {
-                                    Text(
-                                        text = MediaViewLimitPolicy.formatPresetLabel(preset),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = chipFg,
-                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                                        fontSize = 11.sp,
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                    )
-                                }
+                            if (isUploadingMedia) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            } else {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_photo_library),
+                                    contentDescription = "Φωτογραφία από συλλογή",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(22.dp)
+                                )
                             }
                         }
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 6.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.Bottom
+                        IconButton(
+                            onClick = onTakePhoto,
+                            enabled = !isShredding && !isUploadingMedia,
+                            modifier = Modifier.size(36.dp)
                         ) {
-                            IconButton(
-                                onClick = onPickPhoto,
-                                enabled = !isShredding && !isUploadingMedia,
-                                modifier = Modifier.size(36.dp)
-                            ) {
-                                if (isUploadingMedia) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(18.dp),
-                                        strokeWidth = 2.dp,
-                                        color = mediaIconTint
-                                    )
-                                } else {
-                                    Icon(
-                                        painter = painterResource(R.drawable.ic_photo_library),
-                                        contentDescription = "Φωτογραφία από συλλογή",
-                                        tint = mediaIconTint,
-                                        modifier = Modifier.size(22.dp)
-                                    )
-                                }
-                            }
-                            IconButton(
-                                onClick = onTakePhoto,
-                                enabled = !isShredding && !isUploadingMedia,
-                                modifier = Modifier.size(36.dp)
-                            ) {
-                                Icon(
-                                    painter = painterResource(R.drawable.ic_photo_camera),
-                                    contentDescription = "Κάμερα",
-                                    tint = mediaIconTint,
-                                    modifier = Modifier.size(22.dp)
-                                )
-                            }
-                            IconButton(
-                                onClick = onPickDocument,
-                                enabled = !isShredding && !isUploadingMedia,
-                                modifier = Modifier.size(36.dp)
-                            ) {
-                                Icon(
-                                    painter = painterResource(R.drawable.ic_attach_file),
-                                    contentDescription = "Επισύναψη αρχείου",
-                                    tint = mediaIconTint,
-                                    modifier = Modifier.size(22.dp)
-                                )
-                            }
-                            Spacer(modifier = Modifier.width(4.dp))
-                            OutlinedTextField(
-                                value = draft,
-                                onValueChange = onDraftChange,
-                                placeholder = { Text("Γράψτε μήνυμα...", fontSize = 13.sp) },
-                                modifier = Modifier.weight(1f),
-                                maxLines = 4,
-                                keyboardOptions = KeyboardOptions(
-                                    keyboardType = KeyboardType.Text,
-                                    imeAction = ImeAction.Default
-                                ),
-                                // Mantenemos el campo habilitado durante el envio para no perder el foco ni cerrar el teclado.
-                                enabled = !isShredding,
-                                shape = RoundedCornerShape(20.dp)
+                            Icon(
+                                painter = painterResource(R.drawable.ic_photo_camera),
+                                contentDescription = "Κάμερα",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp)
                             )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            val hasDraftText = draft.isNotBlank()
-                            IconButton(
-                                onClick = {
-                                    if (hasDraftText) {
-                                        val content = draft.trim()
-                                        if (content.isNotEmpty()) onSendMessage(content)
-                                    } else {
-                                        onStartVoiceRecording()
-                                    }
-                                },
-                                enabled = !isShredding,
-                                modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-                            ) {
+                        }
+                        IconButton(
+                            onClick = onPickDocument,
+                            enabled = !isShredding && !isUploadingMedia,
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_attach_file),
+                                contentDescription = "Επισύναψη αρχείου",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(4.dp))
+                        OutlinedTextField(
+                            value = draft,
+                            onValueChange = onDraftChange,
+                            placeholder = { Text("Γράψτε μήνυμα...", fontSize = 13.sp) },
+                            modifier = Modifier.weight(1f),
+                            maxLines = 4,
+                            keyboardOptions = KeyboardOptions(
+                                keyboardType = KeyboardType.Text,
+                                imeAction = ImeAction.Default
+                            ),
+                            // Mantenemos el campo habilitado durante el envio para no perder el foco ni cerrar el teclado.
+                            enabled = !isShredding,
+                            shape = RoundedCornerShape(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        val hasDraftText = draft.isNotBlank()
+                        IconButton(
+                            onClick = {
                                 if (hasDraftText) {
-                                    Icon(
-                                        imageVector = Icons.AutoMirrored.Filled.Send,
-                                        contentDescription = "Αποστολή",
-                                        tint = MaterialTheme.colorScheme.primary
-                                    )
+                                    val content = draft.trim()
+                                    if (content.isNotEmpty()) onSendMessage(content)
                                 } else {
-                                    Icon(
-                                        painter = painterResource(R.drawable.ic_mic_on),
-                                        contentDescription = "Φωνητικό μήνυμα",
-                                        tint = MaterialTheme.colorScheme.primary
-                                    )
+                                    onStartVoiceRecording()
                                 }
+                            },
+                            enabled = !isShredding,
+                            modifier = Modifier.defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                        ) {
+                            if (hasDraftText) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.Send,
+                                    contentDescription = "Αποστολή",
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            } else {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_mic_on),
+                                    contentDescription = "Φωνητικό μήνυμα",
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
                             }
                         }
                     }
@@ -840,7 +775,7 @@ private fun MessagingMessageBubble(
                         val tempSubtitle = if (isExpired) {
                             MediaViewLimitPolicy.formatExpiredSubtitle(mediaAttachment.maxViews)
                         } else {
-                            "${MediaViewLimitPolicy.formatRemainingSubtitle(mediaAttachment.maxViews, openedViewCount)} • $sizeLabel • MLS E2EE"
+                            "Πατήστε για προβολή • ${MediaViewLimitPolicy.formatRemainingSubtitle(mediaAttachment.maxViews, openedViewCount)} • $sizeLabel"
                         }
                         val badgeColor = if (isExpired) {
                             contentColor.copy(alpha = 0.25f)
